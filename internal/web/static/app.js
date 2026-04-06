@@ -1,6 +1,7 @@
 import Graph from 'https://esm.sh/graphology@0.25.4';
 import Sigma from 'https://esm.sh/sigma@3.0.2';
 import forceAtlas2 from 'https://esm.sh/graphology-layout-forceatlas2@0.10.1';
+import noverlap from 'https://esm.sh/graphology-layout-noverlap@0.4.2';
 
 // -- Configuration --
 const KIND_STYLES = {
@@ -33,8 +34,17 @@ let renderer;     // sigma renderer
 let fa2Handle;    // layout animation handle
 let activeKinds = new Set(Object.keys(KIND_STYLES));
 let searchQuery = '';
+let hideTests = false;
 let highlightedNode = null;
 let highlightedNeighbors = null;
+
+function isTestNode(attrs) {
+  const fp = attrs.file_path || '';
+  return fp.includes('_test.go') ||
+    fp.includes('_test.ts') || fp.includes('_test.tsx') ||
+    fp.includes('.test.') || fp.includes('.spec.') ||
+    fp.includes('__tests__/') || fp.includes('/test/');
+}
 
 // -- Graph helpers --
 
@@ -97,14 +107,95 @@ function populateGraph(graph, nodes, edges) {
 
 // -- ForceAtlas2 layout --
 
+function prePositionByDegree(graph) {
+  // 1. Find hubs (top degree nodes) and spread them evenly in a ring
+  const degrees = [];
+  graph.forEachNode((id) => {
+    degrees.push({ id, deg: graph.degree(id) });
+  });
+  degrees.sort((a, b) => b.deg - a.deg);
+
+  const maxDeg = degrees[0]?.deg || 1;
+  // Top ~5% or at least top 10 nodes are "hubs"
+  const hubCount = Math.max(10, Math.floor(degrees.length * 0.05));
+  const hubs = new Set(degrees.slice(0, hubCount).map(d => d.id));
+
+  // Place hubs evenly spaced in a wide ring so they don't clump
+  const hubRadius = 150;
+  let hubIdx = 0;
+  const hubPositions = new Map();
+  for (const { id } of degrees.slice(0, hubCount)) {
+    const angle = (hubIdx / hubCount) * 2 * Math.PI;
+    const x = Math.cos(angle) * hubRadius;
+    const y = Math.sin(angle) * hubRadius;
+    graph.setNodeAttribute(id, 'x', x);
+    graph.setNodeAttribute(id, 'y', y);
+    hubPositions.set(id, { x, y });
+    hubIdx++;
+  }
+
+  // 2. Place non-hub nodes near their highest-degree neighbor (cluster seeding)
+  graph.forEachNode((id) => {
+    if (hubs.has(id)) return;
+
+    // Find the neighbor with the highest degree
+    let bestNeighbor = null;
+    let bestDeg = -1;
+    graph.forEachNeighbor(id, (neighbor) => {
+      const nd = graph.degree(neighbor);
+      if (nd > bestDeg) {
+        bestDeg = nd;
+        bestNeighbor = neighbor;
+      }
+    });
+
+    let cx, cy;
+    if (bestNeighbor && hubPositions.has(bestNeighbor)) {
+      // Place near the hub neighbor
+      const hp = hubPositions.get(bestNeighbor);
+      cx = hp.x;
+      cy = hp.y;
+    } else if (bestNeighbor) {
+      // Place near the best neighbor (which was already placed near a hub)
+      cx = graph.getNodeAttribute(bestNeighbor, 'x') || 0;
+      cy = graph.getNodeAttribute(bestNeighbor, 'y') || 0;
+    } else {
+      // Orphan: place far out
+      const angle = Math.random() * 2 * Math.PI;
+      cx = Math.cos(angle) * 300;
+      cy = Math.sin(angle) * 300;
+    }
+
+    // Offset from cluster center: low-degree nodes further out
+    const d = graph.degree(id);
+    const spread = 40 + (1 - d / maxDeg) * 80;
+    const angle = Math.random() * 2 * Math.PI;
+    graph.setNodeAttribute(id, 'x', cx + Math.cos(angle) * spread * Math.random());
+    graph.setNodeAttribute(id, 'y', cy + Math.sin(angle) * spread * Math.random());
+  });
+}
+
 function startLayout() {
   stopLayout();
 
+  prePositionByDegree(sigmaGraph);
+
   const settings = forceAtlas2.inferSettings(sigmaGraph);
-  settings.gravity = 0.05;
-  settings.scalingRatio = 4;
+  // No strongGravityMode — it creates uniform radial pull (circle).
+  // Instead rely on linLogMode + low gravity to let clusters form organically.
+  settings.strongGravityMode = false;
+  settings.gravity = 0.0005;
+  settings.scalingRatio = 20;
   settings.barnesHutOptimize = sigmaGraph.order > 500;
-  settings.slowDown = 5;
+  settings.barnesHutTheta = 0.5;
+
+  settings.adjustSizes = true;
+  settings.slowDown = 1;
+
+  settings.outboundAttractionDistribution = true;
+  settings.edgeWeightInfluence = 15;
+  // linLogMode: tighter clusters around hubs, more separation between clusters
+  settings.linLogMode = true;
 
   const state = { running: true, settings };
 
@@ -114,7 +205,17 @@ function startLayout() {
     state.frame = requestAnimationFrame(iterate);
   };
   state.frame = requestAnimationFrame(iterate);
-  state.timer = setTimeout(() => stopLayout(), 4000);
+  // After FA2 converges, run noverlap to remove remaining overlaps
+  state.timer = setTimeout(() => {
+    stopLayout();
+    noverlap.assign(sigmaGraph, {
+      maxIterations: 10000,
+      ratio: 2,
+      margin: 10,
+      speed: 5,
+    });
+    renderer.refresh();
+  }, 60000);
 
   fa2Handle = state;
 }
@@ -182,6 +283,11 @@ function reduceNode(node, attrs) {
   const res = { ...attrs };
 
   if (!activeKinds.has(attrs.kind)) {
+    res.hidden = true;
+    return res;
+  }
+
+  if (hideTests && isTestNode(attrs)) {
     res.hidden = true;
     return res;
   }
@@ -362,14 +468,15 @@ async function init() {
     renderer.refresh();
   });
 
+  document.getElementById('hide-tests').addEventListener('change', (e) => {
+    hideTests = e.target.checked;
+    renderer.refresh();
+  });
+
   document.getElementById('btn-fit').addEventListener('click', () => {
     renderer.getCamera().animatedReset({ duration: 300 });
   });
   document.getElementById('btn-relayout').addEventListener('click', () => {
-    sigmaGraph.forEachNode((id) => {
-      sigmaGraph.setNodeAttribute(id, 'x', Math.random() * 100);
-      sigmaGraph.setNodeAttribute(id, 'y', Math.random() * 100);
-    });
     startLayout();
   });
 
