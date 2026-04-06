@@ -160,9 +160,12 @@ func (s *Server) handleSearchSymbols(_ context.Context, req mcp.CallToolRequest)
 		return mcp.NewToolResultError("query is required"), nil
 	}
 	limit := req.GetInt("limit", 20)
-	nodes := s.engine.FindSymbols(q)
+
+	// Use fuzzy/substring search with relevance ranking
+	nodes := s.engine.SearchSymbols(q, limit+10) // fetch extra for total count
 
 	var results []map[string]any
+	total := len(nodes)
 	for i, n := range nodes {
 		if i >= limit {
 			break
@@ -171,8 +174,8 @@ func (s *Server) handleSearchSymbols(_ context.Context, req mcp.CallToolRequest)
 	}
 	return mcp.NewToolResultJSON(map[string]any{
 		"results":   results,
-		"total":     len(nodes),
-		"truncated": len(nodes) > limit,
+		"total":     total,
+		"truncated": total > limit,
 	})
 }
 

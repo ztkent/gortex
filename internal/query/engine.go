@@ -1,6 +1,7 @@
 package query
 
 import (
+	"sort"
 	"strings"
 
 	"github.com/zzet/gortex/internal/graph"
@@ -129,6 +130,71 @@ func (e *Engine) FindUsages(nodeID string) *SubGraph {
 // GetCluster returns the immediate neighbourhood within radius hops (bidirectional).
 func (e *Engine) GetCluster(nodeID string, opts QueryOptions) *SubGraph {
 	return e.bfs(nodeID, opts, true, nil) // nil = all edge kinds, bidirectional
+}
+
+// SearchSymbols performs fuzzy/substring search across all nodes.
+// Results are ranked by relevance: exact match > prefix > substring, shorter names first.
+func (e *Engine) SearchSymbols(query string, limit int) []*graph.Node {
+	if limit <= 0 {
+		limit = 20
+	}
+	lower := strings.ToLower(query)
+
+	// First try exact name match
+	exact := e.g.FindNodesByName(query)
+
+	type scored struct {
+		node  *graph.Node
+		score int // lower = better
+	}
+	var results []scored
+	seen := make(map[string]bool)
+
+	for _, n := range exact {
+		if n.Kind == graph.KindFile || n.Kind == graph.KindImport {
+			continue
+		}
+		seen[n.ID] = true
+		results = append(results, scored{n, 0}) // exact match = best
+	}
+
+	// Substring search across all nodes
+	allNodes := e.g.AllNodes()
+	for _, n := range allNodes {
+		if seen[n.ID] || n.Kind == graph.KindFile || n.Kind == graph.KindImport {
+			continue
+		}
+		nameLower := strings.ToLower(n.Name)
+		idLower := strings.ToLower(n.ID)
+
+		if strings.HasPrefix(nameLower, lower) {
+			results = append(results, scored{n, 1}) // prefix match
+		} else if strings.Contains(nameLower, lower) {
+			results = append(results, scored{n, 2}) // substring of name
+		} else if strings.Contains(idLower, lower) {
+			results = append(results, scored{n, 3}) // substring of ID
+		} else {
+			continue
+		}
+		seen[n.ID] = true
+	}
+
+	// Sort: by score, then by name length (shorter = more relevant)
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].score != results[j].score {
+			return results[i].score < results[j].score
+		}
+		return len(results[i].node.Name) < len(results[j].node.Name)
+	})
+
+	out := make([]*graph.Node, 0, limit)
+	for i, r := range results {
+		if i >= limit {
+			break
+		}
+		out = append(out, r.node)
+	}
+	return out
 }
 
 // Stats returns summary statistics for the graph.

@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -15,6 +18,8 @@ import (
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/parser/languages"
 	"github.com/zzet/gortex/internal/query"
+	"github.com/zzet/gortex/internal/web"
+	"github.com/zzet/gortex/internal/web/hub"
 )
 
 var (
@@ -93,23 +98,40 @@ func runServe(cmd *cobra.Command, args []string) error {
 		}
 		defer watcher.Stop()
 
-		// Log watch events to stderr.
-		go func() {
-			for ev := range watcher.Events() {
-				fmt.Fprintf(os.Stderr, "[gortex watch] %-10s %s  +%d nodes  +%d edges  -%d nodes  -%d edges  (%dms)\n",
-					ev.Kind, ev.FilePath, ev.NodesAdded, ev.EdgesAdded, ev.NodesRemoved, ev.EdgesRemoved, ev.DurationMs)
-			}
-		}()
-
 		fmt.Fprintf(os.Stderr, "[gortex] watch mode active\n")
+	}
+
+	// Create hub for fan-out of watcher events (also handles logging).
+	var eventHub *hub.Hub
+	if watcher != nil {
+		eventHub = hub.New()
+		go eventHub.Run(watcher.Events())
+		defer eventHub.Stop()
 	}
 
 	// Create and start MCP server.
 	eng := query.NewEngine(g)
 	gortexmcp.Version = version
-	srv := gortexmcp.NewServer(eng, idx, watcher, logger)
+	srv := gortexmcp.NewServer(eng, g, idx, watcher, logger)
 
+	// Run initial analysis (community detection + process discovery).
+	srv.RunAnalysis()
 	fmt.Fprintf(os.Stderr, "[gortex] MCP server ready (transport: %s)\n", serveTransport)
+
+	// Start web visualization server.
+	webSrv := web.NewServer(g, eng, eventHub, logger)
+	go func() {
+		webAddr := fmt.Sprintf(":%d", servePort)
+		fmt.Fprintf(os.Stderr, "[gortex] web UI at http://localhost:%d\n", servePort)
+		if err := webSrv.Start(webAddr); err != nil && err != http.ErrServerClosed {
+			fmt.Fprintf(os.Stderr, "[gortex] web server error: %v\n", err)
+		}
+	}()
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		webSrv.Shutdown(ctx)
+	}()
 
 	// Handle graceful shutdown.
 	sigCh := make(chan os.Signal, 1)

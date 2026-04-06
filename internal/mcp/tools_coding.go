@@ -40,10 +40,10 @@ func (s *Server) registerCodingTools() {
 
 	s.mcpServer.AddTool(
 		mcp.NewTool("explain_change_impact",
-			mcp.WithDescription("Given a list of symbols you plan to modify, returns a prioritised list of all affected files and symbols. Call before starting a refactor to plan the full scope of changes."),
+			mcp.WithDescription("Given a list of symbols you plan to modify, returns risk-tiered blast radius: d=1 will break, d=2 likely affected, d=3 needs testing. Includes affected processes and communities."),
 			mcp.WithString("symbol_ids", mcp.Required(), mcp.Description("Comma-separated list of symbol IDs to modify")),
 		),
-		s.handleExplainChangeImpact,
+		s.handleEnhancedChangeImpact,
 	)
 
 	s.mcpServer.AddTool(
@@ -228,75 +228,6 @@ func (s *Server) handleFindImportPath(_ context.Context, req mcp.CallToolRequest
 	})
 }
 
-type changeImpact struct {
-	DirectDependents []dependentEntry `json:"direct_dependents"`
-	TransitiveFiles  []string         `json:"transitive_files"`
-	TestFiles        []string         `json:"test_files"`
-	TotalAffected    int              `json:"total_affected_files"`
-}
-
-type dependentEntry struct {
-	File    string   `json:"file"`
-	Symbols []string `json:"symbols"`
-	Reason  string   `json:"reason"`
-}
-
-func (s *Server) handleExplainChangeImpact(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	idsStr, err := req.RequireString("symbol_ids")
-	if err != nil {
-		return mcp.NewToolResultError("symbol_ids is required"), nil
-	}
-
-	ids := strings.Split(idsStr, ",")
-	for i := range ids {
-		ids[i] = strings.TrimSpace(ids[i])
-	}
-
-	impact := changeImpact{}
-	fileSymMap := make(map[string][]string)
-	transitiveFiles := make(map[string]bool)
-	testFiles := make(map[string]bool)
-
-	for _, id := range ids {
-		sg := s.engine.GetDependents(id, query.QueryOptions{Depth: 2, Limit: 100, Detail: "brief"})
-		for _, n := range sg.Nodes {
-			if n.ID == id {
-				continue
-			}
-			if n.Kind == graph.KindFile {
-				transitiveFiles[n.FilePath] = true
-				continue
-			}
-			fileSymMap[n.FilePath] = append(fileSymMap[n.FilePath], n.Name)
-
-			if isTestFile(n.FilePath) {
-				testFiles[n.FilePath] = true
-			}
-		}
-	}
-
-	for file, syms := range fileSymMap {
-		if isTestFile(file) {
-			continue
-		}
-		impact.DirectDependents = append(impact.DirectDependents, dependentEntry{
-			File:    file,
-			Symbols: syms,
-			Reason:  "depends on modified symbols",
-		})
-	}
-
-	for f := range transitiveFiles {
-		impact.TransitiveFiles = append(impact.TransitiveFiles, f)
-	}
-	for f := range testFiles {
-		impact.TestFiles = append(impact.TestFiles, f)
-	}
-	impact.TotalAffected = len(fileSymMap) + len(transitiveFiles)
-
-	return mcp.NewToolResultJSON(impact)
-}
-
 func (s *Server) handleGetRecentChanges(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	if s.watcher == nil {
 		return mcp.NewToolResultError("watch mode is not active"), nil
@@ -337,13 +268,3 @@ func (s *Server) handleGetRecentChanges(_ context.Context, req mcp.CallToolReque
 	})
 }
 
-func isTestFile(path string) bool {
-	base := filepath.Base(path)
-	return strings.HasSuffix(base, "_test.go") ||
-		strings.HasPrefix(base, "test_") ||
-		strings.HasSuffix(base, ".test.ts") ||
-		strings.HasSuffix(base, ".test.js") ||
-		strings.HasSuffix(base, ".spec.ts") ||
-		strings.HasSuffix(base, ".spec.js") ||
-		strings.Contains(path, "__tests__/")
-}

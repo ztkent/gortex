@@ -14,9 +14,10 @@ const (
 )
 
 type Edge struct {
-	From     string   `json:"from"`
-	To       string   `json:"to"`
-	Kind     EdgeKind `json:"kind"`
-	FilePath string   `json:"file_path"`
-	Line     int      `json:"line"`
+	From       string   `json:"from"`
+	To         string   `json:"to"`
+	Kind       EdgeKind `json:"kind"`
+	FilePath   string   `json:"file_path"`
+	Line       int      `json:"line"`
+	Confidence float64  `json:"confidence,omitempty"`
 }

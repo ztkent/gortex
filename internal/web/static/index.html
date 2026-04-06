@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Gortex - Code Graph</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <h1>Gortex</h1>
+      <div class="stats">
+        Nodes: <span id="stat-nodes">-</span>
+        &nbsp;Edges: <span id="stat-edges">-</span>
+        &nbsp;Files: <span id="stat-files">-</span>
+      </div>
+      <div class="connection-status">
+        <div class="connection-dot" id="conn-dot"></div>
+        <span id="conn-label">connecting</span>
+      </div>
+    </header>
+
+    <aside class="sidebar">
+      <section>
+        <h3>Search</h3>
+        <input type="text" class="search-input" id="search" placeholder="Filter nodes...">
+      </section>
+
+      <section>
+        <h3>Node Kinds</h3>
+        <div class="kind-filters" id="kind-filters"></div>
+      </section>
+
+      <section>
+        <div class="layout-controls">
+          <button id="btn-fit">Fit</button>
+          <button id="btn-relayout">Re-layout</button>
+        </div>
+      </section>
+
+      <section>
+        <h3>Recent Changes</h3>
+        <ul class="recent-changes" id="recent-changes"></ul>
+      </section>
+    </aside>
+
+    <main class="canvas">
+      <div class="loading-overlay" id="loading">Loading graph...</div>
+      <div id="sigma-container"></div>
+    </main>
+
+    <footer class="bottom-bar">
+      <span id="node-detail">Click a node to inspect</span>
+      <div class="legend" id="legend"></div>
+    </footer>
+  </div>
+
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>
