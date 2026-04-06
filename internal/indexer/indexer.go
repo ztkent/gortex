@@ -169,6 +169,9 @@ func (idx *Indexer) Index(root string) (*IndexResult, error) {
 	// Resolve cross-file references.
 	idx.resolver.ResolveAll()
 
+	// Infer structural interface satisfaction.
+	idx.resolver.InferImplements()
+
 	return &IndexResult{
 		NodeCount:  idx.graph.NodeCount(),
 		EdgeCount:  idx.graph.EdgeCount(),

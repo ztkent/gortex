@@ -85,6 +85,35 @@ type Repository interface {
 	ifaces := nodesOfKind(result.Nodes, graph.KindInterface)
 	require.Len(t, ifaces, 1)
 	assert.Equal(t, "Repository", ifaces[0].Name)
+
+	// Verify method names are extracted into Meta.
+	methods, ok := ifaces[0].Meta["methods"].([]string)
+	require.True(t, ok, "Meta[\"methods\"] should be []string")
+	assert.Len(t, methods, 2)
+	assert.Contains(t, methods, "FindByID")
+	assert.Contains(t, methods, "Save")
+}
+
+func TestGoExtractor_EmptyInterface(t *testing.T) {
+	src := []byte(`package main
+
+type Any interface{}
+`)
+	e := NewGoExtractor()
+	result, err := e.Extract("any.go", src)
+	require.NoError(t, err)
+
+	ifaces := nodesOfKind(result.Nodes, graph.KindInterface)
+	require.Len(t, ifaces, 1)
+	assert.Equal(t, "Any", ifaces[0].Name)
+
+	// Empty interface should have empty methods slice (not nil).
+	methods, ok := ifaces[0].Meta["methods"]
+	require.True(t, ok)
+	// The slice should be nil or empty.
+	if ms, ok := methods.([]string); ok {
+		assert.Empty(t, ms)
+	}
 }
 
 func TestGoExtractor_Imports(t *testing.T) {

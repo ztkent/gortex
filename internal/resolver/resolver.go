@@ -161,6 +161,108 @@ func (r *Resolver) resolveMethodCall(e *graph.Edge, methodName string, stats *Re
 	stats.Unresolved++
 }
 
+// InferImplements detects structural interface satisfaction by comparing
+// method sets and adds EdgeImplements edges from types to interfaces.
+// Returns the number of edges added.
+func (r *Resolver) InferImplements() int {
+	// Step 1: Collect all interfaces with their required method names.
+	type ifaceInfo struct {
+		id      string
+		methods map[string]bool
+	}
+	var ifaces []ifaceInfo
+
+	allNodes := r.graph.AllNodes()
+	for _, n := range allNodes {
+		if n.Kind != graph.KindInterface {
+			continue
+		}
+		if n.Meta == nil {
+			continue
+		}
+		raw, ok := n.Meta["methods"]
+		if !ok {
+			continue
+		}
+		// Meta["methods"] may be []string or []any (after JSON round-trip).
+		methodSet := make(map[string]bool)
+		switch v := raw.(type) {
+		case []string:
+			for _, m := range v {
+				methodSet[m] = true
+			}
+		case []any:
+			for _, m := range v {
+				if s, ok := m.(string); ok {
+					methodSet[s] = true
+				}
+			}
+		}
+		if len(methodSet) == 0 {
+			continue
+		}
+		ifaces = append(ifaces, ifaceInfo{id: n.ID, methods: methodSet})
+	}
+
+	if len(ifaces) == 0 {
+		return 0
+	}
+
+	// Step 2: Build map of type ID -> set of method names via EdgeMemberOf edges.
+	typeMethods := make(map[string]map[string]bool)
+	allEdges := r.graph.AllEdges()
+	for _, e := range allEdges {
+		if e.Kind != graph.EdgeMemberOf {
+			continue
+		}
+		// EdgeMemberOf: From=method, To=type
+		methodNode := r.graph.GetNode(e.From)
+		if methodNode == nil || methodNode.Kind != graph.KindMethod {
+			continue
+		}
+		typeID := e.To
+		if typeMethods[typeID] == nil {
+			typeMethods[typeID] = make(map[string]bool)
+		}
+		typeMethods[typeID][methodNode.Name] = true
+	}
+
+	// Step 3: For each type, check if its method set satisfies each interface.
+	added := 0
+	for typeID, methods := range typeMethods {
+		typeNode := r.graph.GetNode(typeID)
+		if typeNode == nil || (typeNode.Kind != graph.KindType && typeNode.Kind != graph.KindInterface) {
+			continue
+		}
+		// Don't let a type implement itself.
+		for _, iface := range ifaces {
+			if iface.id == typeID {
+				continue
+			}
+			// Check if all required methods are present.
+			satisfies := true
+			for m := range iface.methods {
+				if !methods[m] {
+					satisfies = false
+					break
+				}
+			}
+			if satisfies {
+				r.graph.AddEdge(&graph.Edge{
+					From:     typeID,
+					To:       iface.id,
+					Kind:     graph.EdgeImplements,
+					FilePath: typeNode.FilePath,
+					Line:     typeNode.StartLine,
+				})
+				added++
+			}
+		}
+	}
+
+	return added
+}
+
 func lastPathComponent(path string) string {
 	parts := strings.Split(path, "/")
 	if len(parts) == 0 {

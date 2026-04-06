@@ -97,11 +97,39 @@ type symbolRef struct {
 	count int
 }
 
-func findMostReferenced(_ *query.Engine, _ int) []symbolRef {
-	// Finding most-referenced symbols requires iterating all nodes and counting
-	// incoming edges. This would need an AllNodes method on the engine.
-	// For now, return nil — the generator still produces useful output without it.
-	return nil
+func findMostReferenced(engine *query.Engine, limit int) []symbolRef {
+	allNodes := engine.AllNodes()
+	relevantKinds := map[graph.EdgeKind]bool{
+		graph.EdgeCalls:        true,
+		graph.EdgeReferences:   true,
+		graph.EdgeInstantiates: true,
+		graph.EdgeImplements:   true,
+	}
+
+	var refs []symbolRef
+	for _, n := range allNodes {
+		if n.Kind == graph.KindFile || n.Kind == graph.KindImport {
+			continue
+		}
+		count := 0
+		for _, e := range engine.GetInEdges(n.ID) {
+			if relevantKinds[e.Kind] {
+				count++
+			}
+		}
+		if count > 0 {
+			refs = append(refs, symbolRef{name: n.Name, count: count})
+		}
+	}
+
+	sort.Slice(refs, func(i, j int) bool {
+		return refs[i].count > refs[j].count
+	})
+
+	if len(refs) > limit {
+		refs = refs[:limit]
+	}
+	return refs
 }
 
 func sortedKeys(m map[string]int) []string {

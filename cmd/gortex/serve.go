@@ -116,6 +116,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 
 	// Run initial analysis (community detection + process discovery).
 	srv.RunAnalysis()
+	if eventHub != nil {
+		srv.WatchForReanalysis(eventHub, 500)
+	}
 	fmt.Fprintf(os.Stderr, "[gortex] MCP server ready (transport: %s)\n", serveTransport)
 
 	// Start web visualization server.

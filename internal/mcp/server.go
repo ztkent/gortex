@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"sync"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/query"
+	"github.com/zzet/gortex/internal/web/hub"
 )
 
 // Version is set at build time.
@@ -65,6 +67,32 @@ func (s *Server) getProcesses() *analysis.ProcessResult {
 	s.analysisMu.RLock()
 	defer s.analysisMu.RUnlock()
 	return s.processes
+}
+
+// WatchForReanalysis subscribes to hub events and re-runs analysis after
+// a debounce period of inactivity. It runs in a background goroutine.
+func (s *Server) WatchForReanalysis(h *hub.Hub, debounceMs int) {
+	subID, events := h.Subscribe()
+	debounce := time.Duration(debounceMs) * time.Millisecond
+
+	go func() {
+		var timer *time.Timer
+		for ev := range events {
+			_ = ev // any event triggers reanalysis
+			if timer != nil {
+				timer.Stop()
+			}
+			timer = time.AfterFunc(debounce, func() {
+				s.logger.Info("re-running analysis after graph change")
+				s.RunAnalysis()
+			})
+		}
+		// Channel closed — hub is shutting down.
+		if timer != nil {
+			timer.Stop()
+		}
+		_ = subID
+	}()
 }
 
 // ServeStdio starts the MCP server on stdin/stdout.

@@ -126,6 +126,7 @@ func (s *Server) handleIndexRepository(_ context.Context, req mcp.CallToolReques
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
+	s.RunAnalysis()
 	return mcp.NewToolResultJSON(result)
 }
 

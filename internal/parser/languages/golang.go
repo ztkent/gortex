@@ -236,11 +236,20 @@ func (e *GoExtractor) extractTypes(root *sitter.Node, src []byte, filePath, file
 		def := m.Captures["iface.def"]
 		seen[name] = true
 		id := filePath + "::" + name
-		result.Nodes = append(result.Nodes, &graph.Node{
+
+		// Extract method specs from the interface body by walking child nodes.
+		var methods []string
+		if body := m.Captures["iface.body"]; body != nil && body.Node != nil {
+			methods = extractInterfaceMethods(body.Node, src)
+		}
+
+		node := &graph.Node{
 			ID: id, Kind: graph.KindInterface, Name: name,
 			FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
 			Language: "go",
-		})
+			Meta:     map[string]any{"methods": methods},
+		}
+		result.Nodes = append(result.Nodes, node)
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
 		})
@@ -436,6 +445,26 @@ func buildMethodSignature(receiver, name string, params, result *parser.Captured
 		sig += " " + result.Text
 	}
 	return sig
+}
+
+// extractInterfaceMethods walks the children of an interface_type node
+// and returns the names of all method_spec entries.
+func extractInterfaceMethods(ifaceNode *sitter.Node, src []byte) []string {
+	var methods []string
+	for i := 0; i < int(ifaceNode.NamedChildCount()); i++ {
+		child := ifaceNode.NamedChild(i)
+		if child.Type() == "method_elem" || child.Type() == "method_spec" {
+			// The first named child of a method_spec is the field_identifier (name).
+			for j := 0; j < int(child.NamedChildCount()); j++ {
+				nameNode := child.NamedChild(j)
+				if nameNode.Type() == "field_identifier" {
+					methods = append(methods, nameNode.Content(src))
+					break
+				}
+			}
+		}
+	}
+	return methods
 }
 
 func captureText(c *parser.CapturedNode) string {

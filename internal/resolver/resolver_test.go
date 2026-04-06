@@ -68,6 +68,79 @@ func TestResolveAll_Unresolvable(t *testing.T) {
 	assert.Equal(t, 1, stats.Unresolved)
 }
 
+func TestInferImplements(t *testing.T) {
+	g := graph.New()
+
+	// Interface with two methods.
+	g.AddNode(&graph.Node{
+		ID: "pkg/store.go::Repository", Kind: graph.KindInterface, Name: "Repository",
+		FilePath: "pkg/store.go", Language: "go", StartLine: 1,
+		Meta: map[string]any{"methods": []string{"FindByID", "Save"}},
+	})
+
+	// Type that satisfies the interface.
+	g.AddNode(&graph.Node{
+		ID: "pkg/db.go::SQLRepo", Kind: graph.KindType, Name: "SQLRepo",
+		FilePath: "pkg/db.go", Language: "go", StartLine: 1,
+	})
+	g.AddNode(&graph.Node{
+		ID: "pkg/db.go::SQLRepo.FindByID", Kind: graph.KindMethod, Name: "FindByID",
+		FilePath: "pkg/db.go", Language: "go", StartLine: 5,
+	})
+	g.AddNode(&graph.Node{
+		ID: "pkg/db.go::SQLRepo.Save", Kind: graph.KindMethod, Name: "Save",
+		FilePath: "pkg/db.go", Language: "go", StartLine: 10,
+	})
+	g.AddEdge(&graph.Edge{From: "pkg/db.go::SQLRepo.FindByID", To: "pkg/db.go::SQLRepo", Kind: graph.EdgeMemberOf, FilePath: "pkg/db.go", Line: 5})
+	g.AddEdge(&graph.Edge{From: "pkg/db.go::SQLRepo.Save", To: "pkg/db.go::SQLRepo", Kind: graph.EdgeMemberOf, FilePath: "pkg/db.go", Line: 10})
+
+	// Type that does NOT satisfy (missing Save).
+	g.AddNode(&graph.Node{
+		ID: "pkg/db.go::ReadOnly", Kind: graph.KindType, Name: "ReadOnly",
+		FilePath: "pkg/db.go", Language: "go", StartLine: 20,
+	})
+	g.AddNode(&graph.Node{
+		ID: "pkg/db.go::ReadOnly.FindByID", Kind: graph.KindMethod, Name: "FindByID",
+		FilePath: "pkg/db.go", Language: "go", StartLine: 22,
+	})
+	g.AddEdge(&graph.Edge{From: "pkg/db.go::ReadOnly.FindByID", To: "pkg/db.go::ReadOnly", Kind: graph.EdgeMemberOf, FilePath: "pkg/db.go", Line: 22})
+
+	r := New(g)
+	added := r.InferImplements()
+
+	assert.Equal(t, 1, added)
+
+	// Verify the implements edge was added.
+	edges := g.GetInEdges("pkg/store.go::Repository")
+	var implEdges []*graph.Edge
+	for _, e := range edges {
+		if e.Kind == graph.EdgeImplements {
+			implEdges = append(implEdges, e)
+		}
+	}
+	assert.Len(t, implEdges, 1)
+	assert.Equal(t, "pkg/db.go::SQLRepo", implEdges[0].From)
+}
+
+func TestInferImplements_EmptyInterface(t *testing.T) {
+	g := graph.New()
+
+	// Empty interface should not match anything.
+	g.AddNode(&graph.Node{
+		ID: "pkg/any.go::Any", Kind: graph.KindInterface, Name: "Any",
+		FilePath: "pkg/any.go", Language: "go", StartLine: 1,
+		Meta: map[string]any{"methods": []string{}},
+	})
+	g.AddNode(&graph.Node{
+		ID: "pkg/db.go::Foo", Kind: graph.KindType, Name: "Foo",
+		FilePath: "pkg/db.go", Language: "go", StartLine: 1,
+	})
+
+	r := New(g)
+	added := r.InferImplements()
+	assert.Equal(t, 0, added)
+}
+
 func TestResolveFile(t *testing.T) {
 	g := graph.New()
 	g.AddNode(&graph.Node{ID: "a.go", Kind: graph.KindFile, Name: "a.go", FilePath: "a.go", Language: "go"})

@@ -197,6 +197,11 @@ func (e *Engine) SearchSymbols(query string, limit int) []*graph.Node {
 	return out
 }
 
+// AllNodes returns all nodes in the graph.
+func (e *Engine) AllNodes() []*graph.Node {
+	return e.g.AllNodes()
+}
+
 // Stats returns summary statistics for the graph.
 func (e *Engine) Stats() *graph.GraphStats {
 	s := e.g.Stats()
