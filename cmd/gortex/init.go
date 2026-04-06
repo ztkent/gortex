@@ -6,7 +6,17 @@ import (
 	"path/filepath"
 
 	"github.com/spf13/cobra"
+
+	"github.com/zzet/gortex/internal/claudemd"
+	"github.com/zzet/gortex/internal/config"
+	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/indexer"
+	"github.com/zzet/gortex/internal/parser"
+	"github.com/zzet/gortex/internal/parser/languages"
+	"github.com/zzet/gortex/internal/query"
 )
+
+var initAnalyze bool
 
 var initCmd = &cobra.Command{
 	Use:   "init [path]",
@@ -16,6 +26,7 @@ var initCmd = &cobra.Command{
 }
 
 func init() {
+	initCmd.Flags().BoolVar(&initAnalyze, "analyze", false, "index the repo first to generate a richer CLAUDE.md with codebase overview")
 	rootCmd.AddCommand(initCmd)
 }
 
@@ -49,7 +60,17 @@ func runInit(_ *cobra.Command, args []string) error {
 
 	// 3. Append Gortex block to CLAUDE.md
 	claudeMdPath := filepath.Join(root, "CLAUDE.md")
-	if err := appendGortexBlock(claudeMdPath); err != nil {
+	block := claudeMdBlock
+	if initAnalyze {
+		fmt.Fprintf(os.Stderr, "[gortex init] indexing %s...\n", root)
+		overview, err := generateOverview(root)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[gortex init] indexing failed: %v — using static block\n", err)
+		} else {
+			block = overview + "\n" + claudeMdBlock
+		}
+	}
+	if err := appendGortexBlock(claudeMdPath, block); err != nil {
 		return err
 	}
 
@@ -74,7 +95,7 @@ func writeIfNotExists(path, content string) error {
 	return nil
 }
 
-func appendGortexBlock(path string) error {
+func appendGortexBlock(path, block string) error {
 	existing, _ := os.ReadFile(path)
 	if len(existing) > 0 {
 		// Check if Gortex block already present
@@ -94,11 +115,37 @@ func appendGortexBlock(path string) error {
 	if len(existing) > 0 {
 		prefix = "\n\n"
 	}
-	if _, err := f.WriteString(prefix + claudeMdBlock); err != nil {
+	if _, err := f.WriteString(prefix + block); err != nil {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "[gortex init] appended Gortex block to %s\n", path)
 	return nil
+}
+
+func generateOverview(root string) (string, error) {
+	logger := newLogger()
+	defer logger.Sync()
+
+	cfg, err := config.Load("")
+	if err != nil {
+		cfg = &config.Config{}
+	}
+
+	g := graph.New()
+	reg := parser.NewRegistry()
+	languages.RegisterAll(reg)
+
+	idx := indexer.New(g, reg, cfg.Index, logger)
+	result, err := idx.Index(root)
+	if err != nil {
+		return "", err
+	}
+
+	fmt.Fprintf(os.Stderr, "[gortex init] indexed %d files (%d nodes, %d edges) in %dms\n",
+		result.FileCount, result.NodeCount, result.EdgeCount, result.DurationMs)
+
+	eng := query.NewEngine(g)
+	return claudemd.Generate(eng, 180), nil
 }
 
 func contains(s, substr string) bool {
