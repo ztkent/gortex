@@ -78,6 +78,14 @@ func (s *Server) registerCodingTools() {
 	)
 
 	s.mcpServer.AddTool(
+		mcp.NewTool("suggest_pattern",
+			mcp.WithDescription("Given an existing symbol as an example, extracts the structural pattern for creating similar code. Returns the example source, sibling symbols with the same pattern, registration/wiring code, test patterns, and files to edit. Use when adding a new function/handler/extractor that follows an existing convention."),
+			mcp.WithString("example_id", mcp.Required(), mcp.Description("Symbol ID to use as the pattern example")),
+		),
+		s.handleSuggestPattern,
+	)
+
+	s.mcpServer.AddTool(
 		mcp.NewTool("get_recent_changes",
 			mcp.WithDescription("Returns files and symbols that changed since the last call (watch mode only). Use to re-orient after the user edits files outside of Claude Code's view, without re-reading anything."),
 			mcp.WithString("since", mcp.Description("ISO 8601 timestamp (omit for all changes since index)")),
@@ -598,4 +606,164 @@ func (s *Server) handleGetTestTargets(_ context.Context, req mcp.CallToolRequest
 		"uncovered":     uncovered,
 		"coverage_note": fmt.Sprintf("%d/%d changed symbols have test coverage", len(coveredSymbols), len(ids)),
 	})
+}
+
+func (s *Server) handleSuggestPattern(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	exampleID, err := req.RequireString("example_id")
+	if err != nil {
+		return mcp.NewToolResultError("example_id is required"), nil
+	}
+
+	node := s.engine.GetSymbol(exampleID)
+	if node == nil {
+		return mcp.NewToolResultError("symbol not found: " + exampleID), nil
+	}
+
+	result := map[string]any{
+		"example": map[string]any{
+			"id":        node.ID,
+			"kind":      node.Kind,
+			"name":      node.Name,
+			"file_path": node.FilePath,
+		},
+	}
+
+	// 1. Get the example source.
+	if node.StartLine > 0 && node.EndLine > 0 {
+		absPath := node.FilePath
+		if s.indexer != nil {
+			if root := s.indexer.RootPath(); root != "" {
+				absPath = filepath.Join(root, node.FilePath)
+			}
+		}
+		if source, _, err := readLines(absPath, node.StartLine, node.EndLine, 0); err == nil {
+			result["example_source"] = source
+		}
+	}
+	if sig, ok := node.Meta["signature"]; ok {
+		result["signature"] = sig
+	}
+
+	// 2. Find siblings — same kind, same file, similar naming pattern.
+	fileSymbols := s.engine.GetFileSymbols(node.FilePath)
+	var siblings []map[string]any
+	prefix := extractPrefix(node.Name)
+	for _, sn := range fileSymbols.Nodes {
+		if sn.ID == node.ID || sn.Kind != node.Kind {
+			continue
+		}
+		siblings = append(siblings, map[string]any{
+			"id":         sn.ID,
+			"name":       sn.Name,
+			"start_line": sn.StartLine,
+		})
+	}
+	if len(siblings) > 10 {
+		siblings = siblings[:10]
+	}
+	result["siblings"] = siblings
+	result["siblings_count"] = len(fileSymbols.Nodes) - 1 // exclude file node
+
+	// 3. Find how the example is wired/registered (callers at depth 1).
+	callers := s.engine.GetCallers(exampleID, query.QueryOptions{Depth: 1, Limit: 10, Detail: "brief"})
+	var registration []map[string]any
+	for _, cn := range callers.Nodes {
+		if cn.ID == exampleID {
+			continue
+		}
+		entry := map[string]any{
+			"id":         cn.ID,
+			"name":       cn.Name,
+			"file_path":  cn.FilePath,
+			"start_line": cn.StartLine,
+		}
+		// Get the registration source (the caller function that wires this symbol).
+		if cn.StartLine > 0 && cn.EndLine > 0 {
+			absPath := cn.FilePath
+			if s.indexer != nil {
+				if root := s.indexer.RootPath(); root != "" {
+					absPath = filepath.Join(root, cn.FilePath)
+				}
+			}
+			if source, _, err := readLines(absPath, cn.StartLine, cn.EndLine, 0); err == nil {
+				entry["source"] = source
+			}
+		}
+		registration = append(registration, entry)
+	}
+	result["registration"] = registration
+
+	// 4. Find test patterns — look for test symbols with matching name prefix.
+	var testPatterns []map[string]any
+	if prefix != "" {
+		// Search for test functions that match the example name.
+		testSearch := s.engine.SearchSymbols(node.Name, 20)
+		for _, tn := range testSearch {
+			if !isTestFile(tn.FilePath) {
+				continue
+			}
+			if tn.Kind != graph.KindFunction && tn.Kind != graph.KindMethod {
+				continue
+			}
+			entry := map[string]any{
+				"id":         tn.ID,
+				"name":       tn.Name,
+				"file_path":  tn.FilePath,
+				"start_line": tn.StartLine,
+			}
+			// Get test source.
+			if tn.StartLine > 0 && tn.EndLine > 0 {
+				absPath := tn.FilePath
+				if s.indexer != nil {
+					if root := s.indexer.RootPath(); root != "" {
+						absPath = filepath.Join(root, tn.FilePath)
+					}
+				}
+				if source, _, err := readLines(absPath, tn.StartLine, tn.EndLine, 0); err == nil {
+					entry["source"] = source
+				}
+			}
+			testPatterns = append(testPatterns, entry)
+			if len(testPatterns) >= 3 {
+				break
+			}
+		}
+	}
+	result["test_patterns"] = testPatterns
+
+	// 5. Files to edit — where would you add a new instance of this pattern?
+	filesToEdit := []map[string]any{
+		{"file": node.FilePath, "reason": "add new symbol here (same file as example)"},
+	}
+	for _, reg := range registration {
+		if fp, ok := reg["file_path"].(string); ok && fp != node.FilePath {
+			filesToEdit = append(filesToEdit, map[string]any{
+				"file":   fp,
+				"reason": "update registration/wiring",
+			})
+		}
+	}
+	for _, tp := range testPatterns {
+		if fp, ok := tp["file_path"].(string); ok {
+			filesToEdit = append(filesToEdit, map[string]any{
+				"file":   fp,
+				"reason": "add test for new symbol",
+			})
+			break // one test file is enough
+		}
+	}
+	result["files_to_edit"] = filesToEdit
+
+	return mcp.NewToolResultJSON(result)
+}
+
+// extractPrefix returns the common prefix of a camelCase/PascalCase name.
+// e.g. "handleGetSymbol" -> "handle", "TestNewServer" -> "Test"
+func extractPrefix(name string) string {
+	for i := 1; i < len(name); i++ {
+		if name[i] >= 'A' && name[i] <= 'Z' {
+			return name[:i]
+		}
+	}
+	return name
 }
