@@ -27,4 +27,5 @@ func RegisterAll(reg *parser.Registry) {
 	reg.Register(NewTOMLExtractor())
 	reg.Register(NewHCLExtractor())
 	reg.Register(NewDockerfileExtractor())
+	reg.Register(NewCSharpExtractor())
 }
