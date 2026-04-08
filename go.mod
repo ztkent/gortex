@@ -3,6 +3,7 @@ module github.com/zzet/gortex
 go 1.25.6
 
 require (
+	github.com/blevesearch/bleve/v2 v2.5.7
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/mark3labs/mcp-go v0.47.0
 	github.com/smacker/go-tree-sitter v0.0.0-20240827094217-dd81d9e9be82
@@ -10,12 +11,13 @@ require (
 	github.com/spf13/viper v1.21.0
 	github.com/stretchr/testify v1.11.1
 	go.uber.org/zap v1.27.1
+	gopkg.in/yaml.v3 v3.0.1
+	pgregory.net/rapid v1.2.0
 )
 
 require (
 	github.com/RoaringBitmap/roaring/v2 v2.4.5 // indirect
 	github.com/bits-and-blooms/bitset v1.22.0 // indirect
-	github.com/blevesearch/bleve/v2 v2.5.7 // indirect
 	github.com/blevesearch/bleve_index_api v1.2.11 // indirect
 	github.com/blevesearch/geo v0.2.4 // indirect
 	github.com/blevesearch/go-faiss v1.0.26 // indirect
@@ -56,6 +58,4 @@ require (
 	golang.org/x/text v0.35.0 // indirect
 	google.golang.org/protobuf v1.36.6 // indirect
 	gopkg.in/check.v1 v1.0.0-20190902080502-41f04d3bba15 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
-	pgregory.net/rapid v1.2.0 // indirect
 )
