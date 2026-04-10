@@ -7,6 +7,8 @@ Code intelligence engine that indexes repositories into an in-memory knowledge g
 
 Built for AI coding agents (Claude Code, Cursor, Codex) — one `smart_context` call replaces 5-10 file reads, cutting token usage by ~94%.
 
+![Gortex Web UI — force-directed knowledge graph visualization](assets/graph.png)
+
 ## Features
 
 - **Knowledge graph** — every file, symbol, import, call chain, and type relationship in one queryable structure
@@ -273,8 +275,6 @@ All query commands support `--format text|json|dot` (DOT output for Graphviz vis
 ## Web UI
 
 When running `gortex serve`, a web visualization is available at `http://localhost:8765`:
-
-![Gortex Web UI — force-directed knowledge graph visualization](assets/graph.png)
 
 - Sigma.js force-directed graph with ForceAtlas2 layout
 - Node size proportional to degree (connection count = importance)
