@@ -1,6 +1,8 @@
 package search
 
 import (
+	"fmt"
+	"io"
 	"sync"
 
 	"github.com/coder/hnsw"
@@ -59,3 +61,30 @@ func (v *VectorBackend) Count() int {
 
 // Dims returns the embedding dimensionality.
 func (v *VectorBackend) Dims() int { return v.dims }
+
+// Save writes the HNSW index to a writer.
+func (v *VectorBackend) Save(w io.Writer) error {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	if err := v.graph.Export(w); err != nil {
+		return fmt.Errorf("export vector index: %w", err)
+	}
+	return nil
+}
+
+// LoadFrom restores the HNSW index from a reader.
+func (v *VectorBackend) LoadFrom(r io.Reader) error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if err := v.graph.Import(r); err != nil {
+		return fmt.Errorf("import vector index: %w", err)
+	}
+	return nil
+}
+
+// SetCount sets the node count (used after loading from persistence).
+func (v *VectorBackend) SetCount(n int) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.count = n
+}

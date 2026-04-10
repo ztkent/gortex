@@ -20,6 +20,13 @@ type Snapshot struct {
 	Nodes      []*graph.Node     `json:"nodes"`
 	Edges      []*graph.Edge     `json:"edges"`
 	FileMtimes map[string]int64  `json:"file_mtimes"`
+
+	// VectorIndex is the serialized HNSW vector index (nil when embeddings are disabled).
+	VectorIndex []byte `json:"vector_index,omitempty"`
+	// VectorDims is the embedding dimensionality (0 when embeddings are disabled).
+	VectorDims int `json:"vector_dims,omitempty"`
+	// VectorCount is the number of vectors in the index.
+	VectorCount int `json:"vector_count,omitempty"`
 }
 
 // Store is the pluggable persistence backend interface.

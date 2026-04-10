@@ -169,6 +169,12 @@ func runBridge(_ *cobra.Command, _ []string) error {
 				idx.SetFileMtimes(snap.FileMtimes)
 				idx.SetRootPath(bridgeIndex)
 
+				if len(snap.VectorIndex) > 0 && snap.VectorDims > 0 {
+					if err := idx.ImportVectorIndex(snap.VectorIndex, snap.VectorDims, snap.VectorCount); err != nil {
+						fmt.Fprintf(os.Stderr, "[gortex] bridge: vector index restore failed: %v\n", err)
+					}
+				}
+
 				result, err := idx.IncrementalReindex(bridgeIndex)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "[gortex] bridge: incremental reindex failed: %v\n", err)
@@ -320,6 +326,7 @@ func runBridge(_ *cobra.Command, _ []string) error {
 					Edges:      g.AllEdges(),
 					FileMtimes: idx.FileMtimes(),
 				}
+				snap.VectorIndex, snap.VectorDims, snap.VectorCount = idx.ExportVectorIndex()
 				if err := store.Save(snap); err != nil {
 					fmt.Fprintf(os.Stderr, "[gortex] bridge: cache save failed: %v\n", err)
 				} else {

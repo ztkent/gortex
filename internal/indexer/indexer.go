@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -91,6 +92,45 @@ func (idx *Indexer) RepoPrefix() string { return idx.repoPrefix }
 // SetEmbedder sets the embedding provider for semantic search.
 // When set, buildSearchIndex will create a HybridBackend with vector search.
 func (idx *Indexer) SetEmbedder(p embedding.Provider) { idx.embedder = p }
+
+// ExportVectorIndex returns the serialized vector index bytes, dims, and count.
+// Returns nil, 0, 0 if no vector index is active.
+func (idx *Indexer) ExportVectorIndex() ([]byte, int, int) {
+	hybrid, ok := idx.search.(*search.HybridBackend)
+	if !ok {
+		return nil, 0, 0
+	}
+	vec := hybrid.VectorIndex()
+	if vec == nil || vec.Count() == 0 {
+		return nil, 0, 0
+	}
+
+	var buf bytes.Buffer
+	if err := vec.Save(&buf); err != nil {
+		idx.logger.Warn("failed to export vector index", zap.Error(err))
+		return nil, 0, 0
+	}
+	return buf.Bytes(), vec.Dims(), vec.Count()
+}
+
+// ImportVectorIndex restores a vector index from serialized data and wraps
+// the current text search backend into a HybridBackend.
+func (idx *Indexer) ImportVectorIndex(data []byte, dims, count int) error {
+	if len(data) == 0 || idx.embedder == nil {
+		return nil
+	}
+
+	vec := search.NewVector(dims)
+	if err := vec.LoadFrom(bytes.NewReader(data)); err != nil {
+		return fmt.Errorf("import vector index: %w", err)
+	}
+	vec.SetCount(count)
+
+	idx.search = search.NewHybrid(idx.search, vec, idx.embedder)
+	idx.logger.Info("restored vector index from cache",
+		zap.Int("vectors", count), zap.Int("dims", dims))
+	return nil
+}
 
 // prefixPath prepends the repoPrefix to a relative path when in multi-repo mode.
 // Returns the path unchanged when repoPrefix is empty.

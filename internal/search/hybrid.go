@@ -87,6 +87,9 @@ func (h *HybridBackend) TextBackend() Backend { return h.text }
 // VectorBackend returns the underlying vector search backend.
 func (h *HybridBackend) VectorIndex() *VectorBackend { return h.vector }
 
+// Embedder returns the embedding provider.
+func (h *HybridBackend) Embedder() embedding.Provider { return h.embedder }
+
 // rrfFuse combines text and vector results using Reciprocal Rank Fusion.
 // score(doc) = 1/(k+rank_text) + 1/(k+rank_vector)
 func rrfFuse(textResults []SearchResult, vecIDs []string, k, limit int) []SearchResult {

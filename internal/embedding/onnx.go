@@ -18,8 +18,8 @@ import (
 )
 
 const (
-	onnxMaxSeqLen = 128 // max tokens per input (GTE-small supports 512, but 128 is enough for symbol text)
-	onnxDims      = 384 // GTE-small output dimensions
+	onnxMaxSeqLen = 128
+	onnxDims      = 384
 	clsTokenID    = 101
 	sepTokenID    = 102
 	unkTokenID    = 100
@@ -27,19 +27,24 @@ const (
 )
 
 // ONNXProvider uses GTE-small via ONNX Runtime for high-quality embeddings.
+// Creates a single session with fixed-size input tensors for fast reuse.
 type ONNXProvider struct {
-	vocab     map[string]int64 // word → token ID
-	modelPath string
-	mu        sync.Mutex
-	initOnce  sync.Once
-	initErr   error
+	vocab   map[string]int64
+	session *ort.AdvancedSession
+
+	// Pre-allocated tensors (fixed shape: 1 × onnxMaxSeqLen).
+	inputIDs      *ort.Tensor[int64]
+	attentionMask *ort.Tensor[int64]
+	tokenTypeIDs  *ort.Tensor[int64]
+	output        *ort.Tensor[float32]
+
+	mu sync.Mutex
 }
 
 func newONNXProvider() (Provider, error) {
-	// Find model and vocab files.
 	modelDir := findONNXModelDir()
 	if modelDir == "" {
-		return nil, fmt.Errorf("ONNX model not found; expected model.onnx + vocab.txt in ~/.cache/gortex/models/gte-small/")
+		return nil, fmt.Errorf("ONNX model not found; place model.onnx + vocab.txt in ~/.cache/gortex/models/gte-small/")
 	}
 
 	modelPath := filepath.Join(modelDir, "model.onnx")
@@ -54,7 +59,6 @@ func newONNXProvider() (Provider, error) {
 		return nil, fmt.Errorf("load vocab: %w", err)
 	}
 
-	// Initialize ONNX Runtime.
 	libPath := findONNXRuntimeLib()
 	if libPath == "" {
 		return nil, fmt.Errorf("libonnxruntime not found; install via: brew install onnxruntime")
@@ -64,18 +68,53 @@ func newONNXProvider() (Provider, error) {
 		return nil, fmt.Errorf("ONNX Runtime init: %w", err)
 	}
 
+	// Pre-allocate fixed-size tensors.
+	shape := ort.Shape{1, onnxMaxSeqLen}
+	outputShape := ort.Shape{1, onnxMaxSeqLen, onnxDims}
+
+	inputIDs, err := ort.NewEmptyTensor[int64](shape)
+	if err != nil {
+		return nil, fmt.Errorf("input_ids tensor: %w", err)
+	}
+	attMask, err := ort.NewEmptyTensor[int64](shape)
+	if err != nil {
+		return nil, fmt.Errorf("attention_mask tensor: %w", err)
+	}
+	tokenTypes, err := ort.NewEmptyTensor[int64](shape)
+	if err != nil {
+		return nil, fmt.Errorf("token_type_ids tensor: %w", err)
+	}
+	output, err := ort.NewEmptyTensor[float32](outputShape)
+	if err != nil {
+		return nil, fmt.Errorf("output tensor: %w", err)
+	}
+
+	// Create session once with fixed shapes.
+	session, err := ort.NewAdvancedSession(modelPath,
+		[]string{"input_ids", "attention_mask", "token_type_ids"},
+		[]string{"last_hidden_state"},
+		[]ort.ArbitraryTensor{inputIDs, attMask, tokenTypes},
+		[]ort.ArbitraryTensor{output},
+		nil,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("ONNX session: %w", err)
+	}
+
 	return &ONNXProvider{
-		vocab:     vocab,
-		modelPath: modelPath,
+		vocab:         vocab,
+		session:       session,
+		inputIDs:      inputIDs,
+		attentionMask: attMask,
+		tokenTypeIDs:  tokenTypes,
+		output:        output,
 	}, nil
 }
 
 func (p *ONNXProvider) Embed(_ context.Context, text string) ([]float32, error) {
-	vecs, err := p.EmbedBatch(context.Background(), []string{text})
-	if err != nil {
-		return nil, err
-	}
-	return vecs[0], nil
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.embedLocked(text)
 }
 
 func (p *ONNXProvider) EmbedBatch(_ context.Context, texts []string) ([][]float32, error) {
@@ -84,7 +123,7 @@ func (p *ONNXProvider) EmbedBatch(_ context.Context, texts []string) ([][]float3
 
 	results := make([][]float32, len(texts))
 	for i, text := range texts {
-		vec, err := p.embedSingle(text)
+		vec, err := p.embedLocked(text)
 		if err != nil {
 			return nil, fmt.Errorf("embed text %d: %w", i, err)
 		}
@@ -96,73 +135,53 @@ func (p *ONNXProvider) EmbedBatch(_ context.Context, texts []string) ([][]float3
 func (p *ONNXProvider) Dimensions() int { return onnxDims }
 
 func (p *ONNXProvider) Close() error {
+	if p.session != nil {
+		_ = p.session.Destroy()
+	}
+	if p.inputIDs != nil {
+		_ = p.inputIDs.Destroy()
+	}
+	if p.attentionMask != nil {
+		_ = p.attentionMask.Destroy()
+	}
+	if p.tokenTypeIDs != nil {
+		_ = p.tokenTypeIDs.Destroy()
+	}
+	if p.output != nil {
+		_ = p.output.Destroy()
+	}
 	return ort.DestroyEnvironment()
 }
 
-func (p *ONNXProvider) embedSingle(text string) ([]float32, error) {
-	// Tokenize.
+func (p *ONNXProvider) embedLocked(text string) ([]float32, error) {
+	// Tokenize and pad to fixed length.
 	tokenIDs := p.tokenize(text)
 
-	seqLen := int64(len(tokenIDs))
-	batchSize := int64(1)
-	shape := ort.Shape{batchSize, seqLen}
+	// Fill pre-allocated input tensors.
+	inputData := p.inputIDs.GetData()
+	attData := p.attentionMask.GetData()
+	ttData := p.tokenTypeIDs.GetData()
 
-	// Build attention mask.
-	attentionMask := make([]int64, seqLen)
-	tokenTypeIDs := make([]int64, seqLen)
 	realTokens := 0
-	for i, id := range tokenIDs {
-		if id != padTokenID {
-			attentionMask[i] = 1
+	for i := 0; i < onnxMaxSeqLen; i++ {
+		if i < len(tokenIDs) {
+			inputData[i] = tokenIDs[i]
+			attData[i] = 1
 			realTokens++
+		} else {
+			inputData[i] = padTokenID
+			attData[i] = 0
 		}
+		ttData[i] = 0
 	}
 
-	// Create tensors.
-	inputIDsTensor, err := ort.NewTensor(shape, tokenIDs)
-	if err != nil {
-		return nil, fmt.Errorf("input_ids tensor: %w", err)
-	}
-	defer inputIDsTensor.Destroy()
-
-	attMaskTensor, err := ort.NewTensor(shape, attentionMask)
-	if err != nil {
-		return nil, fmt.Errorf("attention_mask tensor: %w", err)
-	}
-	defer attMaskTensor.Destroy()
-
-	tokenTypeTensor, err := ort.NewTensor(shape, tokenTypeIDs)
-	if err != nil {
-		return nil, fmt.Errorf("token_type_ids tensor: %w", err)
-	}
-	defer tokenTypeTensor.Destroy()
-
-	outputShape := ort.Shape{batchSize, seqLen, onnxDims}
-	outputData := make([]float32, seqLen*int64(onnxDims))
-	outputTensor, err := ort.NewTensor(outputShape, outputData)
-	if err != nil {
-		return nil, fmt.Errorf("output tensor: %w", err)
-	}
-	defer outputTensor.Destroy()
-
-	// Run inference.
-	session, err := ort.NewAdvancedSession(p.modelPath,
-		[]string{"input_ids", "attention_mask", "token_type_ids"},
-		[]string{"last_hidden_state"},
-		[]ort.ArbitraryTensor{inputIDsTensor, attMaskTensor, tokenTypeTensor},
-		[]ort.ArbitraryTensor{outputTensor},
-		nil,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("session: %w", err)
-	}
-	defer session.Destroy()
-
-	if err := session.Run(); err != nil {
+	// Run inference (session reused).
+	if err := p.session.Run(); err != nil {
 		return nil, fmt.Errorf("inference: %w", err)
 	}
 
 	// Mean pooling over non-padding tokens.
+	outputData := p.output.GetData()
 	embedding := make([]float32, onnxDims)
 	for i := 0; i < realTokens; i++ {
 		for j := 0; j < onnxDims; j++ {
@@ -190,11 +209,10 @@ func (p *ONNXProvider) embedSingle(text string) ([]float32, error) {
 	return embedding, nil
 }
 
-// tokenize performs basic WordPiece tokenization for BERT-based models.
+// tokenize performs basic WordPiece tokenization, padded to onnxMaxSeqLen.
 func (p *ONNXProvider) tokenize(text string) []int64 {
 	text = strings.ToLower(text)
 
-	// Split into words on whitespace and punctuation.
 	var words []string
 	var current strings.Builder
 	for _, r := range text {
@@ -211,10 +229,9 @@ func (p *ONNXProvider) tokenize(text string) []int64 {
 		words = append(words, current.String())
 	}
 
-	// WordPiece: for each word, try full match, then progressively shorter prefixes + ## continuations.
-	ids := []int64{clsTokenID} // [CLS]
+	ids := []int64{clsTokenID}
 	for _, word := range words {
-		if len(ids) >= onnxMaxSeqLen-1 { // leave room for [SEP]
+		if len(ids) >= onnxMaxSeqLen-1 {
 			break
 		}
 		wordIDs := p.wordPieceTokenize(word)
@@ -225,8 +242,7 @@ func (p *ONNXProvider) tokenize(text string) []int64 {
 			ids = append(ids, id)
 		}
 	}
-	ids = append(ids, sepTokenID) // [SEP]
-
+	ids = append(ids, sepTokenID)
 	return ids
 }
 
@@ -238,7 +254,6 @@ func (p *ONNXProvider) wordPieceTokenize(word string) []int64 {
 	var ids []int64
 	remaining := word
 	for len(remaining) > 0 {
-		// Try longest matching prefix (or ##prefix for continuation).
 		prefix := remaining
 		found := false
 		for len(prefix) > 0 {
@@ -252,7 +267,6 @@ func (p *ONNXProvider) wordPieceTokenize(word string) []int64 {
 				found = true
 				break
 			}
-			// Shorten by one character.
 			prefix = prefix[:len(prefix)-1]
 		}
 		if !found {
@@ -266,7 +280,6 @@ func (p *ONNXProvider) wordPieceTokenize(word string) []int64 {
 // --- helpers ---
 
 func findONNXModelDir() string {
-	// Check common locations.
 	home, _ := os.UserHomeDir()
 	candidates := []string{
 		filepath.Join(home, ".cache", "gortex", "models", "gte-small"),
@@ -307,7 +320,6 @@ func findONNXRuntimeLib() string {
 }
 
 func loadVocab(path string) (map[string]int64, error) {
-	// Try gzipped first.
 	if strings.HasSuffix(path, ".gz") {
 		return loadVocabGz(path)
 	}
@@ -324,12 +336,10 @@ func loadVocab(path string) (map[string]int64, error) {
 	for scanner.Scan() {
 		line := scanner.Text()
 		if parts := strings.SplitN(line, "\t", 2); len(parts) == 2 {
-			// Format: word<TAB>id
 			word := parts[0]
 			fmt.Sscanf(parts[1], "%d", &id)
 			vocab[word] = id
 		} else {
-			// Format: word (one per line, ID = line number)
 			vocab[line] = id
 			id++
 		}

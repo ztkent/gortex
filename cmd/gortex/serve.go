@@ -205,6 +205,13 @@ func runServe(cmd *cobra.Command, args []string) error {
 					idx.SetFileMtimes(snap.FileMtimes)
 					idx.SetRootPath(serveIndex)
 
+					// Restore vector index if available.
+					if len(snap.VectorIndex) > 0 && snap.VectorDims > 0 {
+						if err := idx.ImportVectorIndex(snap.VectorIndex, snap.VectorDims, snap.VectorCount); err != nil {
+							fmt.Fprintf(os.Stderr, "[gortex] vector index restore failed: %v\n", err)
+						}
+					}
+
 					result, err := idx.IncrementalReindex(serveIndex)
 					if err != nil {
 						fmt.Fprintf(os.Stderr, "[gortex] incremental reindex failed: %v\n", err)
@@ -315,6 +322,8 @@ func runServe(cmd *cobra.Command, args []string) error {
 					Edges:      g.AllEdges(),
 					FileMtimes: idx.FileMtimes(),
 				}
+				// Include vector index if available.
+				snap.VectorIndex, snap.VectorDims, snap.VectorCount = idx.ExportVectorIndex()
 				if err := store.Save(snap); err != nil {
 					fmt.Fprintf(os.Stderr, "[gortex] cache save failed: %v\n", err)
 				} else {

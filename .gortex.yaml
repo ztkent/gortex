@@ -16,6 +16,8 @@ index:
     - "env"
     - ".pyenv"
     - ".git"
+    - ".claude/worktrees/**"
+    - "results/**"
   workers: 8
 
 watch:
