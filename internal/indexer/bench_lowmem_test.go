@@ -64,7 +64,7 @@ func BenchmarkIndex_Self_Incremental(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		_ = idx.IncrementalReindex("../..")
+		_, _ = idx.IncrementalReindex("../..")
 	}
 }
 

@@ -3,7 +3,8 @@ VERSION   ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo de
 LDFLAGS   := -s -w -X main.version=$(VERSION)
 
 .PHONY: build build-onnx build-gomlx build-hugot \
-       test bench lint fmt clean install \
+       test bench bench-rpi bench-rpi-quick bench-rpi-profile bench-compare \
+       lint fmt clean install \
        deps-onnx deps-gomlx deps-hugot deps-vectors
 
 # ---------------------------------------------------------------------------
@@ -29,9 +30,31 @@ bench:
 	go test -bench=. -benchmem -count=1 -benchtime=1s \
 		./internal/parser/languages/ \
 		./internal/graph/ \
+		./internal/search/ \
+		./internal/resolver/ \
 		./internal/query/ \
 		./internal/indexer/ \
 		./internal/analysis/
+
+# RPi / low-resource device benchmarks
+BENCH_BASELINE ?= results/bench-baseline.txt
+
+bench-rpi:
+	./scripts/bench-rpi.sh
+
+bench-rpi-quick:
+	./scripts/bench-rpi.sh --quick
+
+bench-rpi-profile:
+	./scripts/bench-rpi.sh --profile
+
+bench-compare:
+	./scripts/bench-rpi.sh --compare $(BENCH_BASELINE)
+
+bench-save-baseline:
+	./scripts/bench-rpi.sh
+	@cp $$(ls -t results/bench-*.txt | head -1) $(BENCH_BASELINE)
+	@echo "✓ Baseline saved to $(BENCH_BASELINE)"
 
 lint:
 	golangci-lint run --timeout=5m
@@ -40,10 +63,22 @@ fmt:
 	gofmt -s -w .
 
 clean:
-	rm -f $(BINARY)
+	rm -f $(BINARY) gortex-linux gortex-rpi
 
 install:
 	go install -ldflags '$(LDFLAGS)' ./cmd/gortex/
+
+# Cross-compile for Raspberry Pi (ARM64)
+build-rpi:
+	CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc \
+		go build -ldflags '$(LDFLAGS)' -o gortex-rpi ./cmd/gortex/
+	@echo "✓ Built gortex-rpi (linux/arm64)"
+
+# Cross-compile for Raspberry Pi (ARMv7 / 32-bit)
+build-rpi32:
+	CGO_ENABLED=1 GOOS=linux GOARCH=arm GOARM=7 CC=arm-linux-gnueabihf-gcc \
+		go build -ldflags '$(LDFLAGS)' -o gortex-rpi32 ./cmd/gortex/
+	@echo "✓ Built gortex-rpi32 (linux/arm/v7)"
 
 # ---------------------------------------------------------------------------
 # Web UI (Next.js)
