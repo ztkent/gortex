@@ -101,7 +101,32 @@ func runInit(_ *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "[gortex init] warning: Antigravity setup failed: %v\n", err)
 	}
 
-	// 9. Create/update GlobalConfig for multi-repo mode.
+	// 9. Set up Cursor IDE integration
+	if err := setupCursor(root); err != nil {
+		fmt.Fprintf(os.Stderr, "[gortex init] warning: Cursor setup failed: %v\n", err)
+	}
+
+	// 10. Set up VS Code / GitHub Copilot integration
+	if err := setupVSCodeCopilot(root); err != nil {
+		fmt.Fprintf(os.Stderr, "[gortex init] warning: VS Code / Copilot setup failed: %v\n", err)
+	}
+
+	// 11. Set up Windsurf integration
+	if err := setupWindsurf(); err != nil {
+		fmt.Fprintf(os.Stderr, "[gortex init] warning: Windsurf setup failed: %v\n", err)
+	}
+
+	// 12. Set up Continue.dev integration
+	if err := setupContinue(root); err != nil {
+		fmt.Fprintf(os.Stderr, "[gortex init] warning: Continue.dev setup failed: %v\n", err)
+	}
+
+	// 13. Set up Cline integration
+	if err := setupCline(); err != nil {
+		fmt.Fprintf(os.Stderr, "[gortex init] warning: Cline setup failed: %v\n", err)
+	}
+
+	// 14. Create/update GlobalConfig for multi-repo mode.
 	if err := ensureGlobalConfig(root); err != nil {
 		fmt.Fprintf(os.Stderr, "[gortex init] warning: could not update global config: %v\n", err)
 	}
@@ -117,6 +142,11 @@ func runInit(_ *cobra.Command, args []string) error {
 	fmt.Fprintf(os.Stderr, "  .kiro/steering/gortex-*.md       (Kiro steering files)\n")
 	fmt.Fprintf(os.Stderr, "  .kiro/hooks/gortex-*.json        (Kiro agent hooks)\n")
 	fmt.Fprintf(os.Stderr, "  ~/.gemini/antigravity/knowledge/gortex-workflow/  (Antigravity KI)\n")
+	fmt.Fprintf(os.Stderr, "  .cursor/mcp.json                 (Cursor MCP server config)\n")
+	fmt.Fprintf(os.Stderr, "  .vscode/mcp.json                 (VS Code / GitHub Copilot MCP config)\n")
+	fmt.Fprintf(os.Stderr, "  ~/.codeium/windsurf/mcp_config.json  (Windsurf MCP config)\n")
+	fmt.Fprintf(os.Stderr, "  .continue/mcpServers/gortex.json (Continue.dev MCP config)\n")
+	fmt.Fprintf(os.Stderr, "  ~/...cline_mcp_settings.json     (Cline MCP config)\n")
 	fmt.Fprintf(os.Stderr, "\nCommit these files so your team gets Gortex automatically.\n")
 	fmt.Fprintf(os.Stderr, "Run `gortex serve --index . --watch` or let your IDE start it via MCP config.\n")
 	return nil
@@ -1210,3 +1240,304 @@ If you are modifying ` + "`core/parser.go::Parse`" + `, check what will break:
 
 This gives you perfectly accurate AST-level analysis, guaranteeing safe edits.
 `
+
+// ─── Generic MCP JSON merge helper ─────────────────────────────────────────
+
+// writeMergeMCPJSON writes or merges the gortex server entry into an MCP JSON
+// config file. The file uses the standard {"mcpServers": {...}} format shared by
+// Claude Code, Cursor, VS Code / Copilot, Continue.dev, and Cline.
+// If extraFields is non-nil, they are merged into the gortex server entry
+// (e.g. "alwaysAllow" for Cline).
+func writeMergeMCPJSON(path string, extraFields map[string]any) error {
+	var config map[string]any
+
+	if data, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(data, &config); err != nil {
+			config = make(map[string]any)
+		}
+	} else {
+		config = make(map[string]any)
+	}
+
+	servers, ok := config["mcpServers"].(map[string]any)
+	if !ok {
+		servers = make(map[string]any)
+	}
+
+	if _, exists := servers["gortex"]; exists {
+		fmt.Fprintf(os.Stderr, "[gortex init] skip %s (gortex server already configured)\n", path)
+		return nil
+	}
+
+	entry := map[string]any{
+		"command": "gortex",
+		"args":    []string{"serve", "--index", ".", "--watch"},
+		"env":     map[string]string{"GORTEX_INDEX_WORKERS": "8"},
+	}
+	for k, v := range extraFields {
+		entry[k] = v
+	}
+
+	servers["gortex"] = entry
+	config["mcpServers"] = servers
+
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "[gortex init] created %s\n", path)
+	return nil
+}
+
+// ─── Cursor IDE Integration ────────────────────────────────────────────────
+
+// isCursorInstalled checks whether Cursor IDE is present on this system or project.
+func isCursorInstalled(root string) bool {
+	// 1. Project already has .cursor/ directory.
+	if _, err := os.Stat(filepath.Join(root, ".cursor")); err == nil {
+		return true
+	}
+	// 2. User-level Cursor config exists.
+	if home, err := os.UserHomeDir(); err == nil {
+		if _, err := os.Stat(filepath.Join(home, ".cursor")); err == nil {
+			return true
+		}
+	}
+	// 3. "cursor" CLI is in PATH.
+	if p, err := exec.LookPath("cursor"); err == nil && p != "" {
+		return true
+	}
+	return false
+}
+
+// setupCursor creates .cursor/mcp.json in the project root.
+// Cursor reads MCP config from .cursor/mcp.json (project-level).
+func setupCursor(root string) error {
+	if !isCursorInstalled(root) {
+		fmt.Fprintf(os.Stderr, "[gortex init] skip Cursor setup (Cursor not detected)\n")
+		return nil
+	}
+	fmt.Fprintf(os.Stderr, "[gortex init] setting up Cursor IDE integration...\n")
+
+	cursorDir := filepath.Join(root, ".cursor")
+	if err := os.MkdirAll(cursorDir, 0o755); err != nil {
+		return fmt.Errorf("creating .cursor: %w", err)
+	}
+
+	return writeMergeMCPJSON(filepath.Join(cursorDir, "mcp.json"), nil)
+}
+
+// ─── VS Code / GitHub Copilot Integration ──────────────────────────────────
+
+// isVSCodeInstalled checks whether VS Code is present on this system or project.
+func isVSCodeInstalled(root string) bool {
+	// 1. Project already has .vscode/ directory.
+	if _, err := os.Stat(filepath.Join(root, ".vscode")); err == nil {
+		return true
+	}
+	// 2. "code" CLI is in PATH.
+	if p, err := exec.LookPath("code"); err == nil && p != "" {
+		return true
+	}
+	// 3. VS Code app data directories exist (macOS / Linux).
+	if home, err := os.UserHomeDir(); err == nil {
+		candidates := []string{
+			filepath.Join(home, "Library", "Application Support", "Code"),       // macOS
+			filepath.Join(home, ".config", "Code"),                              // Linux
+			filepath.Join(home, ".vscode"),                                      // common
+		}
+		for _, dir := range candidates {
+			if _, err := os.Stat(dir); err == nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// setupVSCodeCopilot creates .vscode/mcp.json in the project root.
+// VS Code with GitHub Copilot reads MCP config from .vscode/mcp.json.
+func setupVSCodeCopilot(root string) error {
+	if !isVSCodeInstalled(root) {
+		fmt.Fprintf(os.Stderr, "[gortex init] skip VS Code / Copilot setup (VS Code not detected)\n")
+		return nil
+	}
+	fmt.Fprintf(os.Stderr, "[gortex init] setting up VS Code / GitHub Copilot integration...\n")
+
+	vscodeDir := filepath.Join(root, ".vscode")
+	if err := os.MkdirAll(vscodeDir, 0o755); err != nil {
+		return fmt.Errorf("creating .vscode: %w", err)
+	}
+
+	return writeMergeMCPJSON(filepath.Join(vscodeDir, "mcp.json"), nil)
+}
+
+// ─── Windsurf Integration ──────────────────────────────────────────────────
+
+// isWindsurfInstalled checks whether Windsurf (Codeium) is present on this system.
+func isWindsurfInstalled() bool {
+	// 1. "windsurf" CLI is in PATH.
+	if p, err := exec.LookPath("windsurf"); err == nil && p != "" {
+		return true
+	}
+	// 2. Windsurf config directory exists.
+	if home, err := os.UserHomeDir(); err == nil {
+		if _, err := os.Stat(filepath.Join(home, ".codeium", "windsurf")); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// setupWindsurf creates or merges gortex into ~/.codeium/windsurf/mcp_config.json.
+// Windsurf reads MCP config from this global location only.
+func setupWindsurf() error {
+	if !isWindsurfInstalled() {
+		fmt.Fprintf(os.Stderr, "[gortex init] skip Windsurf setup (Windsurf not detected)\n")
+		return nil
+	}
+	fmt.Fprintf(os.Stderr, "[gortex init] setting up Windsurf integration...\n")
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+
+	windsurfDir := filepath.Join(home, ".codeium", "windsurf")
+	if err := os.MkdirAll(windsurfDir, 0o755); err != nil {
+		return fmt.Errorf("creating ~/.codeium/windsurf: %w", err)
+	}
+
+	return writeMergeMCPJSON(filepath.Join(windsurfDir, "mcp_config.json"), nil)
+}
+
+// ─── Continue.dev Integration ──────────────────────────────────────────────
+
+// isContinueInstalled checks whether Continue.dev is present on this system or project.
+func isContinueInstalled(root string) bool {
+	// 1. Project already has .continue/ directory.
+	if _, err := os.Stat(filepath.Join(root, ".continue")); err == nil {
+		return true
+	}
+	// 2. User-level Continue config exists.
+	if home, err := os.UserHomeDir(); err == nil {
+		if _, err := os.Stat(filepath.Join(home, ".continue")); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// setupContinue creates .continue/mcpServers/gortex.json in the project root.
+// Continue.dev reads JSON MCP configs from .continue/mcpServers/ directory.
+func setupContinue(root string) error {
+	if !isContinueInstalled(root) {
+		fmt.Fprintf(os.Stderr, "[gortex init] skip Continue.dev setup (Continue not detected)\n")
+		return nil
+	}
+	fmt.Fprintf(os.Stderr, "[gortex init] setting up Continue.dev integration...\n")
+
+	continueDir := filepath.Join(root, ".continue", "mcpServers")
+	if err := os.MkdirAll(continueDir, 0o755); err != nil {
+		return fmt.Errorf("creating .continue/mcpServers: %w", err)
+	}
+
+	return writeMergeMCPJSON(filepath.Join(continueDir, "gortex.json"), nil)
+}
+
+// ─── Cline Integration ─────────────────────────────────────────────────────
+
+// isClineInstalled checks whether Cline extension is present by looking for its
+// globalStorage directories in VS Code or Cursor.
+func isClineInstalled(home string) bool {
+	candidates := clineSettingsPaths(home)
+	for _, path := range candidates {
+		dir := filepath.Dir(path)
+		if _, err := os.Stat(dir); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// setupCline creates or merges gortex into the Cline MCP settings file.
+// Cline stores config in the VS Code globalStorage directory. The location
+// varies by OS but follows the pattern:
+//   - macOS:  ~/Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json
+//   - Linux:  ~/.config/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json
+//
+// We also check for Cursor-based Cline installs.
+func setupCline() error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+
+	if !isClineInstalled(home) {
+		fmt.Fprintf(os.Stderr, "[gortex init] skip Cline setup (Cline not detected)\n")
+		return nil
+	}
+	fmt.Fprintf(os.Stderr, "[gortex init] setting up Cline integration...\n")
+
+	// Cline auto-approve list
+	alwaysAllow := []string{
+		"graph_stats", "search_symbols", "get_symbol", "get_file_summary",
+		"get_editing_context", "get_dependencies", "get_dependents",
+		"get_call_chain", "get_callers", "find_implementations", "find_usages",
+		"get_cluster", "get_symbol_signature", "get_symbol_source", "batch_symbols",
+		"find_import_path", "explain_change_impact", "get_recent_changes",
+		"smart_context", "get_edit_plan", "get_test_targets", "suggest_pattern",
+		"get_communities", "get_community", "get_processes", "get_process",
+		"detect_changes", "index_repository",
+		"verify_change", "check_guards", "prefetch_context",
+		"find_dead_code", "find_hotspots", "find_cycles", "would_create_cycle",
+		"diff_context", "index_health", "get_symbol_history",
+		"scaffold", "batch_edit",
+	}
+
+	// Candidate paths for Cline settings (VS Code and Cursor variants)
+	candidates := clineSettingsPaths(home)
+
+	for _, path := range candidates {
+		dir := filepath.Dir(path)
+		if _, err := os.Stat(dir); os.IsNotExist(err) {
+			continue // skip if the parent globalStorage dir doesn't exist
+		}
+		if err := writeMergeMCPJSON(path, map[string]any{"alwaysAllow": alwaysAllow}); err != nil {
+			fmt.Fprintf(os.Stderr, "[gortex init] warning: could not configure Cline at %s: %v\n", path, err)
+		}
+	}
+
+	return nil
+}
+
+// clineSettingsPaths returns candidate file paths for Cline's MCP settings
+// based on the current OS.
+func clineSettingsPaths(home string) []string {
+	var paths []string
+
+	// VS Code Cline extension
+	vscodeGlobalStorage := []string{
+		// macOS
+		filepath.Join(home, "Library", "Application Support", "Code", "User", "globalStorage", "saoudrizwan.claude-dev", "settings"),
+		// Linux
+		filepath.Join(home, ".config", "Code", "User", "globalStorage", "saoudrizwan.claude-dev", "settings"),
+	}
+
+	// Cursor Cline extension
+	cursorGlobalStorage := []string{
+		// macOS
+		filepath.Join(home, "Library", "Application Support", "Cursor", "User", "globalStorage", "saoudrizwan.claude-dev", "settings"),
+		// Linux
+		filepath.Join(home, ".config", "Cursor", "User", "globalStorage", "saoudrizwan.claude-dev", "settings"),
+	}
+
+	for _, dir := range append(vscodeGlobalStorage, cursorGlobalStorage...) {
+		paths = append(paths, filepath.Join(dir, "cline_mcp_settings.json"))
+	}
+
+	return paths
+}

@@ -183,44 +183,61 @@ func (g *Graph) EvictFile(filePath string) (nodesRemoved, edgesRemoved int) {
 
 // evictEdges removes edges associated with evicted node IDs or file path.
 // Must be called under write lock.
-func (g *Graph) evictEdges(evictedIDs map[string]bool, filePath string) int {
+//
+// Instead of scanning all edges in the graph (O(total_edges)), this uses
+// targeted lookups: for each evicted node, remove its outEdges/inEdges entries
+// and clean the corresponding reverse index entries. This is O(evicted_edges),
+// which is critical for performance on large graphs and low-resource devices.
+func (g *Graph) evictEdges(evictedIDs map[string]bool, _ string) int {
 	removed := 0
 
-	// Collect all unique node IDs that have edges to clean.
-	// We scan outEdges and inEdges for any entries referencing evicted nodes.
-	for nodeID, edges := range g.outEdges {
-		filtered := edges[:0]
+	// Phase 1: Remove all outgoing edges from evicted nodes.
+	// For each such edge, also remove it from the inEdges of the target node.
+	for id := range evictedIDs {
+		edges := g.outEdges[id]
+		removed += len(edges)
 		for _, e := range edges {
-			if evictedIDs[e.From] || evictedIDs[e.To] || e.FilePath == filePath {
-				removed++
-			} else {
-				filtered = append(filtered, e)
+			if !evictedIDs[e.To] {
+				// Target is not evicted — clean the inEdges entry.
+				g.inEdges[e.To] = filterEdge(g.inEdges[e.To], e)
+				if len(g.inEdges[e.To]) == 0 {
+					delete(g.inEdges, e.To)
+				}
 			}
 		}
-		if len(filtered) == 0 {
-			delete(g.outEdges, nodeID)
-		} else {
-			g.outEdges[nodeID] = filtered
-		}
+		delete(g.outEdges, id)
 	}
 
-	for nodeID, edges := range g.inEdges {
-		filtered := edges[:0]
+	// Phase 2: Remove all incoming edges to evicted nodes.
+	// For each such edge from a non-evicted source, also clean outEdges of the source.
+	for id := range evictedIDs {
+		edges := g.inEdges[id]
 		for _, e := range edges {
-			if evictedIDs[e.From] || evictedIDs[e.To] || e.FilePath == filePath {
-				// Already counted in outEdges pass; just filter.
-			} else {
-				filtered = append(filtered, e)
+			if !evictedIDs[e.From] {
+				// Source is not evicted — clean the outEdges entry.
+				// These edges were not counted in phase 1.
+				removed++
+				g.outEdges[e.From] = filterEdge(g.outEdges[e.From], e)
+				if len(g.outEdges[e.From]) == 0 {
+					delete(g.outEdges, e.From)
+				}
 			}
+			// If source IS evicted, the edge was already counted and removed in phase 1.
 		}
-		if len(filtered) == 0 {
-			delete(g.inEdges, nodeID)
-		} else {
-			g.inEdges[nodeID] = filtered
-		}
+		delete(g.inEdges, id)
 	}
 
 	return removed
+}
+
+// filterEdge removes a specific edge pointer from a slice.
+func filterEdge(edges []*Edge, target *Edge) []*Edge {
+	for i, e := range edges {
+		if e == target {
+			return append(edges[:i], edges[i+1:]...)
+		}
+	}
+	return edges
 }
 
 // NodeCount returns the total number of nodes.
@@ -345,39 +362,38 @@ func (g *Graph) EvictRepo(repoPrefix string) (nodesRemoved, edgesRemoved int) {
 
 // evictEdgesForNodes removes edges where either endpoint is in evictedIDs.
 // Must be called under write lock.
+// Uses targeted lookups instead of full graph scan for O(evicted_edges) performance.
 func (g *Graph) evictEdgesForNodes(evictedIDs map[string]bool) int {
 	removed := 0
 
-	for nodeID, edges := range g.outEdges {
-		filtered := edges[:0]
+	// Phase 1: Remove all outgoing edges from evicted nodes.
+	for id := range evictedIDs {
+		edges := g.outEdges[id]
+		removed += len(edges)
 		for _, e := range edges {
-			if evictedIDs[e.From] || evictedIDs[e.To] {
-				removed++
-			} else {
-				filtered = append(filtered, e)
+			if !evictedIDs[e.To] {
+				g.inEdges[e.To] = filterEdge(g.inEdges[e.To], e)
+				if len(g.inEdges[e.To]) == 0 {
+					delete(g.inEdges, e.To)
+				}
 			}
 		}
-		if len(filtered) == 0 {
-			delete(g.outEdges, nodeID)
-		} else {
-			g.outEdges[nodeID] = filtered
-		}
+		delete(g.outEdges, id)
 	}
 
-	for nodeID, edges := range g.inEdges {
-		filtered := edges[:0]
+	// Phase 2: Remove all incoming edges to evicted nodes from non-evicted sources.
+	for id := range evictedIDs {
+		edges := g.inEdges[id]
 		for _, e := range edges {
-			if evictedIDs[e.From] || evictedIDs[e.To] {
-				// Already counted in outEdges pass; just filter.
-			} else {
-				filtered = append(filtered, e)
+			if !evictedIDs[e.From] {
+				removed++
+				g.outEdges[e.From] = filterEdge(g.outEdges[e.From], e)
+				if len(g.outEdges[e.From]) == 0 {
+					delete(g.outEdges, e.From)
+				}
 			}
 		}
-		if len(filtered) == 0 {
-			delete(g.inEdges, nodeID)
-		} else {
-			g.inEdges[nodeID] = filtered
-		}
+		delete(g.inEdges, id)
 	}
 
 	return removed
