@@ -500,7 +500,7 @@ func (s *Server) handlePrefetchContext(_ context.Context, req mcp.CallToolReques
 				if root := s.indexer.RootPath(); root != "" {
 					absPath = filepath.Join(root, n.FilePath)
 				}
-				if source, _, err := readLines(absPath, n.StartLine, n.EndLine, 0); err == nil {
+				if source, _, _, err := readLines(absPath, n.StartLine, n.EndLine, 0); err == nil {
 					candidates[i].Source = source
 				}
 			}
@@ -833,7 +833,7 @@ func (s *Server) handleDiffContext(_ context.Context, req mcp.CallToolRequest) (
 			if root := s.indexer.RootPath(); root != "" {
 				absPath = filepath.Join(root, node.FilePath)
 			}
-			if source, _, readErr := readLines(absPath, node.StartLine, node.EndLine, 0); readErr == nil {
+			if source, _, _, readErr := readLines(absPath, node.StartLine, node.EndLine, 0); readErr == nil {
 				info.Source = source
 			}
 		}

@@ -562,5 +562,8 @@ func (s *Server) handleGraphStats(_ context.Context, _ mcp.CallToolRequest) (*mc
 		result["per_repo"] = s.graph.RepoStats()
 	}
 
+	// Include session-level token savings.
+	result["token_savings"] = s.tokenStats.snapshot()
+
 	return mcp.NewToolResultJSON(result)
 }

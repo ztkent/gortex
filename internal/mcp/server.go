@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"math"
 	"sync"
 	"time"
 
@@ -80,6 +81,7 @@ type Server struct {
 	analysisMu   sync.RWMutex
 	session      *sessionState
 	symHistory   *symbolHistory
+	tokenStats   *tokenStats
 	guardRules       []config.GuardRule
 	contractRegistry *contracts.Registry
 }
@@ -91,6 +93,44 @@ type sessionState struct {
 	viewedFiles    []string // recently viewed file paths
 	modifiedFiles  []string // files modified via edit_symbol
 	recentSearches []string // recent search queries
+}
+
+// tokenStats tracks estimated token savings for the current session.
+type tokenStats struct {
+	mu             sync.Mutex
+	tokensSaved    int64 // cumulative tokens saved vs reading full files
+	tokensReturned int64 // cumulative tokens actually returned
+	callCount      int64 // number of source-reading tool invocations
+}
+
+// record adds a single savings observation.
+// returned and fullFile are token estimates (chars / 4).
+func (ts *tokenStats) record(returned, fullFile int64) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	saved := fullFile - returned
+	if saved < 0 {
+		saved = 0
+	}
+	ts.tokensSaved += saved
+	ts.tokensReturned += returned
+	ts.callCount++
+}
+
+// snapshot returns a copy of the current counters for inclusion in responses.
+func (ts *tokenStats) snapshot() map[string]any {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	ratio := 0.0
+	if ts.tokensReturned > 0 {
+		ratio = float64(ts.tokensSaved+ts.tokensReturned) / float64(ts.tokensReturned)
+	}
+	return map[string]any{
+		"tokens_saved":     ts.tokensSaved,
+		"tokens_returned":  ts.tokensReturned,
+		"calls_counted":    ts.callCount,
+		"efficiency_ratio": math.Round(ratio*10) / 10,
+	}
 }
 
 const maxSessionItems = 20
@@ -170,7 +210,8 @@ func NewServer(engine *query.Engine, g *graph.Graph, idx *indexer.Indexer, watch
 		indexer: idx,
 		watcher: watcher,
 		logger:  logger,
-		session: newSessionState(),
+		session:    newSessionState(),
+		tokenStats: &tokenStats{},
 		symHistory: &symbolHistory{
 			entries: make(map[string][]SymbolModification),
 		},

@@ -389,20 +389,29 @@ func (s *Server) handleGetSymbolSource(_ context.Context, req mcp.CallToolReques
 		}
 	}
 
-	source, startLine, err := readLines(absPath, node.StartLine, node.EndLine, contextLines)
+	source, startLine, totalFileChars, err := readLines(absPath, node.StartLine, node.EndLine, contextLines)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("could not read source: %v", err)), nil
 	}
 
+	returned := int64(len(source)) / 4
+	fullFile := int64(totalFileChars) / 4
+	s.tokenStats.record(returned, fullFile)
+	tokensSaved := fullFile - returned
+	if tokensSaved < 0 {
+		tokensSaved = 0
+	}
+
 	result := map[string]any{
-		"id":         node.ID,
-		"kind":       node.Kind,
-		"name":       node.Name,
-		"file_path":  node.FilePath,
-		"start_line": node.StartLine,
-		"end_line":   node.EndLine,
-		"source":     source,
-		"from_line":  startLine,
+		"id":           node.ID,
+		"kind":         node.Kind,
+		"name":         node.Name,
+		"file_path":    node.FilePath,
+		"start_line":   node.StartLine,
+		"end_line":     node.EndLine,
+		"source":       source,
+		"from_line":    startLine,
+		"tokens_saved": tokensSaved,
 	}
 	if sig, ok := node.Meta["signature"]; ok {
 		result["signature"] = sig
@@ -411,10 +420,12 @@ func (s *Server) handleGetSymbolSource(_ context.Context, req mcp.CallToolReques
 }
 
 // readLines reads lines from a file, with optional context lines above/below.
-func readLines(path string, startLine, endLine, contextLines int) (string, int, error) {
+// Returns the source text, the first line number, the total file size in characters
+// (for token savings estimation), and any error.
+func readLines(path string, startLine, endLine, contextLines int) (string, int, int, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return "", 0, err
+		return "", 0, 0, err
 	}
 	defer func() { _ = f.Close() }()
 
@@ -425,23 +436,22 @@ func readLines(path string, startLine, endLine, contextLines int) (string, int, 
 	to := endLine + contextLines
 
 	var lines []string
+	var totalChars int
 	scanner := bufio.NewScanner(f)
 	lineNum := 0
 	for scanner.Scan() {
 		lineNum++
-		if lineNum < from {
-			continue
+		text := scanner.Text()
+		totalChars += len(text) + 1 // +1 for newline stripped by Scanner
+		if lineNum >= from && lineNum <= to {
+			lines = append(lines, text)
 		}
-		if lineNum > to {
-			break
-		}
-		lines = append(lines, scanner.Text())
 	}
 	if err := scanner.Err(); err != nil {
-		return "", 0, err
+		return "", 0, 0, err
 	}
 
-	return strings.Join(lines, "\n"), from, nil
+	return strings.Join(lines, "\n"), from, totalChars, nil
 }
 
 func (s *Server) handleBatchSymbols(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -462,6 +472,7 @@ func (s *Server) handleBatchSymbols(_ context.Context, req mcp.CallToolRequest) 
 	contextLines := req.GetInt("context_lines", 3)
 
 	var results []map[string]any
+	var batchTokensSaved int64
 	for _, id := range ids {
 		node := s.engine.GetSymbol(id)
 		if node == nil {
@@ -518,9 +529,18 @@ func (s *Server) handleBatchSymbols(_ context.Context, req mcp.CallToolRequest) 
 					absPath = filepath.Join(root, node.FilePath)
 				}
 			}
-			if source, fromLine, err := readLines(absPath, node.StartLine, node.EndLine, contextLines); err == nil {
+			if source, fromLine, totalFileChars, err := readLines(absPath, node.StartLine, node.EndLine, contextLines); err == nil {
 				entry["source"] = source
 				entry["from_line"] = fromLine
+				returned := int64(len(source)) / 4
+				fullFile := int64(totalFileChars) / 4
+				saved := fullFile - returned
+				if saved < 0 {
+					saved = 0
+				}
+				entry["tokens_saved"] = saved
+				batchTokensSaved += saved
+				s.tokenStats.record(returned, fullFile)
 			}
 		}
 
@@ -528,8 +548,9 @@ func (s *Server) handleBatchSymbols(_ context.Context, req mcp.CallToolRequest) 
 	}
 
 	return mcp.NewToolResultJSON(map[string]any{
-		"symbols": results,
-		"total":   len(results),
+		"symbols":      results,
+		"total":        len(results),
+		"tokens_saved": batchTokensSaved,
 	})
 }
 
@@ -693,7 +714,7 @@ func (s *Server) handleSuggestPattern(_ context.Context, req mcp.CallToolRequest
 				absPath = filepath.Join(root, node.FilePath)
 			}
 		}
-		if source, _, err := readLines(absPath, node.StartLine, node.EndLine, 0); err == nil {
+		if source, _, _, err := readLines(absPath, node.StartLine, node.EndLine, 0); err == nil {
 			result["example_source"] = source
 		}
 	}
@@ -742,7 +763,7 @@ func (s *Server) handleSuggestPattern(_ context.Context, req mcp.CallToolRequest
 					absPath = filepath.Join(root, cn.FilePath)
 				}
 			}
-			if source, _, err := readLines(absPath, cn.StartLine, cn.EndLine, 0); err == nil {
+			if source, _, _, err := readLines(absPath, cn.StartLine, cn.EndLine, 0); err == nil {
 				entry["source"] = source
 			}
 		}
@@ -776,7 +797,7 @@ func (s *Server) handleSuggestPattern(_ context.Context, req mcp.CallToolRequest
 						absPath = filepath.Join(root, tn.FilePath)
 					}
 				}
-				if source, _, err := readLines(absPath, tn.StartLine, tn.EndLine, 0); err == nil {
+				if source, _, _, err := readLines(absPath, tn.StartLine, tn.EndLine, 0); err == nil {
 					entry["source"] = source
 				}
 			}
@@ -1048,6 +1069,7 @@ func (s *Server) handleSmartContext(_ context.Context, req mcp.CallToolRequest) 
 
 	// 5. Get source and signatures for relevant symbols.
 	var symbolContexts []map[string]any
+	var smartContextTokensSaved int64
 	for _, sym := range relevantSymbols {
 		entry := map[string]any{
 			"id":         sym.ID,
@@ -1068,8 +1090,16 @@ func (s *Server) handleSmartContext(_ context.Context, req mcp.CallToolRequest) 
 					absPath = filepath.Join(root, sym.FilePath)
 				}
 			}
-			if source, _, err := readLines(absPath, sym.StartLine, sym.EndLine, 0); err == nil {
+			if source, _, totalFileChars, err := readLines(absPath, sym.StartLine, sym.EndLine, 0); err == nil {
 				entry["source"] = source
+				returned := int64(len(source)) / 4
+				fullFile := int64(totalFileChars) / 4
+				saved := fullFile - returned
+				if saved < 0 {
+					saved = 0
+				}
+				smartContextTokensSaved += saved
+				s.tokenStats.record(returned, fullFile)
 			}
 		}
 		symbolContexts = append(symbolContexts, entry)
@@ -1179,6 +1209,9 @@ func (s *Server) handleSmartContext(_ context.Context, req mcp.CallToolRequest) 
 		}
 	}
 	result["files_to_edit"] = filesToEdit
+	if smartContextTokensSaved > 0 {
+		result["tokens_saved"] = smartContextTokensSaved
+	}
 
 	return mcp.NewToolResultJSON(result)
 }

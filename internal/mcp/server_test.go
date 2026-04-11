@@ -88,6 +88,9 @@ func findAndCallHandler(srv *Server, name string, ctx context.Context, req mcpli
 		"find_import_path":      srv.handleFindImportPath,
 		"explain_change_impact": srv.handleEnhancedChangeImpact,
 		"get_recent_changes":    srv.handleGetRecentChanges,
+		"get_symbol_source":     srv.handleGetSymbolSource,
+		"batch_symbols":         srv.handleBatchSymbols,
+		"smart_context":         srv.handleSmartContext,
 	}
 	h, ok := handlers[name]
 	if !ok {
@@ -107,6 +110,43 @@ func TestGraphStats(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(text), &stats))
 	assert.Greater(t, stats.TotalNodes, 0)
 	assert.Greater(t, stats.TotalEdges, 0)
+}
+
+func TestTokenSavings_GetSymbolSource(t *testing.T) {
+	srv, _ := setupTestServer(t)
+
+	// Find the "helper" function ID via search.
+	searchResult := callTool(t, srv, "search_symbols", map[string]any{"query": "helper"})
+	require.False(t, searchResult.IsError)
+	text := searchResult.Content[0].(mcplib.TextContent).Text
+	var searchResp map[string]any
+	require.NoError(t, json.Unmarshal([]byte(text), &searchResp))
+	results := searchResp["results"].([]any)
+	require.Greater(t, len(results), 0)
+	firstResult := results[0].(map[string]any)
+	symbolID := firstResult["id"].(string)
+
+	// Call get_symbol_source — should include tokens_saved.
+	result := callTool(t, srv, "get_symbol_source", map[string]any{"id": symbolID})
+	require.False(t, result.IsError)
+	text = result.Content[0].(mcplib.TextContent).Text
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal([]byte(text), &resp))
+	assert.Contains(t, resp, "tokens_saved")
+	assert.Contains(t, resp, "source")
+	// tokens_saved should be >= 0 (for a 1-line function in a small file, could be small)
+	assert.GreaterOrEqual(t, resp["tokens_saved"].(float64), float64(0))
+
+	// graph_stats should now reflect the session savings.
+	statsResult := callTool(t, srv, "graph_stats", nil)
+	require.False(t, statsResult.IsError)
+	text = statsResult.Content[0].(mcplib.TextContent).Text
+	var statsResp map[string]any
+	require.NoError(t, json.Unmarshal([]byte(text), &statsResp))
+	savings := statsResp["token_savings"].(map[string]any)
+	assert.GreaterOrEqual(t, savings["tokens_saved"].(float64), float64(0))
+	assert.GreaterOrEqual(t, savings["calls_counted"].(float64), float64(1))
+	assert.GreaterOrEqual(t, savings["efficiency_ratio"].(float64), float64(1))
 }
 
 func TestSearchSymbols(t *testing.T) {
