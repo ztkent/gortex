@@ -58,6 +58,7 @@ func runClean(_ *cobra.Command, _ []string) error {
 		fmt.Fprintf(os.Stderr, "[gortex clean] done (%d items removed)\n", removed)
 		fmt.Fprintln(os.Stderr, "Note: CLAUDE.md was not modified — remove the Gortex block manually if needed.")
 		fmt.Fprintln(os.Stderr, "Note: .kiro/steering/ files with 'gortex-' prefix were removed. Other .kiro/ files were preserved.")
+		fmt.Fprintln(os.Stderr, "Note: Antigravity KIs are global and were not removed. Manually delete ~/.gemini/antigravity/knowledge/gortex-workflow if desired.")
 	}
 
 	return nil

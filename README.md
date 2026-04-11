@@ -61,15 +61,6 @@ gortex track /path/to/another-repo
 gortex untrack /path/to/another-repo
 ```
 
-## Usage with Claude Code
-
-After running `gortex init`, Claude Code automatically starts Gortex via `.mcp.json`. The agent gets:
-
-- **Slash commands:** `/gortex-guide`, `/gortex-explore`, `/gortex-debug`, `/gortex-impact`, `/gortex-refactor`
-- **Global skills:** installed to `~/.claude/skills/` — available across all repos
-- **PreToolUse hook:** automatic graph context on Read/Grep calls
-- **CLAUDE.md instructions:** mandatory tool usage table and session workflow
-
 ## Multi-Repo Workspaces
 
 Gortex can index multiple repositories into a single shared graph, enabling cross-repo symbol resolution, impact analysis, and navigation.
@@ -135,6 +126,15 @@ All query tools (`search_symbols`, `get_symbol`, `find_usages`, `get_file_summar
 - **Shared repos** — the same repo can appear in multiple projects with different reference tags. It's indexed once and shared across projects.
 - **Auto-detection** — set `workspace.auto_detect: true` in `.gortex.yaml` to auto-discover Git repos in a parent directory.
 
+## Usage with Claude Code
+
+After running `gortex init`, Claude Code automatically starts Gortex via `.mcp.json`. The agent gets:
+
+- **Slash commands:** `/gortex-guide`, `/gortex-explore`, `/gortex-debug`, `/gortex-impact`, `/gortex-refactor`
+- **Global skills:** installed to `~/.claude/skills/` — available across all repos
+- **PreToolUse hook:** automatic graph context on Read/Grep calls
+- **CLAUDE.md instructions:** mandatory tool usage table and session workflow
+
 ## Usage with Kiro
 
 `gortex init` also sets up Kiro IDE integration automatically:
@@ -145,6 +145,14 @@ All query tools (`search_symbols`, `get_symbol`, `find_usages`, `get_file_summar
   - `gortex-smart-context` — on each prompt, assembles task-relevant context from the graph in one call
   - `gortex-post-edit` — after saving source files, shows blast radius and which tests to run
   - `gortex-pre-read` — before reading source files, enriches with symbol context from the graph
+
+## Usage with Antigravity
+
+`gortex init` also automatically loads project intelligence instructions into the Antigravity agent:
+
+- **Knowledge Item (KI):** Creates a dedicated KI globally in `~/.gemini/antigravity/knowledge/gortex-workflow/`.
+- **Workflow Instructions:** Instructs the Antigravity assistant to prioritize executing AST-aware Gortex CLI queries (`./gortex query symbol`, `./gortex query dependents`) via its built-in terminal tool, overriding generic `grep` and file read routines.
+- **Token Efficiency:** Significantly reduces context token usage by constraining the AI's reads precisely to verified dependency paths and function definitions.
 
 ## CLI Commands
 
