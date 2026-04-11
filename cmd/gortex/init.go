@@ -126,7 +126,12 @@ func runInit(_ *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "[gortex init] warning: Cline setup failed: %v\n", err)
 	}
 
-	// 14. Create/update GlobalConfig for multi-repo mode.
+	// 14. Set up OpenCode integration
+	if err := setupOpenCode(root); err != nil {
+		fmt.Fprintf(os.Stderr, "[gortex init] warning: OpenCode setup failed: %v\n", err)
+	}
+
+	// 15. Create/update GlobalConfig for multi-repo mode.
 	if err := ensureGlobalConfig(root); err != nil {
 		fmt.Fprintf(os.Stderr, "[gortex init] warning: could not update global config: %v\n", err)
 	}
@@ -147,6 +152,7 @@ func runInit(_ *cobra.Command, args []string) error {
 	fmt.Fprintf(os.Stderr, "  ~/.codeium/windsurf/mcp_config.json  (Windsurf MCP config)\n")
 	fmt.Fprintf(os.Stderr, "  .continue/mcpServers/gortex.json (Continue.dev MCP config)\n")
 	fmt.Fprintf(os.Stderr, "  ~/...cline_mcp_settings.json     (Cline MCP config)\n")
+	fmt.Fprintf(os.Stderr, "  .opencode/config.json            (OpenCode MCP config)\n")
 	fmt.Fprintf(os.Stderr, "\nCommit these files so your team gets Gortex automatically.\n")
 	fmt.Fprintf(os.Stderr, "Run `gortex serve --index . --watch` or let your IDE start it via MCP config.\n")
 	return nil
@@ -1540,4 +1546,91 @@ func clineSettingsPaths(home string) []string {
 	}
 
 	return paths
+}
+
+// ─── OpenCode Integration ──────────────────────────────────────────────────
+
+// isOpenCodeInstalled checks whether OpenCode is present on this system or project.
+func isOpenCodeInstalled(root string) bool {
+	// 1. Project already has .opencode/ directory.
+	if _, err := os.Stat(filepath.Join(root, ".opencode")); err == nil {
+		return true
+	}
+	// 2. "opencode" CLI is in PATH.
+	if p, err := exec.LookPath("opencode"); err == nil && p != "" {
+		return true
+	}
+	// 3. Global OpenCode config exists.
+	if home, err := os.UserHomeDir(); err == nil {
+		if _, err := os.Stat(filepath.Join(home, ".config", "opencode")); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// setupOpenCode creates or merges gortex into .opencode/config.json (project-level).
+// OpenCode uses a different config format: {"mcp": {"name": {"type": "local", "command": [...]}}}
+func setupOpenCode(root string) error {
+	if !isOpenCodeInstalled(root) {
+		fmt.Fprintf(os.Stderr, "[gortex init] skip OpenCode setup (OpenCode not detected)\n")
+		return nil
+	}
+	fmt.Fprintf(os.Stderr, "[gortex init] setting up OpenCode integration...\n")
+
+	opencodeDir := filepath.Join(root, ".opencode")
+	if err := os.MkdirAll(opencodeDir, 0o755); err != nil {
+		return fmt.Errorf("creating .opencode: %w", err)
+	}
+
+	return writeMergeOpenCodeConfig(filepath.Join(opencodeDir, "config.json"))
+}
+
+// writeMergeOpenCodeConfig writes or merges the gortex server into an OpenCode config file.
+// OpenCode uses: {"mcp": {"gortex": {"type": "local", "command": [...], "environment": {...}}}}
+func writeMergeOpenCodeConfig(path string) error {
+	var config map[string]any
+
+	if data, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(data, &config); err != nil {
+			config = make(map[string]any)
+		}
+	} else {
+		config = make(map[string]any)
+	}
+
+	mcpSection, ok := config["mcp"].(map[string]any)
+	if !ok {
+		mcpSection = make(map[string]any)
+	}
+
+	if _, exists := mcpSection["gortex"]; exists {
+		fmt.Fprintf(os.Stderr, "[gortex init] skip %s (gortex server already configured)\n", path)
+		return nil
+	}
+
+	mcpSection["gortex"] = map[string]any{
+		"type":    "local",
+		"command": []string{"gortex", "serve", "--index", ".", "--watch"},
+		"environment": map[string]string{
+			"GORTEX_INDEX_WORKERS": "8",
+		},
+		"enabled": true,
+	}
+	config["mcp"] = mcpSection
+
+	// Preserve the $schema field if not already set.
+	if _, hasSchema := config["$schema"]; !hasSchema {
+		config["$schema"] = "https://opencode.ai/config.json"
+	}
+
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "[gortex init] created %s\n", path)
+	return nil
 }

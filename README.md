@@ -5,7 +5,7 @@
 
 Code intelligence engine that indexes repositories into an in-memory knowledge graph and exposes it via CLI, MCP Server, and web UI.
 
-Built for AI coding agents (Claude Code, Kiro, Cursor, Windsurf, Copilot, Continue.dev, Cline, Antigravity) — one `smart_context` call replaces 5-10 file reads, cutting token usage by ~94%.
+Built for AI coding agents (Claude Code, Kiro, Cursor, Windsurf, Copilot, Continue.dev, Cline, OpenCode, Antigravity) — one `smart_context` call replaces 5-10 file reads, cutting token usage by ~94%.
 
 ![Gortex Web UI — force-directed knowledge graph visualization](assets/graph.png)
 
@@ -38,7 +38,7 @@ Built for AI coding agents (Claude Code, Kiro, Cursor, Windsurf, Copilot, Contin
 # Build (requires CGO for tree-sitter C bindings)
 go build -o gortex ./cmd/gortex/
 
-# Set up Gortex for a project (creates configs for Claude Code, Kiro, Cursor, Copilot, Windsurf, Continue.dev, Cline, Antigravity — auto-detects installed tools)
+# Set up Gortex for a project (creates configs for Claude Code, Kiro, Cursor, Copilot, Windsurf, Continue.dev, Cline, OpenCode, Antigravity — auto-detects installed tools)
 gortex init /path/to/repo
 
 # Or with codebase analysis for a richer CLAUDE.md
@@ -184,6 +184,12 @@ After running `gortex init`, Claude Code automatically starts Gortex via `.mcp.j
 `gortex init` detects Cline (via VS Code or Cursor globalStorage directories) and creates:
 
 - **MCP config:** `cline_mcp_settings.json` in the Cline extension's globalStorage directory. Includes an `alwaysAllow` list for read-only Gortex tools.
+
+## Usage with OpenCode
+
+`gortex init` detects OpenCode (via `.opencode/` directory in project, `opencode` in PATH, or `~/.config/opencode/`) and creates:
+
+- **MCP config:** `.opencode/config.json` — project-level config using OpenCode's native format (`"type": "local"`, `"command"` as array, `"environment"` for env vars). Merges into existing config without overwriting other servers.
 
 ## CLI Commands
 
