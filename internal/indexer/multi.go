@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -278,6 +279,12 @@ func (mi *MultiIndexer) IndexRepo(repoPrefix string) (*IndexResult, error) {
 
 // TrackRepo validates the path, detects identity, indexes, and adds to config.
 func (mi *MultiIndexer) TrackRepo(entry config.RepoEntry) (*IndexResult, error) {
+	return mi.TrackRepoCtx(context.Background(), entry)
+}
+
+// TrackRepoCtx is TrackRepo with a context, allowing callers to pipe progress
+// reporters (via progress.WithReporter) through to the underlying Index call.
+func (mi *MultiIndexer) TrackRepoCtx(ctx context.Context, entry config.RepoEntry) (*IndexResult, error) {
 	absPath, err := filepath.Abs(entry.Path)
 	if err != nil {
 		return nil, fmt.Errorf("resolving path %s: %w", entry.Path, err)
@@ -320,7 +327,7 @@ func (mi *MultiIndexer) TrackRepo(entry config.RepoEntry) (*IndexResult, error) 
 		idx.SetRepoPrefix(prefix)
 	}
 
-	result, err := idx.Index(absPath)
+	result, err := idx.IndexCtx(ctx, absPath)
 	if err != nil {
 		return nil, fmt.Errorf("indexing %s: %w", absPath, err)
 	}

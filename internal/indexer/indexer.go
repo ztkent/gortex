@@ -17,6 +17,7 @@ import (
 	"github.com/zzet/gortex/internal/embedding"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
+	"github.com/zzet/gortex/internal/progress"
 	"github.com/zzet/gortex/internal/resolver"
 	"github.com/zzet/gortex/internal/search"
 	"github.com/zzet/gortex/internal/semantic"
@@ -197,14 +198,29 @@ func (idx *Indexer) applyRepoPrefix(nodes []*graph.Node, edges []*graph.Edge) {
 }
 
 // Index walks root and populates the graph using a concurrent worker pool.
+//
+// This is the backwards-compatible entry point; it delegates to IndexCtx with
+// a background context. Callers wanting progress notifications or cancellation
+// should use IndexCtx directly.
 func (idx *Indexer) Index(root string) (*IndexResult, error) {
+	return idx.IndexCtx(context.Background(), root)
+}
+
+// IndexCtx is Index with a context, enabling progress reporting. The reporter
+// is pulled from ctx via progress.FromContext — attach one with
+// progress.WithReporter to receive stage updates. If no reporter is attached,
+// stage calls are silently dropped.
+func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, error) {
 	start := time.Now()
+	reporter := progress.FromContext(ctx)
 
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
 		return nil, err
 	}
 	idx.rootPath = absRoot
+
+	reporter.Report("walking files", 0, 0)
 
 	// Collect files.
 	var files []string
@@ -228,6 +244,7 @@ func (idx *Indexer) Index(root string) (*IndexResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	reporter.Report("walking files", len(files), len(files))
 
 	// Worker pool.
 	workers := idx.config.Workers
@@ -289,9 +306,18 @@ func (idx *Indexer) Index(root string) (*IndexResult, error) {
 		close(resultCh)
 	}()
 
+	// parseReportEvery throttles progress emissions inside the parse loop.
+	// At 50 files/tick a 5000-file repo produces ~100 updates — enough for a
+	// smooth bar without flooding the notification channel.
+	const parseReportEvery = 50
 	var errors []IndexError
 	fileCount := 0
+	processed := 0
 	for fr := range resultCh {
+		processed++
+		if processed == 1 || processed%parseReportEvery == 0 {
+			reporter.Report("parsing", processed, len(files))
+		}
 		if fr.err != nil {
 			errors = append(errors, IndexError{FilePath: fr.file, Error: fr.err.Error()})
 			continue
@@ -304,6 +330,9 @@ func (idx *Indexer) Index(root string) (*IndexResult, error) {
 		for _, e := range fr.edges {
 			idx.graph.AddEdge(e)
 		}
+	}
+	if processed > 0 {
+		reporter.Report("parsing", processed, len(files))
 	}
 
 	// Populate fileMtimes for all detected files.
@@ -322,14 +351,17 @@ func (idx *Indexer) Index(root string) (*IndexResult, error) {
 	idx.totalDetected = len(files)
 	idx.lastIndexTime = time.Now()
 
+	reporter.Report("resolving references", 0, 0)
 	// Resolve cross-file references.
 	idx.resolver.ResolveAll()
 
+	reporter.Report("inferring interfaces", 0, 0)
 	// Infer structural interface satisfaction.
 	idx.resolver.InferImplements()
 
 	// Semantic enrichment (SCIP, go/types, LSP).
 	if idx.semanticMgr != nil && idx.semanticMgr.Enabled() && idx.semanticMgr.HasProviders() {
+		reporter.Report("semantic enrichment", 0, 0)
 		roots := map[string]string{"default": absRoot}
 		results, err := idx.semanticMgr.EnrichAll(idx.graph, roots)
 		if err != nil {
@@ -348,14 +380,17 @@ func (idx *Indexer) Index(root string) (*IndexResult, error) {
 		}
 	}
 
+	reporter.Report("building search index", 0, 0)
 	// Build search index.
 	idx.buildSearchIndex()
 
+	reporter.Report("extracting contracts", 0, 0)
 	// Extract API contracts (HTTP routes, gRPC services, etc.).
 	idx.extractContracts()
 
 	// Auto-upgrade to Bleve if above threshold.
 	if idx.search.Count() >= search.AutoThreshold {
+		reporter.Report("upgrading search backend", 0, 0)
 		if blv, err := search.NewBleve(); err == nil {
 			old := idx.search
 			for _, n := range idx.graph.AllNodes() {
@@ -371,6 +406,8 @@ func (idx *Indexer) Index(root string) (*IndexResult, error) {
 				zap.Int("symbols", idx.search.Count()))
 		}
 	}
+
+	reporter.Report("indexing complete", fileCount, len(files))
 
 	return &IndexResult{
 		NodeCount:  idx.graph.NodeCount(),

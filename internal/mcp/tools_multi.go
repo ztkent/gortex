@@ -49,7 +49,7 @@ func (s *Server) registerMultiRepoTools() {
 }
 
 // handleTrackRepository validates the path, indexes the repo, and persists to GlobalConfig.
-func (s *Server) handleTrackRepository(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleTrackRepository(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	path, err := req.RequireString("path")
 	if err != nil {
 		return mcp.NewToolResultError("path is required"), nil
@@ -73,7 +73,7 @@ func (s *Server) handleTrackRepository(_ context.Context, req mcp.CallToolReques
 		entry.Name = name
 	}
 
-	result, trackErr := s.multiIndexer.TrackRepo(entry)
+	result, trackErr := s.multiIndexer.TrackRepoCtx(s.progressCtx(ctx, req), entry)
 	if trackErr != nil {
 		return mcp.NewToolResultError(trackErr.Error()), nil
 	}

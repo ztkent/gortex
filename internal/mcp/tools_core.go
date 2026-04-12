@@ -429,12 +429,12 @@ func (s *Server) registerCoreTools() {
 	)
 }
 
-func (s *Server) handleIndexRepository(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleIndexRepository(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	path, err := req.RequireString("path")
 	if err != nil {
 		return mcp.NewToolResultError("path is required"), nil
 	}
-	result, err := s.indexer.Index(path)
+	result, err := s.indexer.IndexCtx(s.progressCtx(ctx, req), path)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
