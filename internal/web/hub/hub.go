@@ -79,6 +79,17 @@ func (h *Hub) Unsubscribe(id string) {
 	}
 }
 
+// SubscriberCount returns the number of active subscribers. Tests use this
+// to wait for an SSE client to finish registering before publishing events
+// that the client needs to observe — broadcast() drops messages silently
+// when a subscriber hasn't registered yet, so timing races are easy to
+// write without a way to synchronize.
+func (h *Hub) SubscriberCount() int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.subscribers)
+}
+
 // Stop signals the hub to stop processing events.
 func (h *Hub) Stop() {
 	select {

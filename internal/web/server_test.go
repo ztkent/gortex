@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -133,6 +134,15 @@ func TestHandleSSE(t *testing.T) {
 
 	assert.Contains(t, resp.Header.Get("Content-Type"), "text/event-stream")
 
+	// http.Get returns when headers are flushed, but the handler's
+	// Subscribe() call happens after that flush — so on a slow runner the
+	// test can race past the subscription and publish an event into an
+	// empty subscriber set (broadcast drops it silently). Wait until the
+	// hub shows 1 subscriber before publishing.
+	require.Eventually(t, func() bool {
+		return h.SubscriberCount() == 1
+	}, 2*time.Second, 5*time.Millisecond, "SSE client never registered with hub")
+
 	// Send an event
 	events <- indexer.GraphChangeEvent{
 		FilePath:   "test.go",
@@ -141,11 +151,36 @@ func TestHandleSSE(t *testing.T) {
 		Timestamp:  time.Now(),
 	}
 
-	// Read from the SSE stream
-	buf := make([]byte, 4096)
-	n, err := resp.Body.Read(buf)
-	require.NoError(t, err)
-	body := string(buf[:n])
+	// Read from the SSE stream with a deadline. The server writes each
+	// event as a discrete frame, but Read() can return a partial frame on
+	// a slow runner — keep reading on a goroutine and fail if no
+	// graph_change frame arrives within the budget.
+	got := make(chan string, 1)
+	go func() {
+		var b []byte
+		buf := make([]byte, 4096)
+		for {
+			n, err := resp.Body.Read(buf)
+			if n > 0 {
+				b = append(b, buf[:n]...)
+				if strings.Contains(string(b), "graph_change") && strings.Contains(string(b), "test.go") {
+					got <- string(b)
+					return
+				}
+			}
+			if err != nil {
+				got <- string(b)
+				return
+			}
+		}
+	}()
+
+	var body string
+	select {
+	case body = <-got:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timed out waiting for graph_change event (last body: %q)", body)
+	}
 	assert.Contains(t, body, "graph_change")
 	assert.Contains(t, body, "test.go")
 }
