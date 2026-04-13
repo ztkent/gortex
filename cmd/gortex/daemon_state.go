@@ -28,11 +28,10 @@ type daemonState struct {
 	multiIndexer  *indexer.MultiIndexer
 	configManager *config.ConfigManager
 	mcpServer     *gortexmcp.Server
-
-	// multiWatcher watches tracked repos for fsnotify events and streams
-	// re-indexes into the graph. nil when there's no ConfigManager (rare
-	// — single-repo mode only).
-	multiWatcher *indexer.MultiWatcher
+	// MultiWatcher is built by warmupDaemonState (after tracked repos
+	// have been re-indexed) and handed to realController via
+	// AttachWatcher — it isn't held on daemonState because no caller
+	// reads it from here.
 }
 
 // buildDaemonState constructs the full object graph the daemon needs:
