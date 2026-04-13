@@ -1,6 +1,9 @@
 package graph
 
-import "sync"
+import (
+	"hash/fnv"
+	"sync"
+)
 
 // GraphStats holds summary counts of the graph contents.
 type GraphStats struct {
@@ -10,21 +13,38 @@ type GraphStats struct {
 	ByLanguage map[string]int `json:"by_language"`
 }
 
-// Graph is a thread-safe in-memory knowledge graph.
-type Graph struct {
+// numShards controls the write-fan-out of the graph. Each shard owns a
+// disjoint slice of node IDs (by FNV hash) and its own RWMutex, so
+// parallel indexers writing distinct nodes don't contend for a single
+// lock. 16 is a good default: even split across typical 8- or 12-core
+// machines, small enough that operations which must walk every shard
+// (AllNodes, Stats, EvictRepo) stay cheap.
+//
+// Trade-off: the old graph used one lock per graph; now we have 16, and
+// cross-shard operations (AddEdge when source and target are in
+// different shards, plus exhaustive reads) lock multiple shards. To
+// avoid deadlock we always acquire shards in ascending index order.
+const numShards = 16
+
+// shard is a fragment of the graph's data. Each shard holds the node
+// metadata for the subset of IDs that hash to it, plus the outgoing
+// edges whose source ID is in this shard and the incoming edges whose
+// target ID is in this shard. Secondary indexes (byName, byFile, etc.)
+// inside a shard only contain nodes owned by that shard; aggregate
+// queries iterate every shard and concatenate.
+type shard struct {
+	mu       sync.RWMutex
 	nodes    map[string]*Node
 	outEdges map[string][]*Edge
 	inEdges  map[string][]*Edge
 	byFile   map[string][]*Node
 	byName   map[string][]*Node
 	byQual   map[string]*Node
-	byRepo   map[string][]*Node // repoPrefix → nodes
-	mu       sync.RWMutex
+	byRepo   map[string][]*Node // repoPrefix → nodes owned by this shard
 }
 
-// New creates an empty graph.
-func New() *Graph {
-	return &Graph{
+func newShard() *shard {
+	return &shard{
 		nodes:    make(map[string]*Node),
 		outEdges: make(map[string][]*Edge),
 		inEdges:  make(map[string][]*Edge),
@@ -35,92 +55,195 @@ func New() *Graph {
 	}
 }
 
+// Graph is a thread-safe in-memory knowledge graph. Internally sharded
+// by node-ID hash so writers touching disjoint IDs run in parallel.
+type Graph struct {
+	shards [numShards]*shard
+}
+
+// New creates an empty graph.
+func New() *Graph {
+	g := &Graph{}
+	for i := range g.shards {
+		g.shards[i] = newShard()
+	}
+	return g
+}
+
+// shardIdx picks the shard index for an ID using FNV-1a. Stable across
+// restarts but that doesn't matter — the hash is recomputed every call.
+func shardIdx(id string) int {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(id))
+	return int(h.Sum32() % numShards)
+}
+
+// shardFor returns the shard that owns the given ID.
+func (g *Graph) shardFor(id string) *shard {
+	return g.shards[shardIdx(id)]
+}
+
+// lockTwoWrite locks two shards for write in ascending index order to
+// prevent deadlock. If both IDs land in the same shard, the mutex is
+// locked exactly once. Returns a closure the caller defers to unlock.
+func (g *Graph) lockTwoWrite(idA, idB string) func() {
+	a := shardIdx(idA)
+	b := shardIdx(idB)
+	if a == b {
+		s := g.shards[a]
+		s.mu.Lock()
+		return s.mu.Unlock
+	}
+	lo, hi := a, b
+	if lo > hi {
+		lo, hi = hi, lo
+	}
+	sLo := g.shards[lo]
+	sHi := g.shards[hi]
+	sLo.mu.Lock()
+	sHi.mu.Lock()
+	return func() {
+		sHi.mu.Unlock()
+		sLo.mu.Unlock()
+	}
+}
+
+// lockAllWrite / lockAllRead take every shard's lock in order. Used by
+// operations that have to touch the whole graph (AllNodes, Stats,
+// EvictRepo). Callers must match with unlockAllWrite / unlockAllRead.
+func (g *Graph) lockAllWrite() {
+	for _, s := range g.shards {
+		s.mu.Lock()
+	}
+}
+
+func (g *Graph) unlockAllWrite() {
+	for i := len(g.shards) - 1; i >= 0; i-- {
+		g.shards[i].mu.Unlock()
+	}
+}
+
+func (g *Graph) lockAllRead() {
+	for _, s := range g.shards {
+		s.mu.RLock()
+	}
+}
+
+func (g *Graph) unlockAllRead() {
+	for i := len(g.shards) - 1; i >= 0; i-- {
+		g.shards[i].mu.RUnlock()
+	}
+}
+
 // AddNode inserts a node into the graph and all indexes.
 func (g *Graph) AddNode(n *Node) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.nodes[n.ID] = n
-	g.byFile[n.FilePath] = append(g.byFile[n.FilePath], n)
-	g.byName[n.Name] = append(g.byName[n.Name], n)
+	s := g.shardFor(n.ID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nodes[n.ID] = n
+	s.byFile[n.FilePath] = append(s.byFile[n.FilePath], n)
+	s.byName[n.Name] = append(s.byName[n.Name], n)
 	if n.QualName != "" {
-		g.byQual[n.QualName] = n
+		s.byQual[n.QualName] = n
 	}
 	if n.RepoPrefix != "" {
-		g.byRepo[n.RepoPrefix] = append(g.byRepo[n.RepoPrefix], n)
+		s.byRepo[n.RepoPrefix] = append(s.byRepo[n.RepoPrefix], n)
 	}
 }
 
-// AddEdge inserts a directed edge into the graph.
+// AddEdge inserts a directed edge into the graph. Locks both the From
+// and To shards (same shard locked once if they collide) so outEdges
+// and inEdges stay consistent.
 func (g *Graph) AddEdge(e *Edge) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.outEdges[e.From] = append(g.outEdges[e.From], e)
-	g.inEdges[e.To] = append(g.inEdges[e.To], e)
+	unlock := g.lockTwoWrite(e.From, e.To)
+	defer unlock()
+	g.shardFor(e.From).outEdges[e.From] = append(g.shardFor(e.From).outEdges[e.From], e)
+	g.shardFor(e.To).inEdges[e.To] = append(g.shardFor(e.To).inEdges[e.To], e)
 }
 
-// ReindexEdge updates the inEdges index after an edge's To field has been mutated
-// (e.g., by the resolver changing "unresolved::X" to a real target).
-// oldTo is the previous value of e.To before mutation.
+// ReindexEdge updates the inEdges index after an edge's To field has
+// been mutated (e.g., by the resolver changing "unresolved::X" to a
+// real target). oldTo is the previous value of e.To before mutation.
 func (g *Graph) ReindexEdge(e *Edge, oldTo string) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-
 	if oldTo == e.To {
 		return
 	}
+	// The outEdges entry doesn't move (source ID is unchanged); only
+	// the inEdges slot shifts from oldTo → e.To.
+	unlock := g.lockTwoWrite(oldTo, e.To)
+	defer unlock()
 
-	// Remove from old inEdges slot.
-	inList := g.inEdges[oldTo]
+	sOld := g.shardFor(oldTo)
+	inList := sOld.inEdges[oldTo]
 	for i, ie := range inList {
 		if ie == e {
-			g.inEdges[oldTo] = append(inList[:i], inList[i+1:]...)
+			sOld.inEdges[oldTo] = append(inList[:i], inList[i+1:]...)
+			if len(sOld.inEdges[oldTo]) == 0 {
+				delete(sOld.inEdges, oldTo)
+			}
 			break
 		}
 	}
 
-	// Add to new inEdges slot.
-	g.inEdges[e.To] = append(g.inEdges[e.To], e)
+	sNew := g.shardFor(e.To)
+	sNew.inEdges[e.To] = append(sNew.inEdges[e.To], e)
 }
 
 // GetNode returns a node by ID, or nil if not found.
 func (g *Graph) GetNode(id string) *Node {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-	return g.nodes[id]
+	s := g.shardFor(id)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.nodes[id]
 }
 
 // GetNodeByQualName returns a node by fully-qualified name, or nil.
+// The qual name index is partitioned across shards (each shard owns the
+// qual names of the nodes it stores), so we ask every shard.
 func (g *Graph) GetNodeByQualName(qualName string) *Node {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-	return g.byQual[qualName]
+	for _, s := range g.shards {
+		s.mu.RLock()
+		if n, ok := s.byQual[qualName]; ok {
+			s.mu.RUnlock()
+			return n
+		}
+		s.mu.RUnlock()
+	}
+	return nil
 }
 
 // FindNodesByName returns all nodes matching the short name.
 func (g *Graph) FindNodesByName(name string) []*Node {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-	src := g.byName[name]
-	out := make([]*Node, len(src))
-	copy(out, src)
+	var out []*Node
+	for _, s := range g.shards {
+		s.mu.RLock()
+		if src := s.byName[name]; len(src) > 0 {
+			out = append(out, src...)
+		}
+		s.mu.RUnlock()
+	}
 	return out
 }
 
 // GetFileNodes returns all nodes defined in the given file.
 func (g *Graph) GetFileNodes(filePath string) []*Node {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-	src := g.byFile[filePath]
-	out := make([]*Node, len(src))
-	copy(out, src)
+	var out []*Node
+	for _, s := range g.shards {
+		s.mu.RLock()
+		if src := s.byFile[filePath]; len(src) > 0 {
+			out = append(out, src...)
+		}
+		s.mu.RUnlock()
+	}
 	return out
 }
 
 // GetOutEdges returns outgoing edges for a node.
 func (g *Graph) GetOutEdges(nodeID string) []*Edge {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-	src := g.outEdges[nodeID]
+	s := g.shardFor(nodeID)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	src := s.outEdges[nodeID]
 	out := make([]*Edge, len(src))
 	copy(out, src)
 	return out
@@ -128,116 +251,120 @@ func (g *Graph) GetOutEdges(nodeID string) []*Edge {
 
 // GetInEdges returns incoming edges for a node.
 func (g *Graph) GetInEdges(nodeID string) []*Edge {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-	src := g.inEdges[nodeID]
+	s := g.shardFor(nodeID)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	src := s.inEdges[nodeID]
 	out := make([]*Edge, len(src))
 	copy(out, src)
 	return out
 }
 
-// EvictFile removes all nodes and edges belonging to the given file path.
-// Returns counts of removed nodes and edges.
+// EvictFile removes all nodes and edges belonging to the given file
+// path. Nodes for one file can span many shards (different IDs hash
+// differently), so we lock all shards for this multi-shard operation.
 func (g *Graph) EvictFile(filePath string) (nodesRemoved, edgesRemoved int) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
+	g.lockAllWrite()
+	defer g.unlockAllWrite()
 
-	nodes := g.byFile[filePath]
+	// Gather nodes across shards.
+	var nodes []*Node
+	for _, s := range g.shards {
+		nodes = append(nodes, s.byFile[filePath]...)
+	}
 	if len(nodes) == 0 {
 		return 0, 0
 	}
-
-	// Collect IDs of nodes being evicted for edge cleanup.
 	evictedIDs := make(map[string]bool, len(nodes))
 	for _, n := range nodes {
 		evictedIDs[n.ID] = true
 	}
 
-	// Remove nodes from all indexes.
 	for _, n := range nodes {
-		delete(g.nodes, n.ID)
+		s := g.shardFor(n.ID)
+		delete(s.nodes, n.ID)
 		if n.QualName != "" {
-			delete(g.byQual, n.QualName)
+			delete(s.byQual, n.QualName)
 		}
-		// Remove from byName index.
-		g.byName[n.Name] = removeNode(g.byName[n.Name], n.ID)
-		if len(g.byName[n.Name]) == 0 {
-			delete(g.byName, n.Name)
+		s.byName[n.Name] = removeNode(s.byName[n.Name], n.ID)
+		if len(s.byName[n.Name]) == 0 {
+			delete(s.byName, n.Name)
 		}
-		// Remove from byRepo index.
 		if n.RepoPrefix != "" {
-			g.byRepo[n.RepoPrefix] = removeNode(g.byRepo[n.RepoPrefix], n.ID)
-			if len(g.byRepo[n.RepoPrefix]) == 0 {
-				delete(g.byRepo, n.RepoPrefix)
+			s.byRepo[n.RepoPrefix] = removeNode(s.byRepo[n.RepoPrefix], n.ID)
+			if len(s.byRepo[n.RepoPrefix]) == 0 {
+				delete(s.byRepo, n.RepoPrefix)
 			}
 		}
 	}
-	delete(g.byFile, filePath)
+	// Clear the file's byFile entry in every shard (only the ones that
+	// contained these nodes will actually have entries, but Go map
+	// delete on a missing key is a no-op).
+	for _, s := range g.shards {
+		delete(s.byFile, filePath)
+	}
 	nodesRemoved = len(nodes)
 
-	// Remove edges that reference evicted nodes or originate from this file.
-	edgesRemoved = g.evictEdges(evictedIDs, filePath)
-
+	edgesRemoved = g.evictEdgesLocked(evictedIDs)
 	return nodesRemoved, edgesRemoved
 }
 
-// evictEdges removes edges associated with evicted node IDs or file path.
-// Must be called under write lock.
+// evictEdgesLocked is the shared edge-removal core used by EvictFile
+// and EvictRepo. Callers must hold every shard's write lock.
 //
-// Instead of scanning all edges in the graph (O(total_edges)), this uses
-// targeted lookups: for each evicted node, remove its outEdges/inEdges entries
-// and clean the corresponding reverse index entries. This is O(evicted_edges),
-// which is critical for performance on large graphs and low-resource devices.
-func (g *Graph) evictEdges(evictedIDs map[string]bool, _ string) int {
+// For each evicted node we remove its outEdges and inEdges entries. To
+// clean the reverse index on non-evicted endpoints we flip-look across
+// shards using shardFor.
+func (g *Graph) evictEdgesLocked(evictedIDs map[string]bool) int {
 	removed := 0
 
-	// Phase 1: Remove all outgoing edges from evicted nodes.
-	// For each such edge, also remove it from the inEdges of the target node.
+	// Phase 1: remove outgoing edges from every evicted node.
 	for id := range evictedIDs {
-		edges := g.outEdges[id]
+		s := g.shardFor(id)
+		edges := s.outEdges[id]
 		removed += len(edges)
 		for _, e := range edges {
 			if !evictedIDs[e.To] {
-				// Target is not evicted — clean the inEdges entry.
-				g.inEdges[e.To] = filterEdge(g.inEdges[e.To], e)
-				if len(g.inEdges[e.To]) == 0 {
-					delete(g.inEdges, e.To)
+				sTo := g.shardFor(e.To)
+				sTo.inEdges[e.To] = filterEdge(sTo.inEdges[e.To], e)
+				if len(sTo.inEdges[e.To]) == 0 {
+					delete(sTo.inEdges, e.To)
 				}
 			}
 		}
-		delete(g.outEdges, id)
+		delete(s.outEdges, id)
 	}
 
-	// Phase 2: Remove all incoming edges to evicted nodes.
-	// For each such edge from a non-evicted source, also clean outEdges of the source.
+	// Phase 2: remove incoming edges to every evicted node (from
+	// non-evicted sources — same-direction edges were already handled
+	// in phase 1 and counted).
 	for id := range evictedIDs {
-		edges := g.inEdges[id]
+		s := g.shardFor(id)
+		edges := s.inEdges[id]
 		for _, e := range edges {
 			if !evictedIDs[e.From] {
-				// Source is not evicted — clean the outEdges entry.
-				// These edges were not counted in phase 1.
 				removed++
-				g.outEdges[e.From] = filterEdge(g.outEdges[e.From], e)
-				if len(g.outEdges[e.From]) == 0 {
-					delete(g.outEdges, e.From)
+				sFrom := g.shardFor(e.From)
+				sFrom.outEdges[e.From] = filterEdge(sFrom.outEdges[e.From], e)
+				if len(sFrom.outEdges[e.From]) == 0 {
+					delete(sFrom.outEdges, e.From)
 				}
 			}
-			// If source IS evicted, the edge was already counted and removed in phase 1.
 		}
-		delete(g.inEdges, id)
+		delete(s.inEdges, id)
 	}
 
 	return removed
 }
 
-// RemoveEdge removes a specific edge by from, to, and kind.
-// Returns true if the edge was found and removed.
+// RemoveEdge removes a specific edge by from, to, and kind. Returns
+// true if the edge was found and removed.
 func (g *Graph) RemoveEdge(from, to string, kind EdgeKind) bool {
-	g.mu.Lock()
-	defer g.mu.Unlock()
+	unlock := g.lockTwoWrite(from, to)
+	defer unlock()
 
-	// Find the edge in outEdges.
-	outList := g.outEdges[from]
+	sFrom := g.shardFor(from)
+	outList := sFrom.outEdges[from]
 	var target *Edge
 	for _, e := range outList {
 		if e.To == to && e.Kind == kind {
@@ -249,16 +376,15 @@ func (g *Graph) RemoveEdge(from, to string, kind EdgeKind) bool {
 		return false
 	}
 
-	// Remove from outEdges.
-	g.outEdges[from] = filterEdge(g.outEdges[from], target)
-	if len(g.outEdges[from]) == 0 {
-		delete(g.outEdges, from)
+	sFrom.outEdges[from] = filterEdge(sFrom.outEdges[from], target)
+	if len(sFrom.outEdges[from]) == 0 {
+		delete(sFrom.outEdges, from)
 	}
 
-	// Remove from inEdges.
-	g.inEdges[to] = filterEdge(g.inEdges[to], target)
-	if len(g.inEdges[to]) == 0 {
-		delete(g.inEdges, to)
+	sTo := g.shardFor(to)
+	sTo.inEdges[to] = filterEdge(sTo.inEdges[to], target)
+	if len(sTo.inEdges[to]) == 0 {
+		delete(sTo.inEdges, to)
 	}
 
 	return true
@@ -276,175 +402,168 @@ func filterEdge(edges []*Edge, target *Edge) []*Edge {
 
 // NodeCount returns the total number of nodes.
 func (g *Graph) NodeCount() int {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-	return len(g.nodes)
+	total := 0
+	for _, s := range g.shards {
+		s.mu.RLock()
+		total += len(s.nodes)
+		s.mu.RUnlock()
+	}
+	return total
 }
 
 // EdgeCount returns the total number of edges.
 func (g *Graph) EdgeCount() int {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-	count := 0
-	for _, edges := range g.outEdges {
-		count += len(edges)
+	total := 0
+	for _, s := range g.shards {
+		s.mu.RLock()
+		for _, edges := range s.outEdges {
+			total += len(edges)
+		}
+		s.mu.RUnlock()
 	}
-	return count
+	return total
 }
 
-// AllNodes returns a snapshot of all nodes.
+// AllNodes returns a snapshot of all nodes. Locks every shard for read
+// to produce a coherent view — callers use this for snapshots,
+// contracts extraction, etc. where a consistent crop matters.
 func (g *Graph) AllNodes() []*Node {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-	out := make([]*Node, 0, len(g.nodes))
-	for _, n := range g.nodes {
-		out = append(out, n)
+	g.lockAllRead()
+	defer g.unlockAllRead()
+	total := 0
+	for _, s := range g.shards {
+		total += len(s.nodes)
+	}
+	out := make([]*Node, 0, total)
+	for _, s := range g.shards {
+		for _, n := range s.nodes {
+			out = append(out, n)
+		}
 	}
 	return out
 }
 
 // AllEdges returns a snapshot of all edges.
 func (g *Graph) AllEdges() []*Edge {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
+	g.lockAllRead()
+	defer g.unlockAllRead()
 	var out []*Edge
-	for _, edges := range g.outEdges {
-		out = append(out, edges...)
+	for _, s := range g.shards {
+		for _, edges := range s.outEdges {
+			out = append(out, edges...)
+		}
 	}
 	return out
 }
 
 // Stats returns summary counts by kind and language.
 func (g *Graph) Stats() GraphStats {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
+	g.lockAllRead()
+	defer g.unlockAllRead()
 
 	byKind := make(map[string]int)
 	byLang := make(map[string]int)
-	for _, n := range g.nodes {
-		byKind[string(n.Kind)]++
-		if n.Language != "" {
-			byLang[n.Language]++
+	totalNodes := 0
+	for _, s := range g.shards {
+		totalNodes += len(s.nodes)
+		for _, n := range s.nodes {
+			byKind[string(n.Kind)]++
+			if n.Language != "" {
+				byLang[n.Language]++
+			}
 		}
 	}
 
 	edgeCount := 0
-	for _, edges := range g.outEdges {
-		edgeCount += len(edges)
+	for _, s := range g.shards {
+		for _, edges := range s.outEdges {
+			edgeCount += len(edges)
+		}
 	}
 
 	return GraphStats{
-		TotalNodes: len(g.nodes),
+		TotalNodes: totalNodes,
 		TotalEdges: edgeCount,
 		ByKind:     byKind,
 		ByLanguage: byLang,
 	}
 }
 
-// GetRepoNodes returns all nodes belonging to the given repository prefix.
+// GetRepoNodes returns all nodes belonging to the given repository
+// prefix. Each shard holds a byRepo slice for nodes it owns; we
+// aggregate across shards.
 func (g *Graph) GetRepoNodes(repoPrefix string) []*Node {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-	src := g.byRepo[repoPrefix]
-	out := make([]*Node, len(src))
-	copy(out, src)
+	var out []*Node
+	for _, s := range g.shards {
+		s.mu.RLock()
+		if src := s.byRepo[repoPrefix]; len(src) > 0 {
+			out = append(out, src...)
+		}
+		s.mu.RUnlock()
+	}
 	return out
 }
 
 // EvictRepo removes all nodes with matching RepoPrefix and all edges
 // referencing those nodes. Returns counts of removed nodes and edges.
 func (g *Graph) EvictRepo(repoPrefix string) (nodesRemoved, edgesRemoved int) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
+	g.lockAllWrite()
+	defer g.unlockAllWrite()
 
-	nodes := g.byRepo[repoPrefix]
+	var nodes []*Node
+	for _, s := range g.shards {
+		nodes = append(nodes, s.byRepo[repoPrefix]...)
+	}
 	if len(nodes) == 0 {
 		return 0, 0
 	}
-
-	// Collect IDs and file paths of nodes being evicted.
 	evictedIDs := make(map[string]bool, len(nodes))
-	evictedFiles := make(map[string]bool)
 	for _, n := range nodes {
 		evictedIDs[n.ID] = true
-		evictedFiles[n.FilePath] = true
 	}
 
-	// Remove nodes from all indexes.
 	for _, n := range nodes {
-		delete(g.nodes, n.ID)
+		s := g.shardFor(n.ID)
+		delete(s.nodes, n.ID)
 		if n.QualName != "" {
-			delete(g.byQual, n.QualName)
+			delete(s.byQual, n.QualName)
 		}
-		g.byName[n.Name] = removeNode(g.byName[n.Name], n.ID)
-		if len(g.byName[n.Name]) == 0 {
-			delete(g.byName, n.Name)
+		s.byName[n.Name] = removeNode(s.byName[n.Name], n.ID)
+		if len(s.byName[n.Name]) == 0 {
+			delete(s.byName, n.Name)
 		}
-		g.byFile[n.FilePath] = removeNode(g.byFile[n.FilePath], n.ID)
-		if len(g.byFile[n.FilePath]) == 0 {
-			delete(g.byFile, n.FilePath)
+		s.byFile[n.FilePath] = removeNode(s.byFile[n.FilePath], n.ID)
+		if len(s.byFile[n.FilePath]) == 0 {
+			delete(s.byFile, n.FilePath)
 		}
 	}
-	delete(g.byRepo, repoPrefix)
+	for _, s := range g.shards {
+		delete(s.byRepo, repoPrefix)
+	}
 	nodesRemoved = len(nodes)
 
-	// Remove edges that reference evicted nodes.
-	edgesRemoved = g.evictEdgesForNodes(evictedIDs)
-
+	edgesRemoved = g.evictEdgesLocked(evictedIDs)
 	return nodesRemoved, edgesRemoved
-}
-
-// evictEdgesForNodes removes edges where either endpoint is in evictedIDs.
-// Must be called under write lock.
-// Uses targeted lookups instead of full graph scan for O(evicted_edges) performance.
-func (g *Graph) evictEdgesForNodes(evictedIDs map[string]bool) int {
-	removed := 0
-
-	// Phase 1: Remove all outgoing edges from evicted nodes.
-	for id := range evictedIDs {
-		edges := g.outEdges[id]
-		removed += len(edges)
-		for _, e := range edges {
-			if !evictedIDs[e.To] {
-				g.inEdges[e.To] = filterEdge(g.inEdges[e.To], e)
-				if len(g.inEdges[e.To]) == 0 {
-					delete(g.inEdges, e.To)
-				}
-			}
-		}
-		delete(g.outEdges, id)
-	}
-
-	// Phase 2: Remove all incoming edges to evicted nodes from non-evicted sources.
-	for id := range evictedIDs {
-		edges := g.inEdges[id]
-		for _, e := range edges {
-			if !evictedIDs[e.From] {
-				removed++
-				g.outEdges[e.From] = filterEdge(g.outEdges[e.From], e)
-				if len(g.outEdges[e.From]) == 0 {
-					delete(g.outEdges, e.From)
-				}
-			}
-		}
-		delete(g.inEdges, id)
-	}
-
-	return removed
 }
 
 // RepoStats returns per-repository node and edge counts.
 func (g *Graph) RepoStats() map[string]GraphStats {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
+	g.lockAllRead()
+	defer g.unlockAllRead()
 
-	stats := make(map[string]GraphStats, len(g.byRepo))
+	// Aggregate byRepo across shards first.
+	repoNodes := make(map[string][]*Node)
+	for _, s := range g.shards {
+		for prefix, nodes := range s.byRepo {
+			repoNodes[prefix] = append(repoNodes[prefix], nodes...)
+		}
+	}
 
-	// Count nodes per repo.
-	repoNodes := make(map[string]map[string]int)  // repo → byKind
-	repoLangs := make(map[string]map[string]int)   // repo → byLanguage
+	stats := make(map[string]GraphStats, len(repoNodes))
+	repoByKind := make(map[string]map[string]int)
+	repoByLang := make(map[string]map[string]int)
 	repoNodeCount := make(map[string]int)
-	for prefix, nodes := range g.byRepo {
+	for prefix, nodes := range repoNodes {
 		repoNodeCount[prefix] = len(nodes)
 		byKind := make(map[string]int)
 		byLang := make(map[string]int)
@@ -454,38 +573,49 @@ func (g *Graph) RepoStats() map[string]GraphStats {
 				byLang[n.Language]++
 			}
 		}
-		repoNodes[prefix] = byKind
-		repoLangs[prefix] = byLang
+		repoByKind[prefix] = byKind
+		repoByLang[prefix] = byLang
 	}
 
-	// Count edges per repo (by the From node's repo).
+	// Count edges per repo by the From node's repo. Need to look up the
+	// From node in whichever shard owns it.
 	repoEdgeCount := make(map[string]int)
-	for _, edges := range g.outEdges {
-		for _, e := range edges {
-			if fromNode, ok := g.nodes[e.From]; ok && fromNode.RepoPrefix != "" {
-				repoEdgeCount[fromNode.RepoPrefix]++
+	for _, s := range g.shards {
+		for _, edges := range s.outEdges {
+			for _, e := range edges {
+				fromShard := g.shardFor(e.From)
+				if fromNode, ok := fromShard.nodes[e.From]; ok && fromNode.RepoPrefix != "" {
+					repoEdgeCount[fromNode.RepoPrefix]++
+				}
 			}
 		}
 	}
 
-	for prefix := range g.byRepo {
+	for prefix := range repoNodes {
 		stats[prefix] = GraphStats{
 			TotalNodes: repoNodeCount[prefix],
 			TotalEdges: repoEdgeCount[prefix],
-			ByKind:     repoNodes[prefix],
-			ByLanguage: repoLangs[prefix],
+			ByKind:     repoByKind[prefix],
+			ByLanguage: repoByLang[prefix],
 		}
 	}
 
 	return stats
 }
 
-// RepoPrefixes returns a list of unique repository prefixes in the graph.
+// RepoPrefixes returns a list of unique repository prefixes in the
+// graph.
 func (g *Graph) RepoPrefixes() []string {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-	prefixes := make([]string, 0, len(g.byRepo))
-	for prefix := range g.byRepo {
+	seen := make(map[string]struct{})
+	for _, s := range g.shards {
+		s.mu.RLock()
+		for prefix := range s.byRepo {
+			seen[prefix] = struct{}{}
+		}
+		s.mu.RUnlock()
+	}
+	prefixes := make([]string, 0, len(seen))
+	for prefix := range seen {
 		prefixes = append(prefixes, prefix)
 	}
 	return prefixes

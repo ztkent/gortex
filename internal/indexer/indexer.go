@@ -71,19 +71,74 @@ type Indexer struct {
 	lastIndexTime time.Time
 	totalDetected int
 	mtimeMu       sync.RWMutex
+
+	// contractCache memoizes the contract-extractor output per file.
+	// Keyed by graph file path (with repo prefix); value is the file's
+	// disk mtime when last extracted plus the contracts that came out.
+	// extractContracts replays cache hits to skip the read + 8-extractor
+	// run for files that haven't changed since the last extraction —
+	// the dominant cost on repos with tens of thousands of source files.
+	contractCache   map[string]*contractCacheEntry
+	contractCacheMu sync.RWMutex
+}
+
+// contractCacheEntry is a cached contract-extraction result for one file.
+type contractCacheEntry struct {
+	mtimeNano int64
+	contracts []contracts.Contract
 }
 
 // New creates an Indexer.
 func New(g *graph.Graph, reg *parser.Registry, cfg config.IndexConfig, logger *zap.Logger) *Indexer {
 	return &Indexer{
-		graph:      g,
-		registry:   reg,
-		resolver:   resolver.New(g),
-		search:     search.NewAuto(),
-		config:     cfg,
-		logger:     logger,
-		fileMtimes: make(map[string]int64),
+		graph:    g,
+		registry: reg,
+		resolver: resolver.New(g),
+		// Wrap in Swappable so the auto-upgrade to Bleve at large
+		// corpus sizes can happen in a background goroutine without
+		// racing with concurrent searches. Subsequent reassignments to
+		// idx.search (Hybrid wrap, etc.) should use swap helpers below.
+		search:        search.NewSwappable(search.NewAuto()),
+		config:        cfg,
+		logger:        logger,
+		fileMtimes:    make(map[string]int64),
+		contractCache: make(map[string]*contractCacheEntry),
 	}
+}
+
+// swappable returns the search backend cast to *search.Swappable. Panics
+// if the invariant (idx.search is always a Swappable) is ever broken —
+// that would be a programmer error in this file, not a runtime condition.
+func (idx *Indexer) swappable() *search.Swappable {
+	if sw, ok := idx.search.(*search.Swappable); ok {
+		return sw
+	}
+	panic("indexer: search backend is not *search.Swappable — invariant violated")
+}
+
+// upgradeSearchToBleve constructs a Bleve backend from the current graph
+// and atomically swaps it in. Designed to run in a background goroutine
+// triggered by IndexCtx after the initial index completes. Does nothing
+// if Bleve construction fails (caller already hit AutoThreshold but the
+// in-memory backend keeps serving correctly, just with worse memory
+// characteristics).
+func (idx *Indexer) upgradeSearchToBleve() {
+	blv, err := search.NewBleve()
+	if err != nil {
+		idx.logger.Warn("search: bleve construction failed, staying on in-memory",
+			zap.Error(err))
+		return
+	}
+	for _, n := range idx.graph.AllNodes() {
+		if n.Kind == graph.KindFile || n.Kind == graph.KindImport {
+			continue
+		}
+		sig, _ := n.Meta["signature"].(string)
+		blv.Add(n.ID, n.Name, n.FilePath, sig)
+	}
+	idx.swappable().Swap(blv)
+	idx.logger.Info("search: upgraded to Bleve backend (background)",
+		zap.Int("symbols", blv.Count()))
 }
 
 // Graph returns the underlying graph.
@@ -123,7 +178,7 @@ func (idx *Indexer) SemanticManager() *semantic.Manager { return idx.semanticMgr
 // ExportVectorIndex returns the serialized vector index bytes, dims, and count.
 // Returns nil, 0, 0 if no vector index is active.
 func (idx *Indexer) ExportVectorIndex() ([]byte, int, int) {
-	hybrid, ok := idx.search.(*search.HybridBackend)
+	hybrid, ok := idx.swappable().Inner().(*search.HybridBackend)
 	if !ok {
 		return nil, 0, 0
 	}
@@ -162,7 +217,8 @@ func (idx *Indexer) ImportVectorIndex(data []byte, dims, count int) error {
 	}
 	vec.SetCount(count)
 
-	idx.search = search.NewHybrid(idx.search, vec, idx.embedder)
+	sw := idx.swappable()
+	sw.Swap(search.NewHybrid(sw.Inner(), vec, idx.embedder))
 	idx.logger.Info("restored vector index from cache",
 		zap.Int("vectors", count), zap.Int("dims", dims))
 	return nil
@@ -388,23 +444,15 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 	// Extract API contracts (HTTP routes, gRPC services, etc.).
 	idx.extractContracts()
 
-	// Auto-upgrade to Bleve if above threshold.
+	// Auto-upgrade to Bleve if above threshold. Run in the background
+	// so the foreground IndexCtx returns immediately — populating
+	// Bleve with 50k+ symbols takes 30-60s and adding that to the
+	// initial-index latency was the dominant tail. Searches against
+	// idx.search keep hitting the in-memory backend until the swap
+	// completes; nothing observes a half-built Bleve.
 	if idx.search.Count() >= search.AutoThreshold {
-		reporter.Report("upgrading search backend", 0, 0)
-		if blv, err := search.NewBleve(); err == nil {
-			old := idx.search
-			for _, n := range idx.graph.AllNodes() {
-				if n.Kind == graph.KindFile || n.Kind == graph.KindImport {
-					continue
-				}
-				sig, _ := n.Meta["signature"].(string)
-				blv.Add(n.ID, n.Name, n.FilePath, sig)
-			}
-			idx.search = blv
-			old.Close()
-			idx.logger.Info("search: upgraded to Bleve backend",
-				zap.Int("symbols", idx.search.Count()))
-		}
+		reporter.Report("scheduling search backend upgrade", 0, 0)
+		go idx.upgradeSearchToBleve()
 	}
 
 	reporter.Report("indexing complete", fileCount, len(files))
@@ -548,14 +596,47 @@ func (idx *Indexer) buildSearchIndex() {
 		return
 	}
 
-	// Batch embed all symbols.
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancel()
+	// Embedding scaling guards. Hard-cap the vector index for repos
+	// big enough that the cost no longer pays off — BM25 alone is a
+	// fine fallback and an OOM during initial index is much worse than
+	// missing the semantic boost. Chunk the EmbedBatch calls so any
+	// single API request stays small (matters for hosted embedders
+	// with per-request token limits).
+	const (
+		embedMaxSymbols   = 100_000
+		embedChunkSize    = 500
+		embedChunkTimeout = 60 * time.Second
+	)
 
-	vectors, err := idx.embedder.EmbedBatch(ctx, texts)
-	if err != nil {
-		idx.logger.Warn("failed to build vector index", zap.Error(err))
+	if len(texts) > embedMaxSymbols {
+		idx.logger.Warn("vector index disabled — symbol count exceeds threshold",
+			zap.Int("symbols", len(texts)),
+			zap.Int("threshold", embedMaxSymbols),
+			zap.String("hint", "BM25 text search remains active; raise threshold via Indexer config if you have memory headroom"))
 		return
+	}
+
+	vectors := make([][]float32, 0, len(texts))
+	for start := 0; start < len(texts); start += embedChunkSize {
+		end := start + embedChunkSize
+		if end > len(texts) {
+			end = len(texts)
+		}
+		chunkCtx, cancel := context.WithTimeout(context.Background(), embedChunkTimeout)
+		chunkVecs, err := idx.embedder.EmbedBatch(chunkCtx, texts[start:end])
+		cancel()
+		if err != nil {
+			// A partial vector index would mis-score later queries
+			// (some symbols semantically findable, others not) — bail
+			// to text-only search rather than ship an inconsistent
+			// hybrid backend.
+			idx.logger.Warn("vector index aborted on chunk failure",
+				zap.Int("offset", start),
+				zap.Int("chunk_size", end-start),
+				zap.Error(err))
+			return
+		}
+		vectors = append(vectors, chunkVecs...)
 	}
 
 	// Detect actual dimensions from first vector.
@@ -570,8 +651,10 @@ func (idx *Indexer) buildSearchIndex() {
 		}
 	}
 
-	// Wrap text + vector into hybrid backend.
-	idx.search = search.NewHybrid(idx.search, vecBackend, idx.embedder)
+	// Wrap text + vector into hybrid backend, swapping it in atomically
+	// so any concurrent searches keep seeing a coherent backend.
+	sw := idx.swappable()
+	sw.Swap(search.NewHybrid(sw.Inner(), vecBackend, idx.embedder))
 	idx.logger.Info("vector index built",
 		zap.Int("symbols", vecBackend.Count()),
 		zap.Int("dimensions", dims))
@@ -779,6 +862,10 @@ func (idx *Indexer) extractContracts() {
 		&contracts.GoModExtractor{TrackedRepos: idx.trackedRepoModules},
 	}
 
+	// Track which file nodes we saw this pass so we can prune stale
+	// cache entries afterwards (files that left the graph).
+	seenFiles := make(map[string]struct{})
+
 	for _, fileNode := range idx.graph.AllNodes() {
 		if fileNode.Kind != graph.KindFile {
 			continue
@@ -796,6 +883,28 @@ func (idx *Indexer) extractContracts() {
 		}
 
 		absPath := filepath.Join(idx.rootPath, relPath)
+		info, statErr := os.Stat(absPath)
+		if statErr != nil {
+			continue
+		}
+		seenFiles[fileNode.FilePath] = struct{}{}
+		currentMtime := info.ModTime().UnixNano()
+
+		// Cache hit: replay the previously-extracted contracts without
+		// re-reading the file or re-running the 8 extractors. This is
+		// the dominant savings path on repos with many files where most
+		// haven't changed since the last extraction (e.g. live re-index
+		// after a single-file edit).
+		idx.contractCacheMu.RLock()
+		cached, ok := idx.contractCache[fileNode.FilePath]
+		idx.contractCacheMu.RUnlock()
+		if ok && cached.mtimeNano == currentMtime {
+			for _, c := range cached.contracts {
+				reg.Add(c)
+			}
+			continue
+		}
+
 		src, err := os.ReadFile(absPath)
 		if err != nil {
 			continue
@@ -804,11 +913,39 @@ func (idx *Indexer) extractContracts() {
 		fileNodes := idx.graph.GetFileNodes(fileNode.FilePath)
 		fileEdges := idx.graph.GetOutEdges(fileNode.ID)
 
+		var fileContracts []contracts.Contract
 		for _, ext := range extractors {
 			found := ext.Extract(fileNode.FilePath, src, fileNodes, fileEdges)
-			reg.AddAll(found, idx.repoPrefix)
+			// Apply the repo prefix here (mirrors AddAll's behaviour) so
+			// the cached entries already carry the final field values
+			// and cache replay is a straight Add per contract.
+			for i := range found {
+				found[i].RepoPrefix = idx.repoPrefix
+			}
+			fileContracts = append(fileContracts, found...)
+		}
+		for _, c := range fileContracts {
+			reg.Add(c)
+		}
+
+		idx.contractCacheMu.Lock()
+		idx.contractCache[fileNode.FilePath] = &contractCacheEntry{
+			mtimeNano: currentMtime,
+			contracts: fileContracts,
+		}
+		idx.contractCacheMu.Unlock()
+	}
+
+	// Prune cache entries for files that are no longer in the graph
+	// (deleted, or repo untracked). Otherwise the cache grows unboundedly
+	// across the lifetime of the daemon.
+	idx.contractCacheMu.Lock()
+	for path := range idx.contractCache {
+		if _, ok := seenFiles[path]; !ok {
+			delete(idx.contractCache, path)
 		}
 	}
+	idx.contractCacheMu.Unlock()
 
 	// Process go.mod directly (not in the graph as a file node).
 	goModPath := filepath.Join(idx.rootPath, "go.mod")

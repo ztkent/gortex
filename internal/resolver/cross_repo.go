@@ -16,8 +16,16 @@ type CrossRepoStats struct {
 }
 
 // CrossRepoResolver resolves unresolved edges across repository boundaries.
+//
+// dirIndex / lastDirIndex are scratch maps populated for the duration
+// of a single Resolve* pass — they let resolveImport look up candidate
+// file nodes by directory in O(1) instead of scanning the whole graph
+// (which is O(N) per import edge, O(N×M) total). Maps are nil between
+// passes so we don't pay the memory cost while idle.
 type CrossRepoResolver struct {
-	graph *graph.Graph
+	graph        *graph.Graph
+	dirIndex     map[string][]*graph.Node
+	lastDirIndex map[string][]*graph.Node
 }
 
 // NewCrossRepo creates a CrossRepoResolver for the given graph.
@@ -29,6 +37,9 @@ func NewCrossRepo(g *graph.Graph) *CrossRepoResolver {
 // matches first, then cross-repo search. Sets Edge.CrossRepo = true for
 // cross-repo matches.
 func (cr *CrossRepoResolver) ResolveAll() *CrossRepoStats {
+	cr.buildDirIndexes()
+	defer cr.clearDirIndexes()
+
 	stats := &CrossRepoStats{ByRepo: make(map[string]int)}
 
 	edges := cr.graph.AllEdges()
@@ -44,6 +55,9 @@ func (cr *CrossRepoResolver) ResolveAll() *CrossRepoStats {
 // ResolveForRepo resolves only unresolved edges originating from nodes
 // in the specified repository.
 func (cr *CrossRepoResolver) ResolveForRepo(repoPrefix string) *CrossRepoStats {
+	cr.buildDirIndexes()
+	defer cr.clearDirIndexes()
+
 	stats := &CrossRepoStats{ByRepo: make(map[string]int)}
 
 	nodes := cr.graph.GetRepoNodes(repoPrefix)
@@ -57,6 +71,40 @@ func (cr *CrossRepoResolver) ResolveForRepo(repoPrefix string) *CrossRepoStats {
 		}
 	}
 	return stats
+}
+
+// buildDirIndexes walks the graph once and populates two lookup maps
+// used by resolveImport — the only resolution path that previously
+// scanned every node per edge.
+//
+//   - dirIndex     keys on filepath.Dir(file.FilePath) for exact matches
+//     (importPath equal to the file's directory).
+//   - lastDirIndex keys on the last path component of that directory,
+//     covering the common case where an import path is a single name
+//     like "logger" and we want any file under .../logger/.
+//
+// These maps are torn down via clearDirIndexes when the pass completes
+// so we don't keep ~N pointers alive between resolves.
+func (cr *CrossRepoResolver) buildDirIndexes() {
+	nodes := cr.graph.AllNodes()
+	cr.dirIndex = make(map[string][]*graph.Node, len(nodes)/4)
+	cr.lastDirIndex = make(map[string][]*graph.Node, len(nodes)/4)
+	for _, n := range nodes {
+		if n.Kind != graph.KindFile {
+			continue
+		}
+		dir := filepath.Dir(n.FilePath)
+		cr.dirIndex[dir] = append(cr.dirIndex[dir], n)
+		last := lastPathComponent(dir)
+		if last != "" && last != dir {
+			cr.lastDirIndex[last] = append(cr.lastDirIndex[last], n)
+		}
+	}
+}
+
+func (cr *CrossRepoResolver) clearDirIndexes() {
+	cr.dirIndex = nil
+	cr.lastDirIndex = nil
 }
 
 func (cr *CrossRepoResolver) resolveEdge(e *graph.Edge, stats *CrossRepoStats) {
@@ -136,23 +184,59 @@ func (cr *CrossRepoResolver) resolveImport(e *graph.Edge, importPath string, sta
 		return
 	}
 
-	// Look for file nodes whose directory matches the import path suffix.
-	// Prefer same-repo, then cross-repo.
-	candidates := cr.graph.AllNodes()
-	var sameRepo *graph.Node
-	var crossRepo *graph.Node
-	for _, n := range candidates {
+	// Look for file nodes whose directory matches the import path. Two
+	// inverted indexes (built once per Resolve* pass) replace what used
+	// to be an O(N) scan of the entire graph per import edge.
+	//
+	// 1. Exact dir match — `dirIndex[importPath]` covers the case where
+	//    the import literally equals a known directory.
+	// 2. Last-component match — `lastDirIndex[lastPathComponent(...)]`
+	//    covers the common case where an import path is just a name
+	//    (e.g. "logger") and any file under .../logger/ is a candidate.
+	//
+	// Falls back to a full graph scan if the indexes are unset (defensive
+	// — only happens when resolveImport is called outside a Resolve* pass).
+	var sameRepo, crossRepo *graph.Node
+	consider := func(n *graph.Node) {
 		if n.Kind != graph.KindFile {
-			continue
+			return
 		}
-		dir := filepath.Dir(n.FilePath)
-		if strings.HasSuffix(dir, lastPathComponent(importPath)) || dir == importPath {
-			if n.RepoPrefix == callerRepo {
+		if n.RepoPrefix == callerRepo {
+			if sameRepo == nil {
 				sameRepo = n
+			}
+			return
+		}
+		if crossRepo == nil {
+			crossRepo = n
+		}
+	}
+	if cr.dirIndex != nil {
+		for _, n := range cr.dirIndex[importPath] {
+			consider(n)
+			if sameRepo != nil {
 				break
 			}
-			if crossRepo == nil {
-				crossRepo = n
+		}
+		if sameRepo == nil {
+			for _, n := range cr.lastDirIndex[lastPathComponent(importPath)] {
+				consider(n)
+				if sameRepo != nil {
+					break
+				}
+			}
+		}
+	} else {
+		for _, n := range cr.graph.AllNodes() {
+			if n.Kind != graph.KindFile {
+				continue
+			}
+			dir := filepath.Dir(n.FilePath)
+			if strings.HasSuffix(dir, lastPathComponent(importPath)) || dir == importPath {
+				consider(n)
+				if sameRepo != nil {
+					break
+				}
 			}
 		}
 	}

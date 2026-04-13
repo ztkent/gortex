@@ -370,8 +370,22 @@ var alwaysExcludeDirs = map[string]bool{
 	".venv":        true,
 }
 
+// addRecursive walks the tree under root and registers an fsnotify watch
+// for every directory that contains at least one indexable file. Empty
+// directories and trees full of binary/doc files (where no parser claims
+// any of the contents) are skipped — that's where the savings come from
+// on huge repos. Linux's default inotify limit is 8192 user watches; a
+// 200k-file monorepo can have 50k+ subdirectories, but typically only a
+// fraction host code we care about.
+//
+// Errors from fsw.Add (most commonly ENOSPC when the inotify limit is
+// exhausted) are counted but never bubble up — a partial watch is still
+// useful, and aborting the walk would leave the user with no watcher at
+// all. A single warning summarises the skipped count plus the OS-level
+// hint for raising the limit.
 func (w *Watcher) addRecursive(root string) error {
-	return filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+	needed := make(map[string]struct{})
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -382,10 +396,40 @@ func (w *Watcher) addRecursive(root string) error {
 			if w.isExcluded(path) {
 				return filepath.SkipDir
 			}
-			return w.fsw.Add(path)
+			return nil
+		}
+		// File: only mark the parent as needing a watch when a parser
+		// claims this extension. Avoids subscribing to dirs full of
+		// PNGs, fixtures, generated assets, etc.
+		if _, ok := w.indexer.registry.DetectLanguage(path); ok {
+			needed[filepath.Dir(path)] = struct{}{}
 		}
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+
+	var watched, skipped int
+	var firstErr error
+	for dir := range needed {
+		if addErr := w.fsw.Add(dir); addErr != nil {
+			skipped++
+			if firstErr == nil {
+				firstErr = addErr
+			}
+			continue
+		}
+		watched++
+	}
+	if skipped > 0 && w.logger != nil {
+		w.logger.Warn("watcher: some directories could not be watched",
+			zap.Int("skipped", skipped),
+			zap.Int("watched", watched),
+			zap.Error(firstErr),
+			zap.String("hint", "Linux: bump fs.inotify.max_user_watches; macOS: usually no limit"))
+	}
+	return nil
 }
 
 // inExcludedDir checks if the path contains an always-excluded directory component.
