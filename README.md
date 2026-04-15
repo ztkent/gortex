@@ -623,6 +623,18 @@ gortex serve --index /path/to/repo --no-cache
 
 The persistence layer uses a pluggable backend interface (`persistence.Store`). The default backend serializes as gob+gzip. Cache is keyed by repo path + git commit hash, with version validation to invalidate on binary upgrades.
 
+## Scale — battle-tested on large repos
+
+Measured on an Apple Silicon laptop with the default CGO build:
+
+| Repository | Files | Nodes | Edges | Index time | Throughput | Peak heap |
+| ---------- | ----: | ----: | ----: | ---------: | ---------: | --------: |
+| [torvalds/linux](https://github.com/torvalds/linux) | 70,333 | 1,690,174 | 6,239,570 | ~3 min | 300 files/s | 5.07 GB |
+| [microsoft/vscode](https://github.com/microsoft/vscode) | 10,762 | 204,501 | 808,902 | ~1 min | 143 files/s | 580 MB |
+| zzet/gortex (self) | 430 | 5,583 | 53,830 | 3.4s | 127 files/s | 52 MB |
+
+Parsing dominates wall time (65–80%); reference resolution and search-index build scale sub-linearly. Everything runs in-process — no external services, no database, no network.
+
 ## Architecture
 
 ```
