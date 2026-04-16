@@ -666,17 +666,31 @@ func (idx *Indexer) buildSearchIndex() {
 		dims = 300 // default for static provider
 	}
 
-	// Collect texts and IDs for batch embedding.
+	// Collect texts and IDs for batch embedding. Nodes matching
+	// Semantic.SkipEmbed (e.g. CSS custom properties, terraform blocks,
+	// YAML/TOML/shell config vars) are kept in the text index but
+	// excluded from the vector index — embedding them is pure cost
+	// with no semantic payoff and on big monorepos dominates RAM.
 	var texts []string
 	var ids []string
+	var skipped int
 	for _, n := range nodes {
 		if n.Kind == graph.KindFile || n.Kind == graph.KindImport {
+			continue
+		}
+		if config.ShouldSkipEmbed(idx.config.SkipEmbed, n.Language, string(n.Kind)) {
+			skipped++
 			continue
 		}
 		sig, _ := n.Meta["signature"].(string)
 		text := fmt.Sprintf("%s %s %s %s", n.Kind, n.Name, sig, n.FilePath)
 		texts = append(texts, text)
 		ids = append(ids, n.ID)
+	}
+	if skipped > 0 {
+		idx.logger.Info("skipped embedding for low-value nodes",
+			zap.Int("count", skipped),
+			zap.Int("embedded", len(texts)))
 	}
 
 	if len(texts) == 0 {

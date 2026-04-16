@@ -62,6 +62,21 @@ func (v *VectorBackend) Count() int {
 // Dims returns the embedding dimensionality.
 func (v *VectorBackend) Dims() int { return v.dims }
 
+// SizeBytes is a rough memory estimate: each indexed vector stores
+// dims × 4B (float32) plus HNSW neighbor lists. Default M=16, two
+// layers per node on average → ~32 keys × (16 bytes for the string key
+// pointer + small overhead) ≈ 512 bytes of graph overhead per node.
+// Doesn't count the HNSW index-level metadata (small and constant).
+func (v *VectorBackend) SizeBytes() uint64 {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	if v.count == 0 {
+		return 0
+	}
+	perVector := uint64(v.dims)*4 + 512
+	return uint64(v.count) * perVector
+}
+
 // Save writes the HNSW index to a writer.
 func (v *VectorBackend) Save(w io.Writer) error {
 	v.mu.RLock()

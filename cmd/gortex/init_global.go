@@ -192,9 +192,44 @@ func ensureGlobalConfigExists() error {
 	if _, err := os.Stat(path); err == nil {
 		return nil
 	}
-	// A stub that yaml.v3 accepts as a valid GlobalConfig.
-	return os.WriteFile(path, []byte("active_project: \"\"\nrepos: []\nprojects: {}\n"), 0o600)
+	// Seed the generated config with the baseline every user benefits
+	// from so the defaults are discoverable and editable. Users editing
+	// `exclude:` or `skip_embed:` don't lose them on the next release —
+	// we only write the stub when no config exists.
+	return os.WriteFile(path, []byte(defaultGlobalConfigStub), 0o600)
 }
+
+// defaultGlobalConfigStub is the on-disk shape of a fresh global
+// config. It documents the skip-embedding defaults inline so users
+// don't have to dig through source to know what's being skipped.
+const defaultGlobalConfigStub = `active_project: ""
+repos: []
+projects: {}
+
+# Global ignore list. Layered under builtin (always applies) and above
+# per-repo entries and workspace .gortex.yaml. Gitignore semantics;
+# use "!pattern" in a later layer to re-include.
+exclude: []
+
+# Semantic search tuning.
+semantic:
+  # Node (language, kind) pairs skipped during vector-index construction.
+  # They stay queryable by name/kind/filepath — only semantic search is
+  # turned off. Reclaim ~hundreds of MiB on monorepos heavy in CSS
+  # tokens or terraform resources.
+  skip_embed:
+    - language: css
+      kinds: [variable, type]   # custom properties, class/id selectors
+    - language: hcl
+      kinds: [type, variable]   # terraform resources, locals, variables
+    - language: yaml
+      kinds: [variable]         # yaml keys
+    - language: toml
+      kinds: [variable]         # toml keys
+    - language: bash
+      kinds: [variable]         # shell variables
+`
+
 
 // trackViaDaemon opens a control-mode client and issues a Track for the
 // given absolute path. Returns a human-readable status for display.

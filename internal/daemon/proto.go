@@ -151,15 +151,30 @@ type SearchSymbolsResult struct {
 
 // TrackedRepoStatus is one row in StatusResponse.TrackedRepos.
 type TrackedRepoStatus struct {
-	Prefix    string `json:"prefix"`
-	Path      string `json:"path"`
-	Name      string `json:"name,omitempty"`
-	Project   string `json:"project,omitempty"`
-	Ref       string `json:"ref,omitempty"`
-	Files     int    `json:"files"`
-	Nodes     int    `json:"nodes"`
-	Edges     int    `json:"edges"`
-	LastIndex int64  `json:"last_index_unix"`
+	Prefix    string          `json:"prefix"`
+	Path      string          `json:"path"`
+	Name      string          `json:"name,omitempty"`
+	Project   string          `json:"project,omitempty"`
+	Ref       string          `json:"ref,omitempty"`
+	Files     int             `json:"files"`
+	Nodes     int             `json:"nodes"`
+	Edges     int             `json:"edges"`
+	LastIndex int64           `json:"last_index_unix"`
+	Memory    MemoryBreakdown `json:"memory"`
+}
+
+// MemoryBreakdown is a per-repo memory estimate split across the
+// data structures that dominate the daemon's footprint. All values
+// are approximate — exact accounting would require walking Go's
+// heap, which is too expensive for a status call. See the individual
+// estimators (graph.RepoMemoryEstimate, search.BleveBackend.SizeBytes,
+// search.VectorBackend.SizeBytes) for methodology.
+type MemoryBreakdown struct {
+	NodesBytes   uint64 `json:"nodes_bytes"`
+	EdgesBytes   uint64 `json:"edges_bytes"`
+	SearchBytes  uint64 `json:"search_bytes"`
+	VectorsBytes uint64 `json:"vectors_bytes"`
+	TotalBytes   uint64 `json:"total_bytes"`
 }
 
 // WriteJSONLine writes v as one JSON object followed by a newline. The

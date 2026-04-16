@@ -603,6 +603,117 @@ func (g *Graph) RepoStats() map[string]GraphStats {
 	return stats
 }
 
+// RepoMemoryEstimate is an approximate breakdown of how many bytes a
+// single repository's graph contribution occupies. It covers the
+// sharded node/edge maps only — search and vector indexes are
+// orthogonal and computed elsewhere.
+type RepoMemoryEstimate struct {
+	NodeBytes uint64 `json:"node_bytes"`
+	EdgeBytes uint64 `json:"edge_bytes"`
+	NodeCount int    `json:"node_count"`
+	EdgeCount int    `json:"edge_count"`
+}
+
+// Total returns the sum of NodeBytes and EdgeBytes.
+func (e RepoMemoryEstimate) Total() uint64 { return e.NodeBytes + e.EdgeBytes }
+
+// per-node fixed overhead: the struct header, the pointer from the
+// byRepo/byFile/byName/byQual slices/maps, and the typical allocator
+// padding. Tuned against runtime.ReadMemStats deltas on a 50k-node
+// repo; within ~10%.
+const nodeStructOverhead = 160
+
+// per-edge fixed overhead: two string pointers, kind, filepath, line,
+// plus slice-header and adjacency-map amortisation.
+const edgeStructOverhead = 120
+
+// RepoMemoryEstimate walks the per-repo partition and sums node and
+// edge byte estimates. Approximate but cheap (O(repo size) with one
+// read lock across all shards).
+func (g *Graph) RepoMemoryEstimate(repoPrefix string) RepoMemoryEstimate {
+	g.lockAllRead()
+	defer g.unlockAllRead()
+
+	var est RepoMemoryEstimate
+	evictedIDs := make(map[string]struct{})
+	for _, s := range g.shards {
+		nodes := s.byRepo[repoPrefix]
+		for _, n := range nodes {
+			est.NodeBytes += nodeBytes(n)
+			est.NodeCount++
+			evictedIDs[n.ID] = struct{}{}
+		}
+	}
+	// Edges whose source lives in this repo. Same accounting rule as
+	// RepoStats so the numbers stay consistent.
+	for _, s := range g.shards {
+		for srcID, edges := range s.outEdges {
+			if _, ok := evictedIDs[srcID]; !ok {
+				continue
+			}
+			for _, e := range edges {
+				est.EdgeBytes += edgeBytes(e)
+				est.EdgeCount++
+			}
+		}
+	}
+	return est
+}
+
+// nodeBytes estimates the memory footprint of a single graph.Node.
+func nodeBytes(n *Node) uint64 {
+	if n == nil {
+		return 0
+	}
+	b := uint64(nodeStructOverhead)
+	b += uint64(len(n.ID) + len(n.Name) + len(n.QualName) + len(n.FilePath) + len(n.Language) + len(n.RepoPrefix))
+	b += metaBytes(n.Meta)
+	return b
+}
+
+// edgeBytes estimates the memory footprint of a single graph.Edge.
+func edgeBytes(e *Edge) uint64 {
+	if e == nil {
+		return 0
+	}
+	b := uint64(edgeStructOverhead)
+	b += uint64(len(e.From) + len(e.To) + len(e.Kind) + len(e.FilePath))
+	return b
+}
+
+// metaBytes approximates the size of a Node.Meta map. Only handles the
+// kinds of values we actually produce (string, bool, numeric, nested
+// map, []string) — more exotic types fall back to a conservative
+// constant rather than reflecting recursively.
+func metaBytes(m map[string]any) uint64 {
+	if m == nil {
+		return 0
+	}
+	// map header + bucket amortisation for small maps.
+	b := uint64(48 + 8*len(m))
+	for k, v := range m {
+		b += uint64(len(k)) + 16 // key entry overhead
+		switch val := v.(type) {
+		case string:
+			b += uint64(len(val)) + 16
+		case bool:
+			b += 1 + 16
+		case int, int32, int64, uint, uint32, uint64, float32, float64:
+			b += 8 + 16
+		case []string:
+			b += 24 // slice header
+			for _, s := range val {
+				b += uint64(len(s)) + 16
+			}
+		case map[string]any:
+			b += metaBytes(val)
+		default:
+			b += 32 // unknown — leave a sensible estimate
+		}
+	}
+	return b
+}
+
 // RepoPrefixes returns a list of unique repository prefixes in the
 // graph.
 func (g *Graph) RepoPrefixes() []string {

@@ -144,6 +144,14 @@ func (cm *ConfigManager) GetRepoConfig(repoPrefix string) *Config {
 	out.Exclude = effective
 	out.Index.Exclude = effective
 	out.Watch.Exclude = effective
+	// Plumb semantic.skip_embed through to the indexer's config so the
+	// embedder can filter without a new setter. Workspace > compiled
+	// defaults.
+	if len(out.Semantic.SkipEmbed) > 0 {
+		out.Index.SkipEmbed = out.Semantic.SkipEmbed
+	} else {
+		out.Index.SkipEmbed = DefaultSkipEmbed()
+	}
 	return out
 }
 

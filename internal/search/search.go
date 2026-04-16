@@ -32,6 +32,26 @@ type Backend interface {
 	Close()
 }
 
+// Sizer is an optional interface a Backend can implement to report its
+// approximate in-memory footprint. Used by `gortex daemon status` to
+// break down per-repo memory; callers should type-assert and treat a
+// missing implementation as zero.
+type Sizer interface {
+	SizeBytes() uint64
+}
+
+// BackendSize returns the estimated byte size of b if it implements
+// Sizer, or zero otherwise. Safe to call on a nil Backend.
+func BackendSize(b Backend) uint64 {
+	if b == nil {
+		return 0
+	}
+	if s, ok := b.(Sizer); ok {
+		return s.SizeBytes()
+	}
+	return 0
+}
+
 // AutoThreshold is the symbol count above which BleveBackend is used.
 const AutoThreshold = 50000
 

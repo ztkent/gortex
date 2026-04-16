@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"syscall"
 	"time"
@@ -327,9 +328,25 @@ func runDaemonStatus(cmd *cobra.Command, _ []string) error {
 	}
 	if len(st.TrackedRepos) > 0 {
 		_, _ = fmt.Fprintln(w, "tracked repos:")
-		for _, r := range st.TrackedRepos {
-			_, _ = fmt.Fprintf(w, "  %-20s %s  (%d files, %d nodes, %d edges)\n",
-				r.Prefix, r.Path, r.Files, r.Nodes, r.Edges)
+		// Sort biggest-memory first so the usual question "who's eating
+		// all the RAM?" is answered by the first line.
+		rows := make([]daemon.TrackedRepoStatus, len(st.TrackedRepos))
+		copy(rows, st.TrackedRepos)
+		sort.Slice(rows, func(i, j int) bool {
+			return rows[i].Memory.TotalBytes > rows[j].Memory.TotalBytes
+		})
+		for _, r := range rows {
+			_, _ = fmt.Fprintf(w, "  %-20s %s  (%d files, %d nodes, %d edges, %s)\n",
+				r.Prefix, r.Path, r.Files, r.Nodes, r.Edges,
+				formatBytes(r.Memory.TotalBytes))
+			// Break down only when there's something to show.
+			if r.Memory.TotalBytes > 0 {
+				_, _ = fmt.Fprintf(w, "    nodes=%s edges=%s search=%s vectors=%s\n",
+					formatBytes(r.Memory.NodesBytes),
+					formatBytes(r.Memory.EdgesBytes),
+					formatBytes(r.Memory.SearchBytes),
+					formatBytes(r.Memory.VectorsBytes))
+			}
 		}
 	} else {
 		_, _ = fmt.Fprintln(w, "tracked repos: (none)")

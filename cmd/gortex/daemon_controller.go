@@ -17,6 +17,7 @@ import (
 	"github.com/zzet/gortex/internal/daemon"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/indexer"
+	"github.com/zzet/gortex/internal/search"
 )
 
 // realController is the production daemon.Controller implementation. It
@@ -86,6 +87,15 @@ func (c *realController) Track(ctx context.Context, p daemon.TrackParams) (json.
 		if err := c.multiWatcher.AddRepo(prefix, wcfg); err != nil {
 			c.logger.Warn("track: attach watcher failed",
 				zap.String("prefix", prefix), zap.Error(err))
+		}
+	}
+
+	// Persist the config change. TrackRepoCtx mutates the in-memory
+	// GlobalConfig via AddRepo but does not flush to disk; without this
+	// Save the new repo vanishes on daemon restart. Mirrors Untrack.
+	if c.configManager != nil {
+		if err := c.configManager.Global().Save(); err != nil {
+			c.logger.Warn("track: save config failed", zap.Error(err))
 		}
 	}
 
@@ -213,6 +223,31 @@ func (c *realController) Status(_ context.Context) (daemon.StatusResponse, error
 		if c.graph != nil {
 			repoStats = c.graph.RepoStats()
 		}
+
+		// Search and vector backends are process-wide (one shared index
+		// across all repos), so we compute the global size once and
+		// split it proportionally to each repo's node share. Not exact,
+		// but it's the best attribution we can make without indexing
+		// per-repo which would double storage for the sake of a status
+		// breakdown.
+		var (
+			globalSearchBytes, globalVectorBytes uint64
+			totalNodes                           int
+		)
+		if backend := c.multiIndexer.Search(); backend != nil {
+			// If the backend is Hybrid, split text vs vector; otherwise
+			// treat the whole thing as "search."
+			if hyb, ok := backend.(*search.HybridBackend); ok {
+				globalSearchBytes = hyb.TextSizeBytes()
+				globalVectorBytes = hyb.VectorSizeBytes()
+			} else {
+				globalSearchBytes = search.BackendSize(backend)
+			}
+		}
+		for _, s := range repoStats {
+			totalNodes += s.TotalNodes
+		}
+
 		for prefix, meta := range c.multiIndexer.AllMetadata() {
 			nodes := meta.NodeCount
 			edges := meta.EdgeCount
@@ -220,6 +255,20 @@ func (c *realController) Status(_ context.Context) (daemon.StatusResponse, error
 				nodes = s.TotalNodes
 				edges = s.TotalEdges
 			}
+
+			var mem daemon.MemoryBreakdown
+			if c.graph != nil {
+				est := c.graph.RepoMemoryEstimate(prefix)
+				mem.NodesBytes = est.NodeBytes
+				mem.EdgesBytes = est.EdgeBytes
+			}
+			if totalNodes > 0 && nodes > 0 {
+				share := float64(nodes) / float64(totalNodes)
+				mem.SearchBytes = uint64(float64(globalSearchBytes) * share)
+				mem.VectorsBytes = uint64(float64(globalVectorBytes) * share)
+			}
+			mem.TotalBytes = mem.NodesBytes + mem.EdgesBytes + mem.SearchBytes + mem.VectorsBytes
+
 			tracked = append(tracked, daemon.TrackedRepoStatus{
 				Prefix:    prefix,
 				Path:      meta.RootPath,
@@ -227,6 +276,7 @@ func (c *realController) Status(_ context.Context) (daemon.StatusResponse, error
 				Nodes:     nodes,
 				Edges:     edges,
 				LastIndex: meta.LastIndexTime.Unix(),
+				Memory:    mem,
 			})
 		}
 	}

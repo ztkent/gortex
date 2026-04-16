@@ -83,3 +83,11 @@ func (s *Swappable) Close() {
 		s.inner = nil
 	}
 }
+
+// SizeBytes delegates to the inner backend's SizeBytes implementation
+// if it provides one; otherwise zero.
+func (s *Swappable) SizeBytes() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return BackendSize(s.inner)
+}

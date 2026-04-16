@@ -26,12 +26,61 @@ type WorkspaceConfig struct {
 
 // SemanticConfig holds settings for the semantic enrichment layer.
 type SemanticConfig struct {
-	Enabled           bool                   `mapstructure:"enabled" yaml:"enabled"`
-	TimeoutSeconds    int                    `mapstructure:"timeout_seconds" yaml:"timeout_seconds,omitempty"`
-	EnrichOnWatch     bool                   `mapstructure:"enrich_on_watch" yaml:"enrich_on_watch,omitempty"`
-	WatchDebounceMs   int                    `mapstructure:"watch_debounce_ms" yaml:"watch_debounce_ms,omitempty"`
-	RefuteUnconfirmed bool                   `mapstructure:"refute_unconfirmed" yaml:"refute_unconfirmed,omitempty"`
+	Enabled           bool                     `mapstructure:"enabled" yaml:"enabled"`
+	TimeoutSeconds    int                      `mapstructure:"timeout_seconds" yaml:"timeout_seconds,omitempty"`
+	EnrichOnWatch     bool                     `mapstructure:"enrich_on_watch" yaml:"enrich_on_watch,omitempty"`
+	WatchDebounceMs   int                      `mapstructure:"watch_debounce_ms" yaml:"watch_debounce_ms,omitempty"`
+	RefuteUnconfirmed bool                     `mapstructure:"refute_unconfirmed" yaml:"refute_unconfirmed,omitempty"`
 	Providers         []SemanticProviderConfig `mapstructure:"providers" yaml:"providers,omitempty"`
+	// SkipEmbed lists (language, kind) combinations that should be
+	// indexed for graph queries but *not* embedded into the vector
+	// search. Design tokens (CSS custom properties), terraform
+	// resource blocks, YAML/TOML/shell config variables are usually
+	// searched by literal name, so paying the embedding + HNSW cost
+	// buys nothing. See excludes.DefaultSkipEmbed for the baseline.
+	SkipEmbed []SkipEmbedRule `mapstructure:"skip_embed" yaml:"skip_embed,omitempty"`
+}
+
+// SkipEmbedRule says: when a node's Language matches Language AND its
+// Kind is in Kinds, skip it during vector-index construction.
+type SkipEmbedRule struct {
+	Language string   `mapstructure:"language" yaml:"language"`
+	Kinds    []string `mapstructure:"kinds"    yaml:"kinds"`
+}
+
+// ShouldSkipEmbed reports whether a node of the given (language, kind)
+// falls under any rule in the list. Matching is case-sensitive and
+// exact — parser output is canonical already.
+func ShouldSkipEmbed(rules []SkipEmbedRule, language, kind string) bool {
+	for _, r := range rules {
+		if r.Language != language {
+			continue
+		}
+		for _, k := range r.Kinds {
+			if k == kind {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// DefaultSkipEmbed returns the compiled-in baseline for which node
+// kinds skip embedding. Kept as a function (rather than a var) so
+// callers who mutate the returned slice don't affect each other.
+func DefaultSkipEmbed() []SkipEmbedRule {
+	return []SkipEmbedRule{
+		// Design tokens — searched by literal name, not concept.
+		{Language: "css", Kinds: []string{"variable", "type"}},
+		// Terraform resource/locals/variable blocks — searched
+		// literally (aws_vpc.main, module.foo).
+		{Language: "hcl", Kinds: []string{"type", "variable"}},
+		// Config keys — usually not meaningful prose.
+		{Language: "yaml", Kinds: []string{"variable"}},
+		{Language: "toml", Kinds: []string{"variable"}},
+		// Shell variables are nearly always noise for semantic search.
+		{Language: "bash", Kinds: []string{"variable"}},
+	}
 }
 
 // SemanticProviderConfig configures a single semantic provider.
@@ -70,6 +119,12 @@ type IndexConfig struct {
 	// silently stop working; merged into the unified list by ConfigManager.
 	Exclude []string `mapstructure:"exclude" yaml:"exclude,omitempty"`
 	Workers int      `mapstructure:"workers" yaml:"workers,omitempty"`
+	// SkipEmbed is the effective skip-embedding rules resolved from
+	// Semantic.SkipEmbed. Not part of the on-disk YAML schema — it's
+	// populated by ConfigManager.GetRepoConfig so the indexer gets it
+	// through the same struct it already receives. Surface it to users
+	// under semantic.skip_embed, not under index.
+	SkipEmbed []SkipEmbedRule `mapstructure:"-" yaml:"-"`
 	// MaxFileSize skips files larger than this during indexing. Zero
 	// (the default) disables the cap — full coverage is preferred so
 	// generated code like `*.pb.go`, schema files, and large data
@@ -134,6 +189,7 @@ func Default() *Config {
 			TimeoutSeconds:  120,
 			EnrichOnWatch:   false,
 			WatchDebounceMs: 500,
+			SkipEmbed:       DefaultSkipEmbed(),
 		},
 	}
 }

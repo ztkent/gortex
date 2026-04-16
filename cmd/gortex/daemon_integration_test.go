@@ -33,6 +33,15 @@ import (
 // dispatch goes through the real production code paths.
 func spinUpDaemon(t *testing.T) (socket, trackedRoot string) {
 	t.Helper()
+	_, socket, trackedRoot = spinUpDaemonWithConfig(t)
+	return socket, trackedRoot
+}
+
+// spinUpDaemonWithConfig is spinUpDaemon plus the test-scoped global
+// config path, which tests that assert persistence side effects need
+// to read back.
+func spinUpDaemonWithConfig(t *testing.T) (configPath, socket, trackedRoot string) {
+	t.Helper()
 
 	// Short base dir so the unix socket stays under the 104-char limit
 	// on macOS even with test-name suffixes.
@@ -56,8 +65,12 @@ func spinUpDaemon(t *testing.T) (socket, trackedRoot string) {
 	reg := parser.NewRegistry()
 	languages.RegisterAll(reg)
 
+	// Test-scoped global config path so a Track that persists doesn't
+	// touch the developer's real ~/.config/gortex/config.yaml.
+	configPath = filepath.Join(dir, "config.yaml")
+
 	idx := indexer.New(g, reg, config.Default().Index, zap.NewNop())
-	cm, err := config.NewConfigManager("")
+	cm, err := config.NewConfigManager(configPath)
 	require.NoError(t, err)
 	mi := indexer.NewMultiIndexer(g, reg, idx.Search(), cm, zap.NewNop())
 
@@ -85,7 +98,7 @@ func spinUpDaemon(t *testing.T) (socket, trackedRoot string) {
 
 	require.Eventually(t, func() bool { return daemon.IsRunningAt(socket) },
 		2*time.Second, 10*time.Millisecond)
-	return socket, trackedRoot
+	return configPath, socket, trackedRoot
 }
 
 // TestDaemon_EndToEnd_GraphStatsOverMCPProxy confirms that the whole
@@ -223,6 +236,38 @@ func TestDaemon_EndToEnd_TrackAddsRepoLive(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, string(ok), "repo_not_tracked",
 		"post-track proxy must not be rejected: %s", string(ok))
+}
+
+// TestDaemon_EndToEnd_TrackPersistsToConfig pins the contract that
+// `gortex track <path>` against a *running* daemon survives a daemon
+// restart. Regression for a bug where realController.Track updated the
+// in-memory GlobalConfig via AddRepo but never flushed to disk, so the
+// repo vanished on the next start.
+func TestDaemon_EndToEnd_TrackPersistsToConfig(t *testing.T) {
+	configPath, socket, _ := spinUpDaemonWithConfig(t)
+
+	second := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(second, "lib.go"),
+		[]byte("package main\nfunc Foo() {}\n"), 0o644))
+
+	ctl, err := daemon.DialTo(socket, daemon.Handshake{Mode: daemon.ModeControl, ClientName: "cli"})
+	require.NoError(t, err)
+	resp, err := ctl.Control(daemon.ControlTrack, daemon.TrackParams{Path: second})
+	require.NoError(t, err)
+	require.True(t, resp.OK, "track failed: %s %s", resp.ErrorCode, resp.ErrorMsg)
+	_ = ctl.Close()
+
+	// Re-read the config from disk as a fresh process would on restart.
+	gc, err := config.LoadGlobal(configPath)
+	require.NoError(t, err)
+
+	absSecond, _ := filepath.Abs(second)
+	var foundPaths []string
+	for _, r := range gc.Repos {
+		foundPaths = append(foundPaths, r.Path)
+	}
+	assert.Contains(t, foundPaths, absSecond,
+		"tracked repo must be persisted to the global config; got %v", foundPaths)
 }
 
 // silence unused-import noise when gofmt reorders during edits.

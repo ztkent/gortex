@@ -90,6 +90,18 @@ func (h *HybridBackend) VectorIndex() *VectorBackend { return h.vector }
 // Embedder returns the embedding provider.
 func (h *HybridBackend) Embedder() embedding.Provider { return h.embedder }
 
+// SizeBytes returns the sum of text and vector backend sizes.
+func (h *HybridBackend) SizeBytes() uint64 {
+	return BackendSize(h.text) + h.vector.SizeBytes()
+}
+
+// TextSizeBytes returns just the text backend's size — used by the
+// daemon status report to split "search" from "vectors" visually.
+func (h *HybridBackend) TextSizeBytes() uint64 { return BackendSize(h.text) }
+
+// VectorSizeBytes returns just the vector backend's size.
+func (h *HybridBackend) VectorSizeBytes() uint64 { return h.vector.SizeBytes() }
+
 // rrfFuse combines text and vector results using Reciprocal Rank Fusion.
 // score(doc) = 1/(k+rank_text) + 1/(k+rank_vector)
 func rrfFuse(textResults []SearchResult, vecIDs []string, k, limit int) []SearchResult {
