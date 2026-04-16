@@ -246,15 +246,23 @@ Gortex can index multiple repositories into a single shared graph, enabling cros
 Two-tier config hierarchy:
 
 - **Global config** (`~/.config/gortex/config.yaml`) — projects, repo lists, active project, reference tags
-- **Workspace config** (`.gortex.yaml` per repo) — guards, excludes, local overrides (workspace wins when both define the same setting)
+- **Workspace config** (`.gortex.yaml` per repo) — guards, excludes, local overrides
+
+Excludes are layered — builtin → global → per-repo entry → workspace — with gitignore semantics. Use `!pattern` in a later layer to re-include something an earlier layer excluded.
 
 ```yaml
 # ~/.config/gortex/config.yaml
 active_project: my-saas
 
+exclude:                            # Applies to every tracked repo
+  - "**/*.generated.*"
+  - "node_modules/"                 # Already in the builtin baseline
+
 repos:
   - path: /home/user/projects/gortex
     name: gortex
+    exclude:                        # Extra patterns just for this repo
+      - "results/**"
 
 projects:
   my-saas:
@@ -279,6 +287,13 @@ gortex serve --track /path/to/repo  # Track additional repos on startup
 gortex serve --project my-saas      # Set active project scope
 gortex index repo-a/ repo-b/        # Index multiple repos
 gortex status                       # Per-repo and per-project stats
+
+# Manage the effective ignore list used by indexing + watching
+gortex config exclude list                          # Show all layers (builtin, global, repo entry, workspace)
+gortex config exclude add pkg/generated             # Default target: workspace .gortex.yaml
+gortex config exclude add '**/*.bak' --global       # Write to ~/.config/gortex/config.yaml
+gortex config exclude add testdata/ --repo backend  # Write to a RepoEntry
+gortex config exclude remove pkg/generated          # Remove from the same target
 ```
 
 ### MCP Tools

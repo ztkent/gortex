@@ -16,6 +16,7 @@ import (
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/embedding"
+	"github.com/zzet/gortex/internal/excludes"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/progress"
@@ -41,13 +42,15 @@ type IndexError struct {
 
 // Indexer walks a repository and populates the graph.
 type Indexer struct {
-	graph    *graph.Graph
-	registry *parser.Registry
-	resolver *resolver.Resolver
-	search   search.Backend
-	config   config.IndexConfig
-	rootPath string
-	logger   *zap.Logger
+	graph       *graph.Graph
+	registry    *parser.Registry
+	resolver    *resolver.Resolver
+	search      search.Backend
+	config      config.IndexConfig
+	excludes    *excludes.Matcher
+	excludeOnce sync.Once
+	rootPath    string
+	logger      *zap.Logger
 
 	// repoPrefix is set in multi-repo mode to prefix all file paths and node IDs.
 	// When empty, the indexer operates in single-repo mode (backward compatible).
@@ -744,49 +747,31 @@ func (idx *Indexer) buildSearchIndex() {
 		zap.Int("dimensions", dims))
 }
 
-// defaultExcludes are always excluded regardless of config.
-var defaultExcludes = []string{
-	".git",
-	".claude",
-	".kiro",
-	"node_modules",
-	".next",
-	"__pycache__",
-	".venv",
-	"venv",
-	".tox",
-	"target",         // Rust/Java build
-	"build",          // generic build
-	"dist",           // generic dist
-	".gortex-cache",
-}
-
+// shouldExclude reports whether a path is excluded by the effective
+// ignore list. The matcher is built lazily from idx.config.Exclude,
+// which is populated by ConfigManager.GetRepoConfig with the full
+// layered list (builtin + global + RepoEntry + workspace).
 func (idx *Indexer) shouldExclude(path, root string) bool {
-	rel, err := filepath.Rel(root, path)
-	if err != nil {
+	m := idx.excludeMatcher()
+	if m == nil {
 		return false
 	}
-	// Normalize to forward slashes for pattern matching.
-	rel = filepath.ToSlash(rel)
+	return m.MatchAbs(path, root)
+}
 
-	// Always exclude common non-source directories — at any depth.
-	for _, dir := range defaultExcludes {
-		if strings.HasPrefix(rel, dir+"/") || rel == dir || strings.Contains(rel, "/"+dir+"/") {
-			return true
+func (idx *Indexer) excludeMatcher() *excludes.Matcher {
+	idx.excludeOnce.Do(func() {
+		patterns := idx.config.Exclude
+		// A nil/empty list from upstream means "no layering was applied"
+		// (e.g. a direct caller of indexer.New without ConfigManager).
+		// Fall back to the builtin baseline so the walk still skips the
+		// obvious non-source dirs.
+		if len(patterns) == 0 {
+			patterns = excludes.Builtin
 		}
-	}
-
-	for _, pattern := range idx.config.Exclude {
-		// Simple directory-based exclusion.
-		dir := strings.TrimSuffix(pattern, "/**")
-		dir = strings.TrimSuffix(dir, "/*")
-		dir = strings.TrimPrefix(dir, "**/")
-
-		if strings.Contains(rel, dir+"/") || strings.HasPrefix(rel, dir+"/") || rel == dir {
-			return true
-		}
-	}
-	return false
+		idx.excludes = excludes.New(patterns)
+	})
+	return idx.excludes
 }
 
 // ParseErrors returns the parse errors from the last full index.

@@ -9,6 +9,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 	"pgregory.net/rapid"
+
+	"github.com/zzet/gortex/internal/excludes"
 )
 
 // --- Unit Tests ---
@@ -52,20 +54,20 @@ func TestGetRepoConfig_NoWorkspaceConfig(t *testing.T) {
 
 	cfg := cm.GetRepoConfig("unknown-repo")
 	require.NotNil(t, cfg)
-	// Should return defaults.
-	assert.Equal(t, Default().Index.Exclude, cfg.Index.Exclude)
+	// No global, no workspace, no RepoEntry → effective = builtin.
+	assert.Equal(t, excludes.Builtin, cfg.Index.Exclude)
+	assert.Equal(t, excludes.Builtin, cfg.Watch.Exclude)
 }
 
 func TestGetRepoConfig_WithWorkspaceConfig(t *testing.T) {
 	cm, err := NewConfigManager("/tmp/nonexistent-gortex-test-cm/config.yaml")
 	require.NoError(t, err)
 
-	// Create a temp repo with .gortex.yaml.
+	// Create a temp repo with .gortex.yaml using the new top-level key.
 	repoDir := t.TempDir()
 	wsContent := `
-index:
-  exclude:
-    - "custom/**"
+exclude:
+  - "custom/**"
 guards:
   rules:
     - name: test-rule
@@ -80,45 +82,63 @@ guards:
 
 	cfg := cm.GetRepoConfig("my-repo")
 	require.NotNil(t, cfg)
-	assert.Equal(t, []string{"custom/**"}, cfg.Index.Exclude)
+	// Effective list is builtin + workspace; workspace patterns at the tail.
+	assert.Equal(t, "custom/**", cfg.Index.Exclude[len(cfg.Index.Exclude)-1])
+	assert.Contains(t, cfg.Index.Exclude, ".git/")
 	assert.Len(t, cfg.Guards.Rules, 1)
 	assert.Equal(t, "test-rule", cfg.Guards.Rules[0].Name)
 }
 
-func TestEffectiveExclude_WorkspaceOverridesGlobal(t *testing.T) {
+func TestEffectiveExclude_WorkspaceAppendsToBuiltin(t *testing.T) {
 	cm, err := NewConfigManager("/tmp/nonexistent-gortex-test-cm/config.yaml")
 	require.NoError(t, err)
 
-	// Create a repo with workspace config that has custom excludes.
 	repoDir := t.TempDir()
 	wsContent := `
-index:
-  exclude:
-    - "ws-vendor/**"
-    - "ws-build/**"
+exclude:
+  - "ws-vendor/**"
+  - "ws-build/**"
 `
 	require.NoError(t, os.WriteFile(filepath.Join(repoDir, ".gortex.yaml"), []byte(wsContent), 0644))
 	cm.LoadWorkspaceConfig("repo-a", repoDir)
 
-	// Workspace config should win.
-	excludes := cm.EffectiveExclude("repo-a")
-	assert.Equal(t, []string{"ws-vendor/**", "ws-build/**"}, excludes)
+	got := cm.EffectiveExclude("repo-a")
+	// Builtin leads, workspace tails.
+	assert.Equal(t, excludes.Builtin[0], got[0])
+	assert.Equal(t, []string{"ws-vendor/**", "ws-build/**"}, got[len(got)-2:])
 }
 
-func TestEffectiveExclude_FallsBackToGlobalDefaults(t *testing.T) {
+func TestEffectiveExclude_LegacyIndexExcludeStillRead(t *testing.T) {
 	cm, err := NewConfigManager("/tmp/nonexistent-gortex-test-cm/config.yaml")
 	require.NoError(t, err)
 
-	// No workspace config loaded for this repo — should get defaults.
-	excludes := cm.EffectiveExclude("unknown-repo")
-	assert.Equal(t, Default().Index.Exclude, excludes)
+	// Old-shape .gortex.yaml: exclude under index.exclude, no top-level key.
+	repoDir := t.TempDir()
+	wsContent := `
+index:
+  exclude:
+    - "legacy/**"
+`
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, ".gortex.yaml"), []byte(wsContent), 0644))
+	cm.LoadWorkspaceConfig("legacy-repo", repoDir)
+
+	got := cm.EffectiveExclude("legacy-repo")
+	assert.Contains(t, got, "legacy/**", "legacy index.exclude must still be honoured")
 }
 
-func TestEffectiveExclude_EmptyWorkspaceExcludeFallsBack(t *testing.T) {
+func TestEffectiveExclude_FallsBackToBuiltin(t *testing.T) {
 	cm, err := NewConfigManager("/tmp/nonexistent-gortex-test-cm/config.yaml")
 	require.NoError(t, err)
 
-	// Workspace config exists but has empty exclude list.
+	// No workspace config, no global Exclude — expect the builtin baseline.
+	got := cm.EffectiveExclude("unknown-repo")
+	assert.Equal(t, excludes.Builtin, got)
+}
+
+func TestEffectiveExclude_EmptyWorkspaceExcludeYieldsBuiltin(t *testing.T) {
+	cm, err := NewConfigManager("/tmp/nonexistent-gortex-test-cm/config.yaml")
+	require.NoError(t, err)
+
 	repoDir := t.TempDir()
 	wsContent := `
 index:
@@ -127,9 +147,41 @@ index:
 	require.NoError(t, os.WriteFile(filepath.Join(repoDir, ".gortex.yaml"), []byte(wsContent), 0644))
 	cm.LoadWorkspaceConfig("repo-b", repoDir)
 
-	// Empty workspace exclude → fall back to defaults.
-	excludes := cm.EffectiveExclude("repo-b")
-	assert.Equal(t, Default().Index.Exclude, excludes)
+	got := cm.EffectiveExclude("repo-b")
+	assert.Equal(t, excludes.Builtin, got)
+}
+
+func TestEffectiveExclude_LayersAllFour(t *testing.T) {
+	// Global with Exclude + RepoEntry with Exclude + workspace exclude.
+	dir := t.TempDir()
+	globalPath := filepath.Join(dir, "config.yaml")
+	repoDir := t.TempDir()
+	globalContent := `
+exclude:
+  - "global-pat/**"
+repos:
+  - path: ` + repoDir + `
+    name: my-repo
+    exclude:
+      - "entry-pat/**"
+`
+	require.NoError(t, os.WriteFile(globalPath, []byte(globalContent), 0644))
+
+	wsContent := `
+exclude:
+  - "ws-pat/**"
+`
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, ".gortex.yaml"), []byte(wsContent), 0644))
+
+	cm, err := NewConfigManager(globalPath)
+	require.NoError(t, err)
+	cm.LoadWorkspaceConfig("my-repo", repoDir)
+
+	got := cm.EffectiveExclude("my-repo")
+	// Order: builtin → global → entry → workspace.
+	tail := got[len(got)-3:]
+	assert.Equal(t, []string{"global-pat/**", "entry-pat/**", "ws-pat/**"}, tail)
+	assert.Contains(t, got, ".git/", "builtin still at the head")
 }
 
 func TestEffectiveGuardRules_WorkspaceOverridesGlobal(t *testing.T) {
@@ -276,8 +328,9 @@ func TestNewConfigManager_EmptyPath(t *testing.T) {
 // workspaceYAML is a helper struct for marshaling workspace config to YAML.
 // We use explicit yaml tags since the Config struct uses mapstructure tags.
 type workspaceYAML struct {
-	Index  indexYAML  `yaml:"index,omitempty"`
-	Guards guardsYAML `yaml:"guards,omitempty"`
+	Exclude []string   `yaml:"exclude,omitempty"`
+	Index   indexYAML  `yaml:"index,omitempty"`
+	Guards  guardsYAML `yaml:"guards,omitempty"`
 }
 
 type indexYAML struct {
@@ -334,64 +387,48 @@ func genGuardRules() *rapid.Generator[[]guardRuleYAML] {
 	})
 }
 
-// TestPropertyConfigOverrideSemantics verifies Property 16: Config override semantics.
-//
-// Feature: multi-repo-support, Property 16: Config override semantics
-//
-// For any setting defined in both the GlobalConfig and a repository's WorkspaceConfig,
-// the effective value for that repository SHALL be the WorkspaceConfig value.
-// When the WorkspaceConfig is absent or does not define the setting, the effective value
-// SHALL be the GlobalConfig default.
-//
-func TestPropertyConfigOverrideSemantics(t *testing.T) {
+// TestPropertyConfigLayeringSemantics verifies the current contract:
+// workspace excludes are appended to the builtin baseline (plus global
+// and per-RepoEntry layers when present). Guard rules remain
+// replace-semantics — workspace rules win wholesale when present.
+func TestPropertyConfigLayeringSemantics(t *testing.T) {
 	globalDefaults := Default()
 
 	rapid.Check(t, func(rt *rapid.T) {
-		// Generate random workspace config content.
-		wsExclude := genExcludePatterns().Draw(rt, "wsExclude")
+		wsExcludeNew := genExcludePatterns().Draw(rt, "wsExclude")
 		wsRules := genGuardRules().Draw(rt, "wsRules")
 
 		repoPrefix := rapid.StringMatching(`[a-z]{3,10}`).Draw(rt, "repoPrefix")
-
-		// Create a temp directory with a .gortex.yaml containing the generated config.
 		repoDir := t.TempDir()
 
 		wsCfg := workspaceYAML{
-			Index:  indexYAML{Exclude: wsExclude},
-			Guards: guardsYAML{Rules: wsRules},
+			Exclude: wsExcludeNew,
+			Guards:  guardsYAML{Rules: wsRules},
 		}
-
 		data, err := yaml.Marshal(&wsCfg)
 		require.NoError(rt, err)
-
 		err = os.WriteFile(filepath.Join(repoDir, ".gortex.yaml"), data, 0644)
 		require.NoError(rt, err)
 
-		// Create a ConfigManager (no global config file needed).
 		cm, err := NewConfigManager("/tmp/nonexistent-gortex-pbt-" + repoPrefix + "/config.yaml")
 		require.NoError(rt, err)
-
-		// Load the workspace config.
 		cm.LoadWorkspaceConfig(repoPrefix, repoDir)
 
-		// --- Test EffectiveExclude ---
+		// --- Exclude: append semantics ---
 		effectiveExclude := cm.EffectiveExclude(repoPrefix)
-
-		if len(wsExclude) > 0 {
-			// Workspace has non-empty exclude → workspace wins.
-			assert.Equal(rt, wsExclude, effectiveExclude,
-				"workspace exclude should override global when present")
-		} else {
-			// Workspace has empty/no exclude → global defaults apply.
-			assert.Equal(rt, globalDefaults.Index.Exclude, effectiveExclude,
-				"global default exclude should apply when workspace is empty")
+		// Builtin always at the head.
+		assert.Equal(rt, excludes.Builtin[0], effectiveExclude[0],
+			"builtin list must lead the effective excludes")
+		// Workspace patterns appended at the tail.
+		if len(wsExcludeNew) > 0 {
+			tail := effectiveExclude[len(effectiveExclude)-len(wsExcludeNew):]
+			assert.Equal(rt, wsExcludeNew, tail,
+				"workspace excludes should be appended after builtin")
 		}
 
-		// --- Test EffectiveGuardRules ---
+		// --- Guard rules: replace semantics (unchanged) ---
 		effectiveRules := cm.EffectiveGuardRules(repoPrefix)
-
 		if len(wsRules) > 0 {
-			// Workspace has non-empty guard rules → workspace wins.
 			assert.Len(rt, effectiveRules, len(wsRules),
 				"workspace guard rules should override global when present")
 			for i, rule := range effectiveRules {
@@ -402,15 +439,14 @@ func TestPropertyConfigOverrideSemantics(t *testing.T) {
 				assert.Equal(rt, wsRules[i].Message, rule.Message)
 			}
 		} else {
-			// Workspace has empty/no guard rules → global defaults apply.
 			assert.Equal(rt, globalDefaults.Guards.Rules, effectiveRules,
 				"global default guard rules should apply when workspace is empty")
 		}
 
-		// --- Test that an unknown repo (no workspace config) gets global defaults ---
+		// Unknown repo → builtin baseline only.
 		unknownPrefix := repoPrefix + "-unknown"
-		assert.Equal(rt, globalDefaults.Index.Exclude, cm.EffectiveExclude(unknownPrefix),
-			"repo without workspace config should get global default exclude")
+		assert.Equal(rt, excludes.Builtin, cm.EffectiveExclude(unknownPrefix),
+			"repo without workspace config should get the builtin baseline")
 		assert.Equal(rt, globalDefaults.Guards.Rules, cm.EffectiveGuardRules(unknownPrefix),
 			"repo without workspace config should get global default guard rules")
 	})

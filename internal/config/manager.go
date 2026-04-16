@@ -8,6 +8,8 @@ import (
 
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
+
+	"github.com/zzet/gortex/internal/excludes"
 )
 
 // ConfigManager merges GlobalConfig + per-repo WorkspaceConfig.
@@ -126,25 +128,57 @@ func (cm *ConfigManager) getWorkspaceConfig(repoPrefix string) *Config {
 	return cm.workspace[repoPrefix]
 }
 
-// GetRepoConfig returns the merged config for a repository.
-// If a workspace config exists for the repo, it is returned.
-// Otherwise, global defaults are returned.
+// GetRepoConfig returns the merged config for a repository. The returned
+// Config has Index.Exclude and Watch.Exclude populated with the full
+// layered exclude list from EffectiveExclude, so callers passing
+// cfg.Index into indexer.New automatically receive the effective patterns.
 func (cm *ConfigManager) GetRepoConfig(repoPrefix string) *Config {
-	ws := cm.getWorkspaceConfig(repoPrefix)
-	if ws != nil {
-		return ws
+	var out *Config
+	if ws := cm.getWorkspaceConfig(repoPrefix); ws != nil {
+		dup := *ws
+		out = &dup
+	} else {
+		out = Default()
 	}
-	return Default()
+	effective := cm.EffectiveExclude(repoPrefix)
+	out.Exclude = effective
+	out.Index.Exclude = effective
+	out.Watch.Exclude = effective
+	return out
 }
 
-// EffectiveExclude returns the effective index.exclude patterns for a repo.
-// Workspace config wins when present; otherwise global defaults apply.
+// EffectiveExclude returns the effective ignore patterns for a repo,
+// layered in precedence order (later layers can re-include via !pattern):
+//
+//  1. Builtin baseline (excludes.Builtin)
+//  2. Global Exclude from ~/.config/gortex/config.yaml
+//  3. Matching RepoEntry.Exclude (first match in Repos, then Projects)
+//  4. Workspace .gortex.yaml top-level Exclude
+//  5. Legacy workspace Index.Exclude / Watch.Exclude (deprecated)
 func (cm *ConfigManager) EffectiveExclude(repoPrefix string) []string {
-	ws := cm.getWorkspaceConfig(repoPrefix)
-	if ws != nil && len(ws.Index.Exclude) > 0 {
-		return ws.Index.Exclude
+	cm.mu.RLock()
+	gc := cm.global
+	ws := cm.workspace[repoPrefix]
+	cm.mu.RUnlock()
+
+	out := make([]string, 0, 32)
+	out = append(out, excludes.Builtin...)
+	if gc != nil {
+		out = append(out, gc.Exclude...)
+		if entry := gc.FindRepoByPrefix(repoPrefix); entry != nil {
+			out = append(out, entry.Exclude...)
+		}
 	}
-	return Default().Index.Exclude
+	if ws != nil {
+		out = append(out, ws.Exclude...)
+		// Legacy fallback: older configs put patterns under index.exclude
+		// or watch.exclude. Fold them in so nothing silently breaks.
+		if len(ws.Exclude) == 0 {
+			out = append(out, ws.Index.Exclude...)
+			out = append(out, ws.Watch.Exclude...)
+		}
+	}
+	return out
 }
 
 // EffectiveGuardRules returns the effective guard rules for a repo.

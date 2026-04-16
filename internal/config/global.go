@@ -27,6 +27,9 @@ type RepoEntry struct {
 	Path string `mapstructure:"path" yaml:"path"`
 	Name string `mapstructure:"name" yaml:"name,omitempty"`
 	Ref  string `mapstructure:"ref"  yaml:"ref,omitempty"`
+	// Exclude adds repo-specific ignore patterns layered on top of the
+	// global Exclude list (gitignore semantics).
+	Exclude []string `mapstructure:"exclude" yaml:"exclude,omitempty"`
 }
 
 // ProjectConfig defines a named project grouping repos.
@@ -39,6 +42,9 @@ type GlobalConfig struct {
 	Projects      map[string]ProjectConfig `mapstructure:"projects"       yaml:"projects,omitempty"`
 	Repos         []RepoEntry              `mapstructure:"repos"          yaml:"repos,omitempty"`
 	ActiveProject string                   `mapstructure:"active_project" yaml:"active_project,omitempty"`
+	// Exclude is the user-level ignore list layered above the builtin
+	// baseline and below per-RepoEntry / workspace lists.
+	Exclude []string `mapstructure:"exclude" yaml:"exclude,omitempty"`
 
 	// configPath stores the file path used for Save(). Set by LoadGlobal or SetConfigPath.
 	configPath string `yaml:"-"`
@@ -172,6 +178,27 @@ func ResolvePrefix(entry RepoEntry) string {
 		return entry.Name
 	}
 	return filepath.Base(entry.Path)
+}
+
+// FindRepoByPrefix searches top-level Repos and all Projects for an entry
+// whose ResolvePrefix matches. Returns nil when no entry matches.
+func (gc *GlobalConfig) FindRepoByPrefix(prefix string) *RepoEntry {
+	if gc == nil {
+		return nil
+	}
+	for i := range gc.Repos {
+		if ResolvePrefix(gc.Repos[i]) == prefix {
+			return &gc.Repos[i]
+		}
+	}
+	for _, proj := range gc.Projects {
+		for i := range proj.Repos {
+			if ResolvePrefix(proj.Repos[i]) == prefix {
+				return &proj.Repos[i]
+			}
+		}
+	}
+	return nil
 }
 
 // checkDuplicatePrefixes returns errors for any duplicate Repo_Prefix values.

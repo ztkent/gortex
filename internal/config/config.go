@@ -8,15 +8,15 @@ import (
 )
 
 type GuardRule struct {
-	Name    string `mapstructure:"name"`
-	Kind    string `mapstructure:"kind"`    // "co-change" | "boundary"
-	Source  string `mapstructure:"source"`  // package/path prefix
-	Target  string `mapstructure:"target"`  // package/path prefix
-	Message string `mapstructure:"message"` // human-readable explanation
+	Name    string `mapstructure:"name"    yaml:"name"`
+	Kind    string `mapstructure:"kind"    yaml:"kind"`              // "co-change" | "boundary"
+	Source  string `mapstructure:"source"  yaml:"source"`            // package/path prefix
+	Target  string `mapstructure:"target"  yaml:"target"`            // package/path prefix
+	Message string `mapstructure:"message" yaml:"message,omitempty"` // human-readable explanation
 }
 
 type GuardsConfig struct {
-	Rules []GuardRule `mapstructure:"rules"`
+	Rules []GuardRule `mapstructure:"rules" yaml:"rules,omitempty"`
 }
 
 // WorkspaceConfig holds workspace-level settings for multi-repo support.
@@ -48,19 +48,28 @@ type SemanticProviderConfig struct {
 }
 
 type Config struct {
-	Index     IndexConfig     `mapstructure:"index"`
-	Watch     WatchConfig     `mapstructure:"watch"`
-	Query     QueryConfig     `mapstructure:"query"`
-	MCP       MCPConfig       `mapstructure:"mcp"`
-	Guards    GuardsConfig    `mapstructure:"guards"`
+	// Exclude is the unified ignore list (gitignore semantics) used by
+	// both indexing and watching. Workspace-level patterns are appended
+	// to builtin + global + per-RepoEntry layers; use `!pattern` to
+	// re-include something an outer layer excluded.
+	Exclude []string `mapstructure:"exclude" yaml:"exclude,omitempty"`
+
+	Index     IndexConfig     `mapstructure:"index"     yaml:"index,omitempty"`
+	Watch     WatchConfig     `mapstructure:"watch"     yaml:"watch,omitempty"`
+	Query     QueryConfig     `mapstructure:"query"     yaml:"query,omitempty"`
+	MCP       MCPConfig       `mapstructure:"mcp"       yaml:"mcp,omitempty"`
+	Guards    GuardsConfig    `mapstructure:"guards"    yaml:"guards,omitempty"`
 	Workspace WorkspaceConfig `mapstructure:"workspace" yaml:"workspace,omitempty"`
-	Semantic  SemanticConfig  `mapstructure:"semantic" yaml:"semantic,omitempty"`
+	Semantic  SemanticConfig  `mapstructure:"semantic"  yaml:"semantic,omitempty"`
 }
 
 type IndexConfig struct {
-	Languages []string `mapstructure:"languages"`
-	Exclude   []string `mapstructure:"exclude"`
-	Workers   int      `mapstructure:"workers"`
+	Languages []string `mapstructure:"languages" yaml:"languages,omitempty"`
+	// Exclude is deprecated — use top-level Config.Exclude instead.
+	// Still read for one release so existing .gortex.yaml files don't
+	// silently stop working; merged into the unified list by ConfigManager.
+	Exclude []string `mapstructure:"exclude" yaml:"exclude,omitempty"`
+	Workers int      `mapstructure:"workers" yaml:"workers,omitempty"`
 	// MaxFileSize skips files larger than this during indexing. Zero
 	// (the default) disables the cap — full coverage is preferred so
 	// generated code like `*.pb.go`, schema files, and large data
@@ -69,34 +78,37 @@ type IndexConfig struct {
 	// 2 MiB) via `.gortex.yaml` to trade coverage for speed. A cap
 	// that drops real symbols silently is a worse default than a
 	// slightly slower full index.
-	MaxFileSize int64 `mapstructure:"max_file_size"`
+	MaxFileSize int64 `mapstructure:"max_file_size" yaml:"max_file_size,omitempty"`
 }
 
 type WatchConfig struct {
-	Enabled    bool     `mapstructure:"enabled"`
-	Paths      []string `mapstructure:"paths"`
-	DebounceMs int      `mapstructure:"debounce_ms"`
-	Exclude    []string `mapstructure:"exclude"`
+	Enabled    bool     `mapstructure:"enabled"     yaml:"enabled,omitempty"`
+	Paths      []string `mapstructure:"paths"       yaml:"paths,omitempty"`
+	DebounceMs int      `mapstructure:"debounce_ms" yaml:"debounce_ms,omitempty"`
+	// Exclude is deprecated — use top-level Config.Exclude instead.
+	// Kept for one release as a fallback merged into the unified list.
+	Exclude []string `mapstructure:"exclude" yaml:"exclude,omitempty"`
 }
 
 type QueryConfig struct {
-	DefaultDepth int `mapstructure:"default_depth"`
-	MaxDepth     int `mapstructure:"max_depth"`
+	DefaultDepth int `mapstructure:"default_depth" yaml:"default_depth,omitempty"`
+	MaxDepth     int `mapstructure:"max_depth"     yaml:"max_depth,omitempty"`
 }
 
 type MCPConfig struct {
-	Transport string `mapstructure:"transport"`
-	Port      int    `mapstructure:"port"`
+	Transport string `mapstructure:"transport" yaml:"transport,omitempty"`
+	Port      int    `mapstructure:"port"      yaml:"port,omitempty"`
 }
 
 // Default returns a Config with sensible defaults.
+//
+// Exclude is intentionally empty here — the builtin baseline lives in
+// excludes.Builtin and is layered in by ConfigManager.EffectiveExclude.
+// Callers that need the full effective list should go through the
+// ConfigManager, not Default().
 func Default() *Config {
 	return &Config{
 		Index: IndexConfig{
-			Exclude: []string{
-				"vendor/**", "node_modules/**", ".git/**",
-				"dist/**", "build/**", ".terraform/**",
-			},
 			Workers: runtime.NumCPU(),
 			// MaxFileSize: 0 = no cap. Opt-in knob for users who want
 			// to skip large generated/minified files.
@@ -105,9 +117,6 @@ func Default() *Config {
 			Enabled:    false,
 			Paths:      []string{"."},
 			DebounceMs: 150,
-			Exclude: []string{
-				"**/*.tmp", "**/*.swp", "**/.git/**", "**/node_modules/**",
-			},
 		},
 		Query: QueryConfig{
 			DefaultDepth: 3,

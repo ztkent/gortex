@@ -10,6 +10,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/config"
+	"github.com/zzet/gortex/internal/excludes"
 	"github.com/zzet/gortex/internal/graph"
 )
 
@@ -44,6 +45,7 @@ type Watcher struct {
 	indexer          *Indexer
 	fsw              *fsnotify.Watcher
 	config           config.WatchConfig
+	excludes         *excludes.Matcher
 	events           chan GraphChangeEvent
 	history          []GraphChangeEvent
 	historyMu        sync.Mutex
@@ -59,6 +61,11 @@ type Watcher struct {
 const maxHistory = 1000
 
 // NewWatcher creates a Watcher for the given indexer.
+//
+// cfg.Exclude is expected to carry the full effective pattern list (from
+// ConfigManager.EffectiveExclude). If it is empty — e.g. a direct caller
+// that bypasses ConfigManager — the watcher falls back to the builtin
+// baseline so the obvious non-source dirs stay ignored.
 func NewWatcher(idx *Indexer, cfg config.WatchConfig, logger *zap.Logger) (*Watcher, error) {
 	fsw, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -71,15 +78,21 @@ func NewWatcher(idx *Indexer, cfg config.WatchConfig, logger *zap.Logger) (*Watc
 	}
 	cfg.DebounceMs = debounce
 
+	patterns := cfg.Exclude
+	if len(patterns) == 0 {
+		patterns = excludes.Builtin
+	}
+
 	return &Watcher{
-		indexer: idx,
-		fsw:     fsw,
-		config:  cfg,
-		events:  make(chan GraphChangeEvent, 64),
-		pending: make(map[string]*time.Timer),
-		logger:  logger,
-		done:    make(chan struct{}),
-		stopped: make(chan struct{}),
+		indexer:  idx,
+		fsw:      fsw,
+		config:   cfg,
+		excludes: excludes.New(patterns),
+		events:   make(chan GraphChangeEvent, 64),
+		pending:  make(map[string]*time.Timer),
+		logger:   logger,
+		done:     make(chan struct{}),
+		stopped:  make(chan struct{}),
 	}, nil
 }
 
@@ -166,8 +179,9 @@ func (w *Watcher) loop() {
 func (w *Watcher) handleEvent(event fsnotify.Event) {
 	path := event.Name
 
-	// Skip events from always-excluded directories.
-	if inExcludedDir(path) {
+	// Skip events from excluded paths. A single matcher call covers
+	// what the old code split across inExcludedDir + isExcluded.
+	if w.isExcluded(path) {
 		return
 	}
 
@@ -177,11 +191,6 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 			_ = w.addRecursive(path)
 			return
 		}
-	}
-
-	// Skip excluded paths.
-	if w.isExcluded(path) {
-		return
 	}
 
 	// Only process files with known extensions.
@@ -356,20 +365,6 @@ func (w *Watcher) snapshotSymbols(relPath string) []*graph.Node {
 	return snapshot
 }
 
-// alwaysExcludeDirs are directories that should never be watched,
-// regardless of configuration.
-var alwaysExcludeDirs = map[string]bool{
-	".git":         true,
-	"node_modules": true,
-	"vendor":       true,
-	".hg":          true,
-	".svn":         true,
-	"__pycache__":  true,
-	".mypy_cache":  true,
-	".tox":         true,
-	".venv":        true,
-}
-
 // addRecursive walks the tree under root and registers an fsnotify watch
 // for every directory that contains at least one indexable file. Empty
 // directories and trees full of binary/doc files (where no parser claims
@@ -390,12 +385,12 @@ func (w *Watcher) addRecursive(root string) error {
 			return nil
 		}
 		if d.IsDir() {
-			if alwaysExcludeDirs[d.Name()] {
-				return filepath.SkipDir
-			}
 			if w.isExcluded(path) {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+		if w.isExcluded(path) {
 			return nil
 		}
 		// File: only mark the parent as needing a watch when a parser
@@ -432,49 +427,11 @@ func (w *Watcher) addRecursive(root string) error {
 	return nil
 }
 
-// inExcludedDir checks if the path contains an always-excluded directory component.
-func inExcludedDir(path string) bool {
-	dir := path
-	for {
-		base := filepath.Base(dir)
-		if alwaysExcludeDirs[base] {
-			return true
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
-	}
-	return false
-}
-
+// isExcluded reports whether path is excluded by the effective pattern list.
 func (w *Watcher) isExcluded(path string) bool {
-	rel, err := filepath.Rel(w.indexer.rootPath, path)
-	if err != nil {
-		return false
+	root := w.indexer.rootPath
+	if root == "" {
+		return w.excludes.MatchRel(filepath.Base(path))
 	}
-	rel = filepath.ToSlash(rel)
-
-	for _, pattern := range w.config.Exclude {
-		matched, _ := filepath.Match(pattern, filepath.Base(path))
-		if matched {
-			return true
-		}
-		// Check directory-based patterns.
-		dir := pattern
-		for _, prefix := range []string{"**/", "*/"} {
-			dir = filepath.ToSlash(dir)
-			if len(dir) > len(prefix) && dir[:len(prefix)] == prefix {
-				dir = dir[len(prefix):]
-			}
-		}
-		dir = filepath.ToSlash(dir)
-		dir = filepath.Clean(dir)
-		if dir != "." && (filepath.ToSlash(rel) == dir ||
-			len(rel) > len(dir) && rel[:len(dir)+1] == dir+"/") {
-			return true
-		}
-	}
-	return false
+	return w.excludes.MatchAbs(path, root)
 }
