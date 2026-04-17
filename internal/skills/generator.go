@@ -196,11 +196,12 @@ func (g *Generator) renderSkill(c analysis.Community, crossComm map[string]map[s
 	sb.WriteString("## How to Explore\n\n")
 	sb.WriteString("```\n")
 	fmt.Fprintf(&sb,"get_communities with id: \"%s\"\n", c.ID)
-	fmt.Fprintf(&sb,"smart_context with task: \"understand %s\"\n", label)
+	fmt.Fprintf(&sb,"smart_context with task: \"understand %s\", format: \"gcx\"\n", label)
 	if len(entryPoints) > 0 {
-		fmt.Fprintf(&sb,"find_usages with id: \"%s\"\n", entryPoints[0])
+		fmt.Fprintf(&sb,"find_usages with id: \"%s\", format: \"gcx\"\n", entryPoints[0])
 	}
-	sb.WriteString("```\n")
+	sb.WriteString("```\n\n")
+	sb.WriteString("_`format: \"gcx\"` returns the [GCX1 compact wire format](../../docs/wire-format.md) — round-trippable, ~27% fewer tokens than JSON. Drop it for JSON output; agents using `@gortex/wire` or the Go `internal/wire` package decode either._\n")
 
 	return sb.String()
 }

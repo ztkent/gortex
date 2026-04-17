@@ -63,12 +63,13 @@ func enrichTask(toolInput map[string]any, port int) enrichResult {
 	}
 
 	sb.WriteString("_First call: `smart_context` with your task description. Before editing any file: `get_editing_context`. Never Read/Grep an indexed source file._\n")
+	sb.WriteString("_For list-shaped responses (search_symbols, find_usages, analyze, batch_symbols, get_callers), pass `format:\"gcx\"` to save ~27% tokens — round-trippable, spec at docs/wire-format.md._\n")
 
 	return enrichResult{context: sb.String()}
 }
 
 // gortexToolGuidance is the condensed tool-swap reference injected into every
-// subagent briefing. Kept short (~12 lines) so the token overhead per Task
+// subagent briefing. Kept short (~14 lines) so the token overhead per Task
 // spawn stays small; the full table lives in CLAUDE.md for parent-agent use.
 const gortexToolGuidance = "### Use Gortex MCP tools instead of Read/Grep/Glob\n" +
 	"\n" +
@@ -81,7 +82,9 @@ const gortexToolGuidance = "### Use Gortex MCP tools instead of Read/Grep/Glob\n
 	"| `Grep` to find callers           | `get_callers` / `get_call_chain`      |\n" +
 	"| `Glob` over source files         | `search_symbols` (returns file paths) |\n" +
 	"| Many Read calls to explore       | `smart_context` (one call)            |\n" +
-	"| Reading to pick tests to run     | `get_test_targets`                    |\n"
+	"| Reading to pick tests to run     | `get_test_targets`                    |\n" +
+	"\n" +
+	"**Token tip:** 13 tools accept `format:\"gcx\"` for compact round-trippable output (~27% fewer tokens). Pass it on any list-shaped query: `search_symbols`, `find_usages`, `analyze`, `contracts`, `batch_symbols`, `get_callers`/`get_call_chain`/`get_dependencies`/`get_dependents`/`find_implementations`, `get_file_summary`, `get_editing_context`, `smart_context`.\n"
 
 // renderTaskContext calls smart_context with the subagent task text and
 // returns a compacted body. Falls back to empty on any error.

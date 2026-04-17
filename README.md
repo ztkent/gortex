@@ -34,6 +34,7 @@ Built for AI coding agents (Claude Code, Kiro, Cursor, Windsurf, Copilot, Contin
 - **Context export** — `export_context` tool + `gortex context` CLI render graph context as portable markdown/JSON briefings for sharing outside MCP (Slack, PRs, docs, non-MCP AI tools)
 - **ETag conditional fetch** — content-hash based `if_none_match` on source-reading tools avoids re-transmitting unchanged symbols during iterative editing
 - **Token savings tracking** — per-call `tokens_saved` field on source-reading tools + session-level metrics in `graph_stats` (calls counted, tokens returned, tokens saved, efficiency ratio)
+- **GCX1 compact wire format** — published, round-trippable text format for MCP tool responses. Opt-in per call via `format: "gcx"` on 13 tools. **Median −27.4% tiktoken savings** vs JSON across a 20-case benchmark (best case −38.3%), 100% round-trip integrity. Spec: [`docs/wire-format.md`](docs/wire-format.md). TypeScript decoder on npm: [`@gortex/wire`](https://www.npmjs.com/package/@gortex/wire). Reproducible harness: [`bench/wire-format/`](bench/wire-format/)
 - **7 MCP resources** — lightweight graph context without tool calls
 - **3 MCP prompts** — `pre_commit`, `orientation`, `safe_to_change` for guided workflows
 - **Two-tier config** — global config (`~/.config/gortex/config.yaml`) for projects and repo lists, per-repo `.gortex.yaml` for guards, excludes, and local overrides

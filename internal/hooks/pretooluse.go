@@ -146,6 +146,7 @@ func enrichRead(toolInput map[string]any, port int) enrichResult {
 		reason.WriteString("  - `get_file_summary` — all symbols and imports\n")
 		reason.WriteString("  - `smart_context` — task-aware minimal context\n")
 		reason.WriteString("  - `batch_symbols` — multiple symbols in one call\n")
+		reason.WriteString(gcxTip)
 
 		return enrichResult{
 			deny:   true,
@@ -160,9 +161,15 @@ func enrichRead(toolInput map[string]any, port int) enrichResult {
 	guidance.WriteString("  - To understand a file before editing: use `get_editing_context`\n")
 	guidance.WriteString("  - To get a file overview: use `get_file_summary`\n")
 	guidance.WriteString("  - For task-level context: use `smart_context`\n")
+	guidance.WriteString(gcxTip)
 
 	return enrichResult{context: guidance.String()}
 }
+
+// gcxTip is appended to every Read/Grep/Glob redirect so agents see the
+// GCX1 wire-format opt-in at the exact moment they are picking a tool
+// call. Kept short — the messages are read under token pressure.
+const gcxTip = "  - Tip: pass format:\"gcx\" to any of these for round-trippable compact output (~27% fewer tokens, spec: docs/wire-format.md).\n"
 
 // isNarrowRead returns true if the Read has offset+limit targeting a small range,
 // indicating the agent is reading a specific section for editing.
@@ -277,6 +284,7 @@ func defaultGrepGuidance() string {
 	b.WriteString("  - To find all references: use `find_usages` (zero false positives)\n")
 	b.WriteString("  - To find callers: use `get_callers`\n")
 	b.WriteString("  - To find implementations: use `find_implementations`\n")
+	b.WriteString(gcxTip)
 	return b.String()
 }
 
@@ -284,11 +292,8 @@ func formatGrepDeny(pattern string, hits []grepSymbolHit) string {
 	const maxShown = 5
 	var b strings.Builder
 	fmt.Fprintf(&b, "[Gortex] BLOCKED: \"%s\" matches %d symbol(s) in the knowledge graph. Use `search_symbols` or `find_usages` instead:\n\n", pattern, len(hits))
-	shown := len(hits)
-	if shown > maxShown {
-		shown = maxShown
-	}
-	for i := 0; i < shown; i++ {
+	shown := min(len(hits), maxShown)
+	for i := range shown {
 		h := hits[i]
 		kind := h.Kind
 		if kind == "" {
@@ -299,7 +304,9 @@ func formatGrepDeny(pattern string, hits []grepSymbolHit) string {
 	if len(hits) > maxShown {
 		fmt.Fprintf(&b, "  ... and %d more\n", len(hits)-maxShown)
 	}
-	b.WriteString("\nTo force text search, add a regex metachar (e.g. \\b) or quote the pattern.")
+	b.WriteString("\n")
+	b.WriteString(gcxTip)
+	b.WriteString("To force text search, add a regex metachar (e.g. \\b) or quote the pattern.")
 	return b.String()
 }
 
@@ -334,7 +341,8 @@ func enrichGlob(toolInput map[string]any) enrichResult {
 			"  - To find a symbol by name: use `search_symbols`\n" +
 			"  - To find files containing a symbol: use `search_symbols` (returns file paths)\n" +
 			"  - To understand file structure: use `get_file_summary`\n" +
-			"  - For task-level file discovery: use `smart_context`",
+			"  - For task-level file discovery: use `smart_context`\n" +
+			gcxTip,
 	}
 }
 

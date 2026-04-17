@@ -35,6 +35,16 @@ Gortex is running as an MCP server. You MUST use graph queries instead of file r
 | `Read` to check a function signature  | `get_symbol` (signature is in `meta.signature`) |
 | 5-10 calls to explore for a task      | `smart_context` (one call)               |
 
+### Token Economy (GCX1 compact wire format)
+
+For any list-shaped response, pass `format: "gcx"` to get the [GCX1 compact wire format](docs/wire-format.md) instead of JSON. Round-trippable, tokenizer-aware, **median −27.4% tiktoken savings** on the benchmark.
+
+| Instead of...                         | You MUST use...                          |
+|---------------------------------------|------------------------------------------|
+| Default JSON on multi-row responses   | Pass `format: "gcx"` on `search_symbols`, `find_usages`, `analyze`, `contracts`, `batch_symbols`, `get_callers` / `get_call_chain` / `get_dependencies` / `get_dependents` / `find_implementations`, `get_file_summary`, `get_editing_context`, `smart_context` |
+| Parsing compact text output           | Use `@gortex/wire` (npm) or the Go `internal/wire` package — both decode GCX back to structured rows |
+| Reading `compact: true` output        | Prefer `format: "gcx"` — lossy text is being phased out; GCX is round-trippable and tokenizer-optimised |
+
 ### Impact Analysis and Safety
 
 | Instead of...                         | You MUST use...                          |
