@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/query"
 	"github.com/zzet/gortex/internal/wire"
@@ -207,6 +208,246 @@ func TestEncodeAnalyze_UnknownKindFallsBackToGeneric(t *testing.T) {
 	h, err := dec.Header()
 	require.NoError(t, err)
 	require.Equal(t, "analyze.weird", h.Tool)
+}
+
+func TestEncodeContractsList_FlattensByRepoAndPromotesMethodPath(t *testing.T) {
+	rows := []contracts.Contract{
+		{
+			ID:         "http::GET::/search",
+			Type:       contracts.ContractHTTP,
+			Role:       contracts.RoleProvider,
+			SymbolID:   "cmd/api/main.go::realMain",
+			FilePath:   "sapi-backend/cmd/api/main.go",
+			Line:       531,
+			RepoPrefix: "sapi-backend",
+			Confidence: 0.9,
+			Meta:       map[string]any{"method": "GET", "path": "/search", "framework": "gin/echo/chi"},
+		},
+		{
+			ID:         "dep::github.com/FindHotel/raa-sdk",
+			Type:       contracts.ContractDependency,
+			Role:       contracts.RoleConsumer,
+			FilePath:   "sapi-backend/go.mod",
+			Line:       21,
+			RepoPrefix: "sapi-backend",
+			Confidence: 1,
+			Meta:       map[string]any{"module": "github.com/FindHotel/raa-sdk", "version": "v0.102.0"},
+		},
+	}
+	payload, err := encodeContractsList(rows, len(rows))
+	require.NoError(t, err)
+
+	dec := wire.NewDecoder(strings.NewReader(string(payload)))
+	h, err := dec.Header()
+	require.NoError(t, err)
+	require.Equal(t, "contracts.list", h.Tool)
+	require.Equal(t, "2", h.Meta["total"])
+	require.Equal(t, contractFields, h.Fields)
+
+	got, err := dec.All()
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+
+	require.Equal(t, "http", got[0]["type"])
+	require.Equal(t, "provider", got[0]["role"])
+	require.Equal(t, "sapi-backend", got[0]["repo"])
+	require.Equal(t, "GET", got[0]["method"])
+	require.Equal(t, "/search", got[0]["path"])
+	require.Equal(t, "531", got[0]["line"])
+	require.Equal(t, "framework=gin/echo/chi", got[0]["meta"], "method/path must be excluded from meta column")
+
+	require.Equal(t, "dependency", got[1]["type"])
+	require.Equal(t, "", got[1]["method"])
+	require.Equal(t, "", got[1]["path"])
+	require.Equal(t, "module=github.com/FindHotel/raa-sdk;version=v0.102.0", got[1]["meta"])
+}
+
+func TestEncodeContractsCheck_EmitsThreeSections(t *testing.T) {
+	provider := contracts.Contract{
+		ID: "http::GET::/x", Type: contracts.ContractHTTP, Role: contracts.RoleProvider,
+		FilePath: "a/provider.go", Line: 10, RepoPrefix: "a",
+	}
+	consumer := contracts.Contract{
+		ID: "http::GET::/x", Type: contracts.ContractHTTP, Role: contracts.RoleConsumer,
+		FilePath: "b/consumer.go", Line: 20, RepoPrefix: "b",
+	}
+	orphanProv := contracts.Contract{
+		ID: "http::GET::/dead", Type: contracts.ContractHTTP, Role: contracts.RoleProvider,
+		FilePath: "a/dead.go", Line: 5, RepoPrefix: "a", Meta: map[string]any{"method": "GET", "path": "/dead"},
+	}
+	orphanCons := contracts.Contract{
+		ID: "http::GET::/nowhere", Type: contracts.ContractHTTP, Role: contracts.RoleConsumer,
+		FilePath: "c/lost.go", Line: 8, RepoPrefix: "c",
+	}
+	result := contracts.MatchResult{
+		Matched: []contracts.CrossLink{
+			{ContractID: "http::GET::/x", Provider: provider, Consumer: consumer, CrossRepo: true},
+		},
+		OrphanProviders: []contracts.Contract{orphanProv},
+		OrphanConsumers: []contracts.Contract{orphanCons},
+	}
+	payload, err := encodeContractsCheck(result)
+	require.NoError(t, err)
+
+	dec := wire.NewDecoder(strings.NewReader(string(payload)))
+
+	h1, err := dec.Header()
+	require.NoError(t, err)
+	require.Equal(t, "contracts.check.matched", h1.Tool)
+	require.Equal(t, "1", h1.Meta["count"])
+	matched, err := dec.All()
+	require.NoError(t, err)
+	require.Len(t, matched, 1)
+	require.Equal(t, "http::GET::/x", matched[0]["contract_id"])
+	require.Equal(t, "true", matched[0]["cross_repo"])
+	require.Equal(t, "a", matched[0]["provider_repo"])
+	require.Equal(t, "b", matched[0]["consumer_repo"])
+
+	h2, err := dec.NextSection()
+	require.NoError(t, err)
+	require.Equal(t, "contracts.check.orphan_providers", h2.Tool)
+	orphans, err := dec.All()
+	require.NoError(t, err)
+	require.Len(t, orphans, 1)
+	require.Equal(t, "GET", orphans[0]["method"])
+	require.Equal(t, "/dead", orphans[0]["path"])
+
+	h3, err := dec.NextSection()
+	require.NoError(t, err)
+	require.Equal(t, "contracts.check.orphan_consumers", h3.Tool)
+	cons, err := dec.All()
+	require.NoError(t, err)
+	require.Len(t, cons, 1)
+	require.Equal(t, "c", cons[0]["repo"])
+}
+
+func TestEncodeEditingContext_FourSectionsWithFileMeta(t *testing.T) {
+	file := map[string]any{"id": "pkg/foo.go", "language": "go"}
+	defines := []map[string]any{
+		{"id": "pkg/foo.go::Foo", "kind": "function", "name": "Foo", "start_line": 10, "signature": "func Foo()"},
+	}
+	imports := []map[string]any{
+		{"id": "external::fmt", "external": true},
+	}
+	calledBy := []map[string]any{
+		{"id": "pkg/bar.go::Bar", "name": "Bar", "file_path": "pkg/bar.go", "start_line": 5},
+	}
+	calls := []map[string]any{
+		{"id": "pkg/baz.go::Baz", "name": "Baz", "file_path": "pkg/baz.go", "start_line": 3},
+	}
+	payload, err := encodeEditingContext(file, defines, imports, calledBy, calls, "etag-xyz")
+	require.NoError(t, err)
+
+	dec := wire.NewDecoder(strings.NewReader(string(payload)))
+
+	h, err := dec.Header()
+	require.NoError(t, err)
+	require.Equal(t, "get_editing_context.defines", h.Tool)
+	require.Equal(t, "etag-xyz", h.Meta["etag"])
+	require.Equal(t, "go", h.Meta["language"])
+	rows, _ := dec.All()
+	require.Len(t, rows, 1)
+	require.Equal(t, "func Foo()", rows[0]["sig"])
+
+	h, err = dec.NextSection()
+	require.NoError(t, err)
+	require.Equal(t, "get_editing_context.imports", h.Tool)
+	rows, _ = dec.All()
+	require.Len(t, rows, 1)
+	require.Equal(t, "true", rows[0]["external"])
+
+	h, err = dec.NextSection()
+	require.NoError(t, err)
+	require.Equal(t, "get_editing_context.called_by", h.Tool)
+	rows, _ = dec.All()
+	require.Len(t, rows, 1)
+	require.Equal(t, "pkg/bar.go", rows[0]["path"])
+
+	h, err = dec.NextSection()
+	require.NoError(t, err)
+	require.Equal(t, "get_editing_context.calls", h.Tool)
+	rows, _ = dec.All()
+	require.Len(t, rows, 1)
+	require.Equal(t, "Baz", rows[0]["name"])
+}
+
+func TestEncodeSmartContext_OmitsEmptySections(t *testing.T) {
+	result := map[string]any{
+		"task": "add a tool",
+		"relevant_symbols": []map[string]any{
+			{"id": "a.go::Foo", "kind": "function", "name": "Foo", "file_path": "a.go", "start_line": 10, "signature": "func Foo()"},
+		},
+		"related_test_files": []string{"a_test.go"},
+		"files_to_edit":      []string{"a.go", "a_test.go"},
+	}
+	payload, err := encodeSmartContext(result)
+	require.NoError(t, err)
+
+	dec := wire.NewDecoder(strings.NewReader(string(payload)))
+
+	h, err := dec.Header()
+	require.NoError(t, err)
+	require.Equal(t, "smart_context.symbols", h.Tool)
+	require.Equal(t, "1", h.Meta["count"])
+	rows, _ := dec.All()
+	require.Len(t, rows, 1)
+	require.Equal(t, "Foo", rows[0]["name"])
+
+	h, err = dec.NextSection()
+	require.NoError(t, err)
+	require.Equal(t, "smart_context.tests", h.Tool, "cross_repo/entry_file/callers/callees must be skipped when empty")
+	rows, _ = dec.All()
+	require.Len(t, rows, 1)
+	require.Equal(t, "a_test.go", rows[0]["path"])
+
+	h, err = dec.NextSection()
+	require.NoError(t, err)
+	require.Equal(t, "smart_context.files", h.Tool)
+	rows, _ = dec.All()
+	require.Len(t, rows, 2)
+}
+
+func TestEncodeSmartContext_IncludesAllSectionsWhenPopulated(t *testing.T) {
+	result := map[string]any{
+		"task": "trace auth",
+		"relevant_symbols": []map[string]any{
+			{"id": "auth.go::Check", "kind": "function", "name": "Check", "file_path": "auth.go", "start_line": 20},
+		},
+		"cross_repo_dependencies": []map[string]any{
+			{"id": "sdk.go::Auth", "kind": "type", "name": "Auth", "file_path": "sdk/auth.go", "repo_prefix": "sdk", "edge_kind": "calls"},
+		},
+		"entry_file_symbols": []string{"function Check (line 20)"},
+		"callers":            []string{"main.go::main"},
+		"callees":            []string{"auth.go::verify"},
+		"related_test_files": []string{"auth_test.go"},
+		"files_to_edit":      []string{"auth.go"},
+	}
+	payload, err := encodeSmartContext(result)
+	require.NoError(t, err)
+
+	dec := wire.NewDecoder(strings.NewReader(string(payload)))
+	tools := []string{}
+	if h, err := dec.Header(); err == nil {
+		tools = append(tools, h.Tool)
+		_, _ = dec.All()
+		for {
+			h2, err := dec.NextSection()
+			if err != nil {
+				break
+			}
+			tools = append(tools, h2.Tool)
+			_, _ = dec.All()
+		}
+	}
+	require.Equal(t, []string{
+		"smart_context.symbols",
+		"smart_context.cross_repo",
+		"smart_context.entry_file",
+		"smart_context.callers",
+		"smart_context.callees",
+		"smart_context.tests",
+		"smart_context.files",
+	}, tools)
 }
 
 func TestRequestedFormat_CoversCompactAndFormatArgs(t *testing.T) {

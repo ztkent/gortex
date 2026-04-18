@@ -259,6 +259,10 @@ func (s *Server) handleGetEditingContext(ctx context.Context, req mcp.CallToolRe
 		return notModifiedResult(etag), nil
 	}
 
+	if isGCX(req) {
+		return gcxResponse(encodeEditingContext(out.File, out.Defines, out.Imports, out.CalledBy, out.Calls, etag))
+	}
+
 	// Add etag to response by marshaling to map.
 	result := map[string]any{
 		"file":      out.File,
@@ -267,9 +271,6 @@ func (s *Server) handleGetEditingContext(ctx context.Context, req mcp.CallToolRe
 		"called_by": out.CalledBy,
 		"calls":     out.Calls,
 		"etag":      etag,
-	}
-	if isGCX(req) {
-		return gcxResponse(encodeGeneric("get_editing_context", result))
 	}
 	return mcp.NewToolResultJSON(result)
 }
@@ -1285,7 +1286,7 @@ func (s *Server) handleSmartContext(ctx context.Context, req mcp.CallToolRequest
 	result["files_to_edit"] = filesToEdit
 
 	if isGCX(req) {
-		return gcxResponse(encodeGeneric("smart_context", result))
+		return gcxResponse(encodeSmartContext(result))
 	}
 	return mcp.NewToolResultJSON(result)
 }

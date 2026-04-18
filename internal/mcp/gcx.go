@@ -8,6 +8,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/query"
 	"github.com/zzet/gortex/internal/wire"
@@ -411,18 +412,340 @@ type cycleItem struct {
 	Nodes    []string
 }
 
-// encodeGeneric serialises an arbitrary handler payload through the
-// generic shape-inferring encoder in internal/wire. It is the safety
-// net for tools that declare `format: "gcx"` support but don't have
-// a hand-tuned encoder bound yet (get_editing_context, smart_context,
-// contracts, get_repo_outline, and the long tail). The benchmark
-// harness shows this still saves tokens on list-shaped payloads and
-// stays round-trippable everywhere.
-func encodeGeneric(tool string, payload any) ([]byte, error) {
+// --------------------------------------------------------------------
+// contracts
+// --------------------------------------------------------------------
+
+// contractFields is the fixed column layout for one contract row.
+// method + path are promoted out of Meta so HTTP/gRPC filters don't
+// have to parse the compact meta column.
+var contractFields = []string{
+	"type", "role", "repo", "method", "path",
+	"file", "line", "id", "symbol_id", "confidence", "meta",
+}
+
+// writeContractRow emits one contract using contractFields.
+func writeContractRow(enc *wire.Encoder, c contracts.Contract) error {
+	method, _ := c.Meta["method"].(string)
+	path, _ := c.Meta["path"].(string)
+	return enc.WriteRow(
+		string(c.Type), string(c.Role), c.RepoPrefix, method, path,
+		c.FilePath, c.Line, c.ID, c.SymbolID, c.Confidence,
+		formatContractMeta(c.Meta, "method", "path"),
+	)
+}
+
+// formatContractMeta renders Meta as a stable semicolon-separated k=v
+// list, dropping excluded keys already promoted to dedicated columns.
+func formatContractMeta(m map[string]any, exclude ...string) string {
+	if len(m) == 0 {
+		return ""
+	}
+	skip := make(map[string]bool, len(exclude))
+	for _, k := range exclude {
+		skip[k] = true
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		if skip[k] {
+			continue
+		}
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for i, k := range keys {
+		if i > 0 {
+			b.WriteByte(';')
+		}
+		fmt.Fprintf(&b, "%s=%v", k, m[k])
+	}
+	return b.String()
+}
+
+// encodeContractsList emits one row per contract. The by_repo grouping
+// from the JSON payload is flattened — rows carry repo in-band so
+// consumers can regroup without walking a tree.
+func encodeContractsList(rows []contracts.Contract, total int) ([]byte, error) {
 	var buf bytes.Buffer
-	if err := wire.EncodeAny(&buf, tool, payload); err != nil {
+	enc := newGCX(&buf, "contracts.list", contractFields,
+		"total", fmt.Sprintf("%d", total),
+	)
+	if err := enc.WriteComment(fmt.Sprintf("%d contract(s)", len(rows))); err != nil {
 		return nil, err
 	}
+	for _, c := range rows {
+		if err := writeContractRow(enc, c); err != nil {
+			return nil, err
+		}
+	}
+	return buf.Bytes(), enc.Close()
+}
+
+// encodeContractsCheck emits three sections: matched pairs, orphan
+// providers, orphan consumers. Orphan sections reuse contractFields.
+func encodeContractsCheck(result contracts.MatchResult) ([]byte, error) {
+	var buf bytes.Buffer
+
+	matchedFields := []string{
+		"contract_id", "cross_repo",
+		"provider_repo", "provider_file", "provider_line", "provider_symbol",
+		"consumer_repo", "consumer_file", "consumer_line", "consumer_symbol",
+	}
+	matchedEnc := newGCX(&buf, "contracts.check.matched", matchedFields,
+		"count", fmt.Sprintf("%d", len(result.Matched)),
+	)
+	for _, m := range result.Matched {
+		if err := matchedEnc.WriteRow(
+			m.ContractID, m.CrossRepo,
+			m.Provider.RepoPrefix, m.Provider.FilePath, m.Provider.Line, m.Provider.SymbolID,
+			m.Consumer.RepoPrefix, m.Consumer.FilePath, m.Consumer.Line, m.Consumer.SymbolID,
+		); err != nil {
+			return nil, err
+		}
+	}
+	if err := matchedEnc.Close(); err != nil {
+		return nil, err
+	}
+
+	provEnc := newGCX(&buf, "contracts.check.orphan_providers", contractFields,
+		"count", fmt.Sprintf("%d", len(result.OrphanProviders)),
+	)
+	for _, c := range result.OrphanProviders {
+		if err := writeContractRow(provEnc, c); err != nil {
+			return nil, err
+		}
+	}
+	if err := provEnc.Close(); err != nil {
+		return nil, err
+	}
+
+	consEnc := newGCX(&buf, "contracts.check.orphan_consumers", contractFields,
+		"count", fmt.Sprintf("%d", len(result.OrphanConsumers)),
+	)
+	for _, c := range result.OrphanConsumers {
+		if err := writeContractRow(consEnc, c); err != nil {
+			return nil, err
+		}
+	}
+	return buf.Bytes(), consEnc.Close()
+}
+
+// --------------------------------------------------------------------
+// get_editing_context
+// --------------------------------------------------------------------
+
+// encodeEditingContext emits four sections: defines, imports,
+// called_by, calls. File metadata (id, language, etag) lives in the
+// defines-section header so there is no single-row wrapper section.
+func encodeEditingContext(file map[string]any, defines, imports, calledBy, calls []map[string]any, etag string) ([]byte, error) {
+	var buf bytes.Buffer
+
+	// file_id (the path) is not echoed in the header: paths on macOS /
+	// Windows can contain spaces, and the GCX header tokeniser splits on
+	// raw spaces. Callers can recover the file path from any defines
+	// row's ID prefix (`<path>::<symbol>`).
+	var language string
+	if v, ok := file["language"]; ok {
+		language = fmt.Sprint(v)
+	}
+
+	defEnc := newGCX(&buf, "get_editing_context.defines",
+		[]string{"id", "kind", "name", "line", "sig"},
+		"etag", etag,
+		"language", language,
+		"count", fmt.Sprintf("%d", len(defines)),
+	)
+	for _, d := range defines {
+		if err := defEnc.WriteRow(
+			str(d["id"]),
+			str(d["kind"]),
+			str(d["name"]),
+			d["start_line"],
+			str(d["signature"]),
+		); err != nil {
+			return nil, err
+		}
+	}
+	if err := defEnc.Close(); err != nil {
+		return nil, err
+	}
+
+	impEnc := newGCX(&buf, "get_editing_context.imports",
+		[]string{"id", "external"},
+		"count", fmt.Sprintf("%d", len(imports)),
+	)
+	for _, im := range imports {
+		if err := impEnc.WriteRow(str(im["id"]), im["external"]); err != nil {
+			return nil, err
+		}
+	}
+	if err := impEnc.Close(); err != nil {
+		return nil, err
+	}
+
+	cbEnc := newGCX(&buf, "get_editing_context.called_by",
+		[]string{"id", "name", "path", "line"},
+		"count", fmt.Sprintf("%d", len(calledBy)),
+	)
+	for _, c := range calledBy {
+		if err := cbEnc.WriteRow(str(c["id"]), str(c["name"]), str(c["file_path"]), c["start_line"]); err != nil {
+			return nil, err
+		}
+	}
+	if err := cbEnc.Close(); err != nil {
+		return nil, err
+	}
+
+	callEnc := newGCX(&buf, "get_editing_context.calls",
+		[]string{"id", "name", "path", "line"},
+		"count", fmt.Sprintf("%d", len(calls)),
+	)
+	for _, c := range calls {
+		if err := callEnc.WriteRow(str(c["id"]), str(c["name"]), str(c["file_path"]), c["start_line"]); err != nil {
+			return nil, err
+		}
+	}
+	return buf.Bytes(), callEnc.Close()
+}
+
+// --------------------------------------------------------------------
+// smart_context
+// --------------------------------------------------------------------
+
+// encodeSmartContext emits up to seven sections — symbols, cross_repo,
+// entry_file, callers, callees, tests, files — in the order the
+// orchestrator populates them. Only non-empty sections are written so
+// small tasks stay small. Each section has its own field list to
+// avoid wide rows padded with empty cells.
+func encodeSmartContext(result map[string]any) ([]byte, error) {
+	var buf bytes.Buffer
+
+	// The task string is not echoed in the header: the GCX header tokeniser
+	// splits on spaces and escape() doesn't escape them, so a free-text
+	// task would corrupt parsing. The caller already knows what they
+	// asked for — no need to round-trip it.
+
+	symbols, _ := result["relevant_symbols"].([]map[string]any)
+	symEnc := newGCX(&buf, "smart_context.symbols",
+		[]string{"id", "kind", "name", "path", "line", "sig", "source"},
+		"count", fmt.Sprintf("%d", len(symbols)),
+	)
+	for _, s := range symbols {
+		if err := symEnc.WriteRow(
+			str(s["id"]),
+			str(s["kind"]),
+			str(s["name"]),
+			str(s["file_path"]),
+			s["start_line"],
+			str(s["signature"]),
+			str(s["source"]),
+		); err != nil {
+			return nil, err
+		}
+	}
+	if err := symEnc.Close(); err != nil {
+		return nil, err
+	}
+
+	if crossRepo, ok := result["cross_repo_dependencies"].([]map[string]any); ok && len(crossRepo) > 0 {
+		enc := newGCX(&buf, "smart_context.cross_repo",
+			[]string{"id", "kind", "name", "path", "repo", "edge_kind", "sig"},
+			"count", fmt.Sprintf("%d", len(crossRepo)),
+		)
+		for _, d := range crossRepo {
+			if err := enc.WriteRow(
+				str(d["id"]),
+				str(d["kind"]),
+				str(d["name"]),
+				str(d["file_path"]),
+				str(d["repo_prefix"]),
+				str(d["edge_kind"]),
+				str(d["signature"]),
+			); err != nil {
+				return nil, err
+			}
+		}
+		if err := enc.Close(); err != nil {
+			return nil, err
+		}
+	}
+
+	if entryFile, ok := result["entry_file_symbols"].([]string); ok && len(entryFile) > 0 {
+		enc := newGCX(&buf, "smart_context.entry_file",
+			[]string{"desc"},
+			"count", fmt.Sprintf("%d", len(entryFile)),
+		)
+		for _, d := range entryFile {
+			if err := enc.WriteRow(d); err != nil {
+				return nil, err
+			}
+		}
+		if err := enc.Close(); err != nil {
+			return nil, err
+		}
+	}
+
+	if callers, ok := result["callers"].([]string); ok && len(callers) > 0 {
+		enc := newGCX(&buf, "smart_context.callers",
+			[]string{"id"},
+			"count", fmt.Sprintf("%d", len(callers)),
+		)
+		for _, id := range callers {
+			if err := enc.WriteRow(id); err != nil {
+				return nil, err
+			}
+		}
+		if err := enc.Close(); err != nil {
+			return nil, err
+		}
+	}
+
+	if callees, ok := result["callees"].([]string); ok && len(callees) > 0 {
+		enc := newGCX(&buf, "smart_context.callees",
+			[]string{"id"},
+			"count", fmt.Sprintf("%d", len(callees)),
+		)
+		for _, id := range callees {
+			if err := enc.WriteRow(id); err != nil {
+				return nil, err
+			}
+		}
+		if err := enc.Close(); err != nil {
+			return nil, err
+		}
+	}
+
+	if tests, ok := result["related_test_files"].([]string); ok && len(tests) > 0 {
+		enc := newGCX(&buf, "smart_context.tests",
+			[]string{"path"},
+			"count", fmt.Sprintf("%d", len(tests)),
+		)
+		for _, p := range tests {
+			if err := enc.WriteRow(p); err != nil {
+				return nil, err
+			}
+		}
+		if err := enc.Close(); err != nil {
+			return nil, err
+		}
+	}
+
+	if files, ok := result["files_to_edit"].([]string); ok && len(files) > 0 {
+		enc := newGCX(&buf, "smart_context.files",
+			[]string{"path"},
+			"count", fmt.Sprintf("%d", len(files)),
+		)
+		for _, p := range files {
+			if err := enc.WriteRow(p); err != nil {
+				return nil, err
+			}
+		}
+		if err := enc.Close(); err != nil {
+			return nil, err
+		}
+	}
+
 	return buf.Bytes(), nil
 }
 
