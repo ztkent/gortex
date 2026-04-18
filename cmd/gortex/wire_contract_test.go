@@ -43,6 +43,7 @@ func TestWireContractFingerprint(t *testing.T) {
 		{"graph.Edge", reflect.TypeOf(graph.Edge{}), ""},
 		{"snapshotHeader", reflect.TypeOf(snapshotHeader{}), ""},
 		{"snapshotRepo", reflect.TypeOf(snapshotRepo{}), ""},
+		{"snapshotContract", reflect.TypeOf(snapshotContract{}), ""},
 	}
 
 	// Golden values computed by fingerprintType against the current
@@ -50,10 +51,11 @@ func TestWireContractFingerprint(t *testing.T) {
 	// intentional, update this map with the new values (run the test
 	// once, copy the "got" hash from the failure message).
 	golden := map[string]string{
-		"graph.Node":     wireContractGolden("graph.Node"),
-		"graph.Edge":     wireContractGolden("graph.Edge"),
-		"snapshotHeader": wireContractGolden("snapshotHeader"),
-		"snapshotRepo":   wireContractGolden("snapshotRepo"),
+		"graph.Node":       wireContractGolden("graph.Node"),
+		"graph.Edge":       wireContractGolden("graph.Edge"),
+		"snapshotHeader":   wireContractGolden("snapshotHeader"),
+		"snapshotRepo":     wireContractGolden("snapshotRepo"),
+		"snapshotContract": wireContractGolden("snapshotContract"),
 	}
 
 	for i := range cases {
@@ -137,9 +139,17 @@ func wireContractGolden(name string) string {
 	case "graph.Edge":
 		return "6a543f0f3f663587fc6011ab641bbd91fe66bfc70f87fe548974411e89e871de"
 	case "snapshotHeader":
-		return "56dd534d9405217f4619616a1ee23014eca01b931727455023b4b574b695f669"
+		// Bumped when ContractCount was added (additive — gob decodes
+		// unknown fields as zero, so older snapshots still load with
+		// an empty Contracts section).
+		return "d525b1ba64b4ba52c02bf663fba114983213733cf9997e601d57a35fdc2c0dbb"
 	case "snapshotRepo":
 		return "8a78544c6e8d6c384f95b971df43408e7bc5f5ab4c7f2052d038bd3ffa4e1311"
+	case "snapshotContract":
+		// New wire type introduced with per-repo contract persistence.
+		// Mirrors contracts.Contract but stores Type/Role as strings so
+		// the snapshot stays decoupled from runtime type aliases.
+		return "17b073a2f334b46d5f360a15f3d5d1617bee20660221f1de513735cedd75799c"
 	default:
 		panic(fmt.Sprintf("no golden fingerprint for %s", name))
 	}

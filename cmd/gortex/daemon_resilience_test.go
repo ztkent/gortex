@@ -38,7 +38,7 @@ func TestSnapshot_RestartStability(t *testing.T) {
 	// Save once; then repeatedly load into the same graph. Each
 	// load re-applies AddNode / AddEdge for every record. With
 	// idempotent writes, stats must not drift.
-	saveSnapshot(orig, nil, "v-test", zap.NewNop())
+	saveSnapshot(orig, nil, nil, "v-test", zap.NewNop())
 
 	for cycle := 0; cycle < 5; cycle++ {
 		result, err := loadSnapshot(orig, zap.NewNop())
@@ -73,7 +73,7 @@ func TestSnapshot_RoundTripsRepos(t *testing.T) {
 		},
 	}}
 
-	saveSnapshot(g, repos, "v-test", zap.NewNop())
+	saveSnapshot(g, repos, nil, "v-test", zap.NewNop())
 
 	restored := graph.New()
 	result, err := loadSnapshot(restored, zap.NewNop())
@@ -105,7 +105,7 @@ func TestSnapshot_BackwardCompat_OldSnapshotLoads_NoRepos(t *testing.T) {
 	// RepoCount field existed. (The on-disk bytes are the same
 	// either way: saveSnapshot writes zero repo records when the
 	// slice is empty, matching what older daemons produced.)
-	saveSnapshot(g, nil, "v-test", zap.NewNop())
+	saveSnapshot(g, nil, nil, "v-test", zap.NewNop())
 
 	restored := graph.New()
 	result, err := loadSnapshot(restored, zap.NewNop())
@@ -137,7 +137,7 @@ func TestSnapshot_DanglingEdgesDropped(t *testing.T) {
 		Kind: graph.EdgeCalls, FilePath: "a.go", Line: 1,
 	})
 
-	saveSnapshot(g, nil, "v-test", zap.NewNop())
+	saveSnapshot(g, nil, nil, "v-test", zap.NewNop())
 
 	restored := graph.New()
 	result, err := loadSnapshot(restored, zap.NewNop())

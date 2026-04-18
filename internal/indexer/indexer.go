@@ -244,6 +244,17 @@ func (idx *Indexer) Search() search.Backend { return idx.search }
 // ContractRegistry returns the contract registry populated during indexing.
 func (idx *Indexer) ContractRegistry() *contracts.Registry { return idx.contractRegistry }
 
+// SetContractRegistry installs reg as the indexer's contract registry.
+// Used by the daemon warmup path to rehydrate the registry from a
+// snapshot when IncrementalReindex skipped extraction (no stale files
+// → extractContracts never ran → idx.contractRegistry stays nil after
+// reconcile, which used to leave multi-repo `contracts` queries silently
+// empty). Callers should only install when ContractRegistry() is nil;
+// installing over a freshly-extracted registry would roll state backward.
+func (idx *Indexer) SetContractRegistry(reg *contracts.Registry) {
+	idx.contractRegistry = reg
+}
+
 // SetTrackedRepoModules sets the map of tracked repo names to Go module paths.
 // This enables the GoModExtractor to detect cross-repo dependencies.
 func (idx *Indexer) SetTrackedRepoModules(m map[string]string) { idx.trackedRepoModules = m }

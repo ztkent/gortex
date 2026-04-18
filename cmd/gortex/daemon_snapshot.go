@@ -11,6 +11,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/daemon"
 	"github.com/zzet/gortex/internal/graph"
 )
@@ -26,13 +27,34 @@ type snapshotRepo struct {
 	FileMtimes map[string]int64
 }
 
+// snapshotContract is the wire form of contracts.Contract. Persisted so
+// per-repo contract registries survive daemon restarts without having to
+// re-run extractContracts during warmup — in steady state IncrementalReindex
+// skips the extraction step entirely, which used to leave the registry nil
+// for every repo whose mtimes hadn't drifted. Isolates the wire schema from
+// unrelated evolution of the runtime Contract type: an additive field on
+// contracts.Contract does not force a snapshot migration so long as the two
+// shapes stay aligned on the fields we care about persisting.
+type snapshotContract struct {
+	ID         string
+	Type       string
+	Role       string
+	SymbolID   string
+	FilePath   string
+	Line       int
+	RepoPrefix string
+	Meta       map[string]any
+	Confidence float64
+}
+
 // snapshotLoadResult reports the outcome of loadSnapshot. Partial is
 // true when any record was skipped (corrupt, dangling, or structurally
 // invalid) so warmup can decide whether to force a fuller reconcile.
 type snapshotLoadResult struct {
-	Loaded  bool
-	Partial bool
-	Repos   map[string]*snapshotRepo
+	Loaded    bool
+	Partial   bool
+	Repos     map[string]*snapshotRepo
+	Contracts map[string][]contracts.Contract
 }
 
 // isStaleAbsPathID reports whether a node ID begins with an absolute
@@ -64,6 +86,12 @@ type snapshotHeader struct {
 	// so a newer daemon reading an older snapshot simply gets no
 	// per-repo reconciliation metadata and falls back to full re-index.
 	RepoCount int
+	// ContractCount is the number of snapshotContract records that follow
+	// the repo section. Added additively: older snapshots decode this as
+	// zero and the loader emits an empty Contracts map, which warmup
+	// treats as "re-extract on next stale file" — identical to the
+	// pre-contracts-persistence behaviour.
+	ContractCount int
 }
 
 // snapshotSchemaVersion is bumped whenever daemonSnapshot's shape or
@@ -139,7 +167,11 @@ func canMigrate(from, to int) bool {
 // logged but never propagated — a failed snapshot write should never
 // block clean shutdown. The repos slice carries per-repo FileMtimes so
 // the next warmup can use IncrementalReindex instead of a full re-scan.
-func saveSnapshot(g *graph.Graph, repos []snapshotRepo, version string, logger *zap.Logger) {
+// The contracts slice carries per-repo contract entries so the warmup
+// can rehydrate each indexer's contracts.Registry without re-running the
+// extractors — IncrementalReindex skips extraction in steady state, so
+// without this the registries came back nil after every restart.
+func saveSnapshot(g *graph.Graph, repos []snapshotRepo, snapContracts []snapshotContract, version string, logger *zap.Logger) {
 	if g == nil {
 		return
 	}
@@ -170,6 +202,7 @@ func saveSnapshot(g *graph.Graph, repos []snapshotRepo, version string, logger *
 		NodeCount:     len(nodes),
 		EdgeCount:     len(edges),
 		RepoCount:     len(repos),
+		ContractCount: len(snapContracts),
 	}
 
 	// Helper to clean up after any failure.
@@ -202,6 +235,12 @@ func saveSnapshot(g *graph.Graph, repos []snapshotRepo, version string, logger *
 			return
 		}
 	}
+	for i := range snapContracts {
+		if err := enc.Encode(snapContracts[i]); err != nil {
+			abort("encode contract", err)
+			return
+		}
+	}
 	if err := gz.Close(); err != nil {
 		logger.Warn("snapshot: gzip close", zap.Error(err))
 		_ = f.Close()
@@ -223,7 +262,45 @@ func saveSnapshot(g *graph.Graph, repos []snapshotRepo, version string, logger *
 		zap.String("path", path),
 		zap.Int("nodes", header.NodeCount),
 		zap.Int("edges", header.EdgeCount),
-		zap.Int("repos", header.RepoCount))
+		zap.Int("repos", header.RepoCount),
+		zap.Int("contracts", header.ContractCount))
+}
+
+// toSnapshotContract flattens a contracts.Contract into its wire form.
+// The runtime type alias members (ContractType, Role) are stringified so
+// the snapshot struct carries only primitive-typed fields and the
+// migration rules stay predictable.
+func toSnapshotContract(c contracts.Contract) snapshotContract {
+	return snapshotContract{
+		ID:         c.ID,
+		Type:       string(c.Type),
+		Role:       string(c.Role),
+		SymbolID:   c.SymbolID,
+		FilePath:   c.FilePath,
+		Line:       c.Line,
+		RepoPrefix: c.RepoPrefix,
+		Meta:       c.Meta,
+		Confidence: c.Confidence,
+	}
+}
+
+// fromSnapshotContract rebuilds the runtime Contract from its wire form.
+// Unknown Type / Role strings are passed through — the extractors wrote
+// them, and rejecting a value we still understand structurally would
+// silently drop real contracts in an edge case we have no reason to
+// force.
+func fromSnapshotContract(s snapshotContract) contracts.Contract {
+	return contracts.Contract{
+		ID:         s.ID,
+		Type:       contracts.ContractType(s.Type),
+		Role:       contracts.Role(s.Role),
+		SymbolID:   s.SymbolID,
+		FilePath:   s.FilePath,
+		Line:       s.Line,
+		RepoPrefix: s.RepoPrefix,
+		Meta:       s.Meta,
+		Confidence: s.Confidence,
+	}
 }
 
 // loadSnapshot streams the snapshot at daemon.SnapshotPath() into g.
@@ -238,7 +315,14 @@ func saveSnapshot(g *graph.Graph, repos []snapshotRepo, version string, logger *
 // trades "one bad byte poisons the entire cache" for "N bad records
 // cost at most N files being re-indexed on next warmup."
 func loadSnapshot(g *graph.Graph, logger *zap.Logger) (snapshotLoadResult, error) {
-	var result snapshotLoadResult
+	// Allocate Contracts up front so every early-return path (missing
+	// file, gzip error, header decode error, schema mismatch) hands the
+	// caller a safe-to-read zero-value instead of a nil map. The warmup
+	// path `range state.snapshotContracts` over a nil map is fine in Go,
+	// but a nil result is a gotcha other call sites have hit before.
+	result := snapshotLoadResult{
+		Contracts: make(map[string][]contracts.Contract),
+	}
 	if g == nil {
 		return result, nil
 	}
@@ -284,7 +368,7 @@ func loadSnapshot(g *graph.Graph, logger *zap.Logger) (snapshotLoadResult, error
 	// repo-prefixed replacements. Edges pointing at dropped nodes are
 	// skipped so the graph never contains dangling references.
 	droppedNodes := make(map[string]struct{})
-	var skippedNodes, skippedEdges, corruptNodes, corruptEdges, corruptRepos int
+	var skippedNodes, skippedEdges, corruptNodes, corruptEdges, corruptRepos, corruptContracts int
 	loadedIDs := make(map[string]struct{})
 	for i := 0; i < header.NodeCount; i++ {
 		var n graph.Node
@@ -382,20 +466,51 @@ func loadSnapshot(g *graph.Graph, logger *zap.Logger) (snapshotLoadResult, error
 		}
 	}
 
+	if header.ContractCount > 0 {
+		for i := 0; i < header.ContractCount; i++ {
+			var sc snapshotContract
+			if err := dec.Decode(&sc); err != nil {
+				if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+					logger.Warn("snapshot: truncated during contracts",
+						zap.Int("expected", header.ContractCount),
+						zap.Int("read", i),
+						zap.Error(err))
+					result.Partial = true
+					goto validate
+				}
+				corruptContracts++
+				result.Partial = true
+				continue
+			}
+			if sc.ID == "" {
+				corruptContracts++
+				result.Partial = true
+				continue
+			}
+			result.Contracts[sc.RepoPrefix] = append(result.Contracts[sc.RepoPrefix], fromSnapshotContract(sc))
+		}
+	}
+
 validate:
 	// The load reached here either cleanly or via a truncation goto —
 	// in both cases validate what's in the graph before returning.
 
+	totalContracts := 0
+	for _, cs := range result.Contracts {
+		totalContracts += len(cs)
+	}
 	logger.Info("snapshot: loaded",
 		zap.String("path", path),
 		zap.Int("nodes", header.NodeCount-skippedNodes-corruptNodes),
 		zap.Int("edges", header.EdgeCount-skippedEdges-corruptEdges),
 		zap.Int("repos", len(result.Repos)),
+		zap.Int("contracts", totalContracts),
 		zap.Int("stale_nodes_dropped", skippedNodes),
 		zap.Int("stale_edges_dropped", skippedEdges),
 		zap.Int("corrupt_nodes_skipped", corruptNodes),
 		zap.Int("corrupt_edges_skipped", corruptEdges),
-		zap.Int("corrupt_repos_skipped", corruptRepos))
+		zap.Int("corrupt_repos_skipped", corruptRepos),
+		zap.Int("corrupt_contracts_skipped", corruptContracts))
 	result.Loaded = true
 	return result, nil
 }

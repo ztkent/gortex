@@ -27,7 +27,7 @@ func TestSnapshotRoundTrip(t *testing.T) {
 	orig.AddNode(&graph.Node{ID: "b.go::Bar", Name: "Bar", Kind: graph.KindMethod, FilePath: "b.go"})
 	orig.AddEdge(&graph.Edge{From: "b.go::Bar", To: "a.go::Foo", Kind: graph.EdgeCalls, FilePath: "b.go", Line: 12})
 
-	saveSnapshot(orig, nil, "v-test", zap.NewNop())
+	saveSnapshot(orig, nil, nil, "v-test", zap.NewNop())
 
 	restored := graph.New()
 	result, err := loadSnapshot(restored, zap.NewNop())
@@ -87,7 +87,7 @@ func TestLoadSnapshot_DropsStaleAbsPathNodes(t *testing.T) {
 		Kind: graph.EdgeCalls,
 	})
 
-	saveSnapshot(orig, nil, "v-test", zap.NewNop())
+	saveSnapshot(orig, nil, nil, "v-test", zap.NewNop())
 
 	restored := graph.New()
 	result, err := loadSnapshot(restored, zap.NewNop())

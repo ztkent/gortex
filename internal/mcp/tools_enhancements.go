@@ -198,6 +198,8 @@ func (s *Server) registerEnhancementTools() {
 			mcp.WithDescription("API contracts tool. action=list (default): lists detected contracts (HTTP, gRPC, GraphQL, topics, WebSocket, env, OpenAPI). action=check: detects mismatches — orphan providers/consumers across repos."),
 			mcp.WithString("action", mcp.Description("list (default) or check")),
 			mcp.WithString("repo", mcp.Description("Filter by repository prefix")),
+			mcp.WithString("project", mcp.Description("Filter to repositories in a specific project (resolves to the project's repo set)")),
+			mcp.WithString("ref", mcp.Description("Filter to repositories tagged with this ref")),
 			mcp.WithString("type", mcp.Description("(list) Filter by type: http, grpc, graphql, topic, ws, env, openapi")),
 			mcp.WithString("role", mcp.Description("(list) Filter by role: provider or consumer")),
 			mcp.WithBoolean("compact", mcp.Description("One-line-per-contract text output")),
@@ -1509,20 +1511,25 @@ func (s *Server) handleGetContracts(_ context.Context, req mcp.CallToolRequest) 
 		return mcp.NewToolResultError("no contract registry available — index a repository first"), nil
 	}
 
-	repo := req.GetString("repo", "")
 	contractType := req.GetString("type", "")
 	role := req.GetString("role", "")
 
-	var all []contracts.Contract
-	if repo != "" {
-		all = registry.ByRepo(repo)
-	} else {
-		all = registry.All()
+	// resolveRepoFilter unifies repo/project/ref into a single allow-set
+	// and falls back to the active project when no axis is given — same
+	// default scoping every other query tool uses.
+	allowed, err := s.resolveRepoFilter(req)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
 	}
+
+	all := registry.All()
 
 	// Apply filters.
 	var filtered []contracts.Contract
 	for _, c := range all {
+		if allowed != nil && c.RepoPrefix != "" && !allowed[c.RepoPrefix] {
+			continue
+		}
 		if contractType != "" && string(c.Type) != contractType {
 			continue
 		}
@@ -1596,13 +1603,23 @@ func (s *Server) handleCheckContracts(_ context.Context, req mcp.CallToolRequest
 		return mcp.NewToolResultError("no contract registry available — index a repository first"), nil
 	}
 
-	repo := req.GetString("repo", "")
+	// resolveRepoFilter folds repo/project/ref into one allow-set so
+	// `contracts check` can answer "does project X match" without the
+	// caller having to list its repos by hand. A nil allow-set means
+	// "all tracked repos" and keeps the original single-registry fast
+	// path — avoids a pointless copy of the full registry.
+	allowed, err := s.resolveRepoFilter(req)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
 
-	// If repo is specified, build a filtered registry for matching.
 	reg := registry
-	if repo != "" {
+	if allowed != nil {
 		reg = contracts.NewRegistry()
-		for _, c := range registry.ByRepo(repo) {
+		for _, c := range registry.All() {
+			if c.RepoPrefix != "" && !allowed[c.RepoPrefix] {
+				continue
+			}
 			reg.Add(c)
 		}
 	}

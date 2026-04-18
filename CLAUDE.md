@@ -92,8 +92,8 @@ For any list-shaped response, pass `format: "gcx"` to get the [GCX1 compact wire
 
 | Instead of...                         | You MUST use...                          |
 |---------------------------------------|------------------------------------------|
-| Manually tracking API routes/services | `contracts` (default `action: "list"`) — lists HTTP, gRPC, GraphQL, topic, WebSocket, env, OpenAPI |
-| Guessing if APIs match across repos   | `contracts` with `action: "check"` — detects orphan providers/consumers and mismatches |
+| Manually tracking API routes/services | `contracts` (default `action: "list"`) — lists HTTP, gRPC, GraphQL, topic, WebSocket, env, OpenAPI; filter by `repo`, `project`, or `ref` |
+| Guessing if APIs match across repos   | `contracts` with `action: "check"` — detects orphan providers/consumers and mismatches; scope with `repo` / `project` / `ref` |
 
 ### Config Hygiene
 

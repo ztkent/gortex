@@ -128,7 +128,7 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 		if mw != nil {
 			_ = mw.Stop()
 		}
-		saveSnapshot(state.graph, collectSnapshotRepos(state.multiIndexer), version, logger)
+		saveSnapshot(state.graph, collectSnapshotRepos(state.multiIndexer), collectSnapshotContracts(state.multiIndexer), version, logger)
 		if state.mcpServer != nil {
 			_ = state.mcpServer.FlushSavings()
 		}
@@ -250,7 +250,7 @@ func startPeriodicSnapshots(g *graph.Graph, mi *indexer.MultiIndexer, version st
 		for {
 			select {
 			case <-t.C:
-				saveSnapshot(g, collectSnapshotRepos(mi), version, logger)
+				saveSnapshot(g, collectSnapshotRepos(mi), collectSnapshotContracts(mi), version, logger)
 			case <-stop:
 				return
 			}

@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/config"
+	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/embedding"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/indexer"
@@ -35,6 +37,13 @@ type daemonState struct {
 	// ReconcileRepoCtx (incremental) instead of TrackRepoCtx (full
 	// index). nil or missing entries → fall back to full index.
 	snapshotRepos map[string]*snapshotRepo
+	// snapshotContracts carries the per-repo contract entries restored
+	// from the snapshot. Warmup injects these into each indexer after
+	// ReconcileRepoCtx when IncrementalReindex skipped re-extraction (no
+	// stale files). Without this the per-repo contracts.Registry stays
+	// nil for every quiescent repo, so `contracts` / `contracts check`
+	// return empty results even though the graph holds the nodes.
+	snapshotContracts map[string][]contracts.Contract
 	// MultiWatcher is built by warmupDaemonState (after tracked repos
 	// have been re-indexed) and handed to realController via
 	// AttachWatcher — it isn't held on daemonState because no caller
@@ -146,7 +155,8 @@ func buildDaemonState(logger *zap.Logger) (*daemonState, error) {
 		multiIndexer:  mi,
 		configManager: cm,
 		mcpServer:     srv,
-		snapshotRepos: loadResult.Repos,
+		snapshotRepos:     loadResult.Repos,
+		snapshotContracts: loadResult.Contracts,
 	}, nil
 }
 
@@ -181,6 +191,40 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger) *indexer.MultiWat
 		if _, err := state.multiIndexer.TrackRepoCtx(ctx, entry); err != nil {
 			logger.Warn("daemon: startup track failed",
 				zap.String("path", entry.Path), zap.Error(err))
+		}
+	}
+
+	// Rehydrate per-repo contract registries from the snapshot. Only
+	// target indexers whose registry is still nil — a non-nil registry
+	// means IncrementalReindex (or a fresh TrackRepoCtx) re-extracted
+	// contracts from source, and that result is authoritative. Without
+	// this, every steady-state repo's ContractRegistry stays nil and
+	// MergedContractRegistry skips them, so `contracts` returns only
+	// the contracts of repos whose files happened to change since the
+	// last shutdown.
+	if len(state.snapshotContracts) > 0 {
+		injectedRepos, injectedCount := 0, 0
+		for prefix := range state.multiIndexer.AllMetadata() {
+			idx := state.multiIndexer.GetIndexer(prefix)
+			if idx == nil || idx.ContractRegistry() != nil {
+				continue
+			}
+			cs, ok := state.snapshotContracts[prefix]
+			if !ok || len(cs) == 0 {
+				continue
+			}
+			reg := contracts.NewRegistry()
+			for _, c := range cs {
+				reg.Add(c)
+			}
+			idx.SetContractRegistry(reg)
+			injectedRepos++
+			injectedCount += len(cs)
+		}
+		if injectedRepos > 0 {
+			logger.Info("daemon: rehydrated contract registries from snapshot",
+				zap.Int("repos", injectedRepos),
+				zap.Int("contracts", injectedCount))
 		}
 	}
 
@@ -259,6 +303,39 @@ func collectSnapshotRepos(mi *indexer.MultiIndexer) []snapshotRepo {
 			RootPath:   m.RootPath,
 			FileMtimes: mtimes,
 		})
+	}
+	return out
+}
+
+// collectSnapshotContracts flattens every per-repo contract registry
+// into a single wire-form slice ordered by repo prefix. The warmup path
+// will redistribute by RepoPrefix when loading, so cross-repo ordering
+// is irrelevant here; the stable per-prefix grouping just keeps logs
+// and diffs readable. Called at the same points as collectSnapshotRepos
+// so the header counts and the repo/contract records agree.
+func collectSnapshotContracts(mi *indexer.MultiIndexer) []snapshotContract {
+	if mi == nil {
+		return nil
+	}
+	prefixes := make([]string, 0)
+	for prefix := range mi.AllMetadata() {
+		prefixes = append(prefixes, prefix)
+	}
+	sort.Strings(prefixes)
+
+	var out []snapshotContract
+	for _, prefix := range prefixes {
+		idx := mi.GetIndexer(prefix)
+		if idx == nil {
+			continue
+		}
+		reg := idx.ContractRegistry()
+		if reg == nil {
+			continue
+		}
+		for _, c := range reg.All() {
+			out = append(out, toSnapshotContract(c))
+		}
 	}
 	return out
 }

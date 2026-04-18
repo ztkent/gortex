@@ -102,8 +102,8 @@ Gortex is running as an MCP server. You MUST use graph queries instead of file r
 
 | Instead of...                         | You MUST use...                          |
 |---------------------------------------|------------------------------------------|
-| Manually tracking API routes/services | ` + "`contracts`" + ` (default ` + "`action: \"list\"`" + `) — lists HTTP, gRPC, GraphQL, topic, WebSocket, env, OpenAPI |
-| Guessing if APIs match across repos   | ` + "`contracts`" + ` with ` + "`action: \"check\"`" + ` — detects orphan providers/consumers and mismatches |
+| Manually tracking API routes/services | ` + "`contracts`" + ` (default ` + "`action: \"list\"`" + `) — lists HTTP, gRPC, GraphQL, topic, WebSocket, env, OpenAPI; filter by ` + "`repo`" + `, ` + "`project`" + `, or ` + "`ref`" + ` |
+| Guessing if APIs match across repos   | ` + "`contracts`" + ` with ` + "`action: \"check\"`" + ` — detects orphan providers/consumers and mismatches; scope with ` + "`repo`" + ` / ` + "`project`" + ` / ` + "`ref`" + ` |
 
 ### Multi-Repo Management
 
@@ -284,7 +284,7 @@ Quick reference for all Gortex MCP tools and the knowledge graph schema.
 ### API Contracts
 | Tool | What it gives you |
 |------|-------------------|
-| contracts | API contracts: action=list (default) lists detected contracts; action=check matches providers/consumers and reports orphans across repos |
+| contracts | API contracts: action=list (default) lists detected contracts; action=check matches providers/consumers and reports orphans across repos. Scope either action with ` + "`repo`" + `, ` + "`project`" + `, or ` + "`ref`" + ` |
 
 ### Config Hygiene
 | Tool | What it gives you |
