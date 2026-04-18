@@ -356,60 +356,14 @@ After running `gortex init`, Claude Code automatically starts Gortex via `.mcp.j
 - **Stop hook:** post-task diagnostics — tests to run, guard violations, dead code, and contract issues on the changed symbols — injected as context before the agent hands off
 - **CLAUDE.md instructions:** mandatory tool usage table and session workflow
 
-## Usage with Kiro
+## Usage with other agents
 
-`gortex init` also sets up Kiro IDE integration automatically:
+`gortex init` auto-detects and configures 14 other AI coding assistants — Kiro, Cursor, VS Code / Copilot, Windsurf, Continue.dev, Cline, OpenCode, Antigravity, Codex CLI, Gemini CLI, Zed, Aider, Kilo Code, OpenClaw. Each adapter writes only when its host is present on the machine, and every re-run is idempotent.
 
-- **MCP server:** `.kiro/settings/mcp.json` — 40 read-only tools auto-approved for zero-friction use (write tools like `edit_symbol` and `rename_symbol` require approval)
-- **Steering files:** `.kiro/steering/gortex-workflow.md` (always active) teaches Kiro to prefer graph queries over file reads. Additional manual steering files for explore, debug, impact, and refactor workflows are available via `#` in chat.
-- **Agent hooks:**
-  - `gortex-smart-context` — on each prompt, assembles task-relevant context from the graph in one call
-  - `gortex-post-edit` — after saving source files, shows blast radius and which tests to run
-  - `gortex-pre-read` — before reading source files, enriches with symbol context from the graph
-
-## Usage with Antigravity
-
-`gortex init` also automatically loads project intelligence instructions into the Antigravity agent:
-
-- **Knowledge Item (KI):** Creates a dedicated KI globally in `~/.gemini/antigravity/knowledge/gortex-workflow/`.
-- **Workflow Instructions:** Instructs the Antigravity assistant to prioritize executing AST-aware Gortex CLI queries (`./gortex query symbol`, `./gortex query dependents`) via its built-in terminal tool, overriding generic `grep` and file read routines.
-- **Token Efficiency:** Significantly reduces context token usage by constraining the AI's reads precisely to verified dependency paths and function definitions.
-
-## Usage with Cursor
-
-`gortex init` detects Cursor (via `.cursor/` directory, `~/.cursor/`, or `cursor` in PATH) and creates:
-
-- **MCP config:** `.cursor/mcp.json` — project-level config, committable to the repo so the whole team gets Gortex automatically.
-
-## Usage with VS Code / GitHub Copilot
-
-`gortex init` detects VS Code (via `.vscode/` directory, `code` in PATH, or VS Code app data directories) and creates:
-
-- **MCP config:** `.vscode/mcp.json` — project-level config for Copilot Chat agent mode. All Gortex tools are available in Copilot's agent mode.
-
-## Usage with Windsurf
-
-`gortex init` detects Windsurf (via `windsurf` in PATH or `~/.codeium/windsurf/` directory) and creates:
-
-- **MCP config:** `~/.codeium/windsurf/mcp_config.json` — global config (Windsurf only reads from this location). Merges into existing config without overwriting other servers.
-
-## Usage with Continue.dev
-
-`gortex init` detects Continue.dev (via `.continue/` directory in project or `~/.continue/`) and creates:
-
-- **MCP config:** `.continue/mcpServers/gortex.json` — project-level config. Continue reads JSON MCP configs from the `.continue/mcpServers/` directory and supports the same format as Claude/Cursor.
-
-## Usage with Cline
-
-`gortex init` detects Cline (via VS Code or Cursor globalStorage directories) and creates:
-
-- **MCP config:** `cline_mcp_settings.json` in the Cline extension's globalStorage directory. Includes an `alwaysAllow` list for read-only Gortex tools.
-
-## Usage with OpenCode
-
-`gortex init` detects OpenCode (via `.opencode/` directory in project, `opencode` in PATH, or `~/.config/opencode/`) and creates:
-
-- **MCP config:** `.opencode/config.json` — project-level config using OpenCode's native format (`"type": "local"`, `"command"` as array, `"environment"` for env vars). Merges into existing config without overwriting other servers.
+- **Adapter matrix + per-agent schema notes:** [`docs/agents.md`](docs/agents.md)
+- **Audit what's currently configured:** `gortex init doctor` (zero-op; `--json` for CI consumers)
+- **Constrain setup:** `gortex init --agents=claude-code,cursor` or `--agents-skip=antigravity`
+- **CI / scripted install:** `gortex init --yes --json --dry-run`
 
 ## CLI Commands
 
