@@ -4,25 +4,42 @@ import type {
   Process, IndexHealth,
 } from './types'
 
-const BRIDGE_URL = process.env.NEXT_PUBLIC_GORTEX_URL || 'http://localhost:4747'
-const WEB_URL = process.env.NEXT_PUBLIC_GORTEX_WEB_URL || BRIDGE_URL
+// Single base URL for the gortex server (http://.../v1/*). The old
+// NEXT_PUBLIC_GORTEX_WEB_URL is kept as a fallback only for backwards
+// compatibility with any existing .env files; nothing should set it
+// going forward.
+const SERVER_URL = process.env.NEXT_PUBLIC_GORTEX_URL
+  || process.env.NEXT_PUBLIC_GORTEX_WEB_URL
+  || 'http://localhost:4747'
 
-// --- Bridge API ---
+// Optional bearer token. Required when the server was started with
+// --auth-token / $GORTEX_SERVER_TOKEN; otherwise leave unset.
+const AUTH_TOKEN = process.env.NEXT_PUBLIC_GORTEX_TOKEN || ''
 
-async function bridgeFetch(path: string, options?: RequestInit): Promise<Response> {
-  const res = await fetch(`${BRIDGE_URL}${path}`, {
+// --- Server API ---
+
+function authHeaders(): HeadersInit {
+  return AUTH_TOKEN ? { Authorization: `Bearer ${AUTH_TOKEN}` } : {}
+}
+
+async function serverFetch(path: string, options?: RequestInit): Promise<Response> {
+  const res = await fetch(`${SERVER_URL}${path}`, {
     ...options,
-    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    headers: {
+      'Content-Type': 'application/json',
+      ...authHeaders(),
+      ...options?.headers,
+    },
   })
   if (!res.ok) {
     const text = await res.text()
-    throw new Error(`Bridge API error ${res.status}: ${text}`)
+    throw new Error(`Server API error ${res.status}: ${text}`)
   }
   return res
 }
 
 async function callTool(name: string, args: Record<string, unknown> = {}): Promise<string> {
-  const res = await bridgeFetch(`/tool/${name}`, {
+  const res = await serverFetch(`/v1/tools/${name}`, {
     method: 'POST',
     body: JSON.stringify({ arguments: args }),
   })
@@ -49,34 +66,37 @@ async function callToolJSON<T>(name: string, args: Record<string, unknown> = {})
 export const api = {
   // Health & stats
   health: async (): Promise<HealthResponse> => {
-    const res = await bridgeFetch('/health')
+    const res = await serverFetch('/v1/health')
     return res.json()
   },
 
   tools: async (): Promise<ToolInfo[]> => {
-    const res = await bridgeFetch('/tools')
+    const res = await serverFetch('/v1/tools')
     return res.json()
   },
 
   stats: async (): Promise<GraphStats> => {
-    const res = await bridgeFetch('/stats')
+    const res = await serverFetch('/v1/stats')
     return res.json()
   },
 
-  // Graph data (from web API)
-  getGraph: async (): Promise<GraphData> => {
-    const res = await fetch(`${WEB_URL}/api/graph`)
+  // Full brief-graph dump for force-directed rendering. Optional
+  // project / repo filters scope the dump the same way MCP tools do.
+  getGraph: async (opts?: { project?: string; repo?: string }): Promise<GraphData> => {
+    const qs = new URLSearchParams()
+    if (opts?.project) qs.set('project', opts.project)
+    if (opts?.repo) qs.set('repo', opts.repo)
+    const suffix = qs.toString() ? `?${qs}` : ''
+    const res = await serverFetch(`/v1/graph${suffix}`)
     return res.json()
   },
 
   getFileGraph: async (path: string): Promise<SubGraph> => {
-    const res = await fetch(`${WEB_URL}/api/graph/file?path=${encodeURIComponent(path)}`)
-    return res.json()
+    return callToolJSON<SubGraph>('get_file_summary', { path })
   },
 
   getCluster: async (id: string, radius = 2): Promise<SubGraph> => {
-    const res = await fetch(`${WEB_URL}/api/graph/cluster?id=${encodeURIComponent(id)}&radius=${radius}`)
-    return res.json()
+    return callToolJSON<SubGraph>('get_cluster', { id, radius })
   },
 
   // MCP tool wrappers
@@ -166,9 +186,14 @@ export const api = {
   callTool,
   callToolJSON,
 
-  // SSE
+  // SSE. The browser EventSource API can't attach custom headers, so
+  // the token is passed as a query string when present — the server
+  // accepts ?token=<t> as a fallback for streaming endpoints.
+  // Localhost dev (the common case) runs the server unauthenticated,
+  // so AUTH_TOKEN is empty and nothing is appended.
   subscribeEvents: (callback: (event: GraphChangeEvent) => void): EventSource => {
-    const es = new EventSource(`${WEB_URL}/api/events`)
+    const qs = AUTH_TOKEN ? `?token=${encodeURIComponent(AUTH_TOKEN)}` : ''
+    const es = new EventSource(`${SERVER_URL}/v1/events${qs}`)
     es.addEventListener('graph_change', (e) => {
       try {
         const data = JSON.parse(e.data) as GraphChangeEvent

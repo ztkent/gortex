@@ -66,3 +66,19 @@ func TestWithAuth_BypassesOptionsForCORSPreflight(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
+
+func TestWithAuth_AcceptsQueryStringToken(t *testing.T) {
+	h := WithAuth(okHandler(), "secret-token")
+	req := httptest.NewRequest(http.MethodGet, "/v1/events?token=secret-token", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestWithAuth_RejectsWrongQueryStringToken(t *testing.T) {
+	h := WithAuth(okHandler(), "secret-token")
+	req := httptest.NewRequest(http.MethodGet, "/v1/events?token=wrong", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
