@@ -213,8 +213,19 @@ func removeEdgeFromBucket(bucket map[string][]*Edge, idx map[string]map[edgeKey]
 
 // Graph is a thread-safe in-memory knowledge graph. Internally sharded
 // by node-ID hash so writers touching disjoint IDs run in parallel.
+//
+// resolveMu is a graph-wide lock shared by every resolver.Resolver
+// constructed against this Graph. Per-shard locks protect individual
+// node/edge writes, but resolution phases (ResolveAll, ResolveFile)
+// iterate every shard and mutate edge targets in place — two
+// resolvers racing on the same edge produced the data race that
+// MultiIndexer.indexMultiRepo triggered when its per-repo goroutines
+// each created their own Resolver. Routing every resolver through
+// this single mutex serialises those phases without blocking
+// ordinary shard-scoped reads and writes.
 type Graph struct {
-	shards [numShards]*shard
+	shards    [numShards]*shard
+	resolveMu sync.Mutex
 }
 
 // New creates an empty graph.
@@ -224,6 +235,14 @@ func New() *Graph {
 		g.shards[i] = newShard()
 	}
 	return g
+}
+
+// ResolveMutex returns the graph-wide mutex resolvers use to
+// serialise resolution phases against this graph. Exposed for the
+// resolver package; every Resolver built from the same Graph shares
+// the same lock.
+func (g *Graph) ResolveMutex() *sync.Mutex {
+	return &g.resolveMu
 }
 
 // shardIdx picks the shard index for an ID using FNV-1a. Stable across

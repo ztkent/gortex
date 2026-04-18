@@ -272,24 +272,45 @@ func TestPropertyHealthScoreFormula(t *testing.T) {
 			successfullyIndexed = 0
 		}
 
-		// Compute health score using the same formula as handleIndexHealth
+		// Compute health score using the same formula as handleIndexHealth.
 		var healthScore float64
 		if totalDetected > 0 {
 			healthScore = math.Round(float64(successfullyIndexed)/float64(totalDetected)*1000) / 10
 		}
 
-		// Verify the formula: round((successfully_indexed / total_detected) * 100, 1)
-		expectedRaw := float64(successfullyIndexed) / float64(totalDetected) * 100
-		expectedRounded := math.Round(expectedRaw*10) / 10
+		// Verify the formula matches its spec: round((successfully_indexed /
+		// total_detected) * 100, 1). The naive implementation
+		// `math.Round(ratio*100 * 10) / 10` reorders the multiplies and
+		// in binary float that straddles the 0.5 rounding boundary on
+		// inputs like 5125/10000 → one path lands on 512.5, the other on
+		// 512.4999…, and Round disagrees. Use the same expression order
+		// production uses so we're verifying the production contract, not
+		// hunting a float-reordering bug in the test scaffold.
+		var expectedRounded float64
+		if totalDetected > 0 {
+			expectedRounded = math.Round(float64(successfullyIndexed)/float64(totalDetected)*1000) / 10
+		}
 
 		if math.Abs(healthScore-expectedRounded) > 0.01 {
 			rt.Errorf("health score mismatch: got %.1f, expected %.1f (success=%d, total=%d)",
 				healthScore, expectedRounded, successfullyIndexed, totalDetected)
 		}
 
-		// Verify score is in [0, 100]
+		// Verify score is in [0, 100].
 		if healthScore < 0 || healthScore > 100 {
 			rt.Errorf("health score out of range [0,100]: %.1f", healthScore)
+		}
+
+		// Sanity bound: the rounded score must be within 0.1 of the
+		// unrounded percentage. This is what actually pins the formula
+		// to the documented spec — unlike the byte-for-byte comparison
+		// above (which would only catch drift in the expression order).
+		if totalDetected > 0 {
+			raw := float64(successfullyIndexed) / float64(totalDetected) * 100
+			if math.Abs(healthScore-raw) > 0.05+1e-9 {
+				rt.Errorf("health score %.1f differs from raw percentage %.4f by more than 0.05 (success=%d, total=%d)",
+					healthScore, raw, successfullyIndexed, totalDetected)
+			}
 		}
 
 		// Verify recommendation is present iff score < 80%

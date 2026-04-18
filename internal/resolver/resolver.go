@@ -36,12 +36,22 @@ type Resolver struct {
 	graph        *graph.Graph
 	dirIndex     map[string][]*graph.Node
 	lastDirIndex map[string][]*graph.Node
-	mu           sync.Mutex
+	// mu serialises resolution phases against the shared graph.
+	// Pointer so every Resolver built from the same *graph.Graph
+	// locks the same mutex — necessary for MultiIndexer's per-repo
+	// goroutines, each of which spawns its own Resolver instance.
+	// Without the shared lock, concurrent ResolveAll passes race on
+	// edge mutations (resolveImport writes e.To while another
+	// goroutine iterates via graph.AllEdges()).
+	mu *sync.Mutex
 }
 
-// New creates a Resolver for the given graph.
+// New creates a Resolver for the given graph. The returned Resolver
+// shares graph.ResolveMutex() with every other Resolver built from
+// the same Graph, so their ResolveAll / ResolveFile calls serialise
+// end-to-end.
 func New(g *graph.Graph) *Resolver {
-	return &Resolver{graph: g}
+	return &Resolver{graph: g, mu: g.ResolveMutex()}
 }
 
 // ResolveAll resolves all unresolved edges in the graph.
