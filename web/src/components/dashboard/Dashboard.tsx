@@ -1,12 +1,13 @@
 'use client'
 
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { Icon } from '@/components/primitives/Icon'
 import { KindRing, HBar, StackedBar } from '@/components/primitives/Charts'
 import { CaveatBadge } from '@/components/primitives/Caveat'
 import { useDashboard } from '@/lib/hooks'
 import { useTweaks } from '@/lib/tweaks'
+import { scopeOf, type CodeScope } from '@/lib/utils'
 import type { Repo, KindCount, LanguageCount, Caveat, Process, Activity } from '@/lib/schema'
 
 const KIND_COLORS: Record<string, string> = {
@@ -313,6 +314,12 @@ export function Dashboard() {
   const router = useRouter()
   const { data, loading, error, refetch } = useDashboard()
   const scope = useTweaks((s) => s.scope)
+  // Separate from the global workspace `scope` — this one partitions
+  // the caveats card into first-party code ("yours"), test fixtures,
+  // and vendored dependencies. "yours" is the default because the raw
+  // list is dominated by upstream hotspots (Pods, sqlite, node_modules)
+  // and test-file asserts that the user can't act on.
+  const [caveatScope, setCaveatScope] = useState<CodeScope>('yours')
 
   if (loading && !data) {
     return (
@@ -370,9 +377,14 @@ export function Dashboard() {
     value: k.count,
     color: KIND_COLORS[k.name] ?? 'var(--accent)',
   }))
-  const critical = severityCount(snap.caveats, ['risk'])
-  const warn = severityCount(snap.caveats, ['hot', 'cycle', 'boundary'])
-  const other = snap.caveats.length - critical - warn
+  const cavCounts = { yours: 0, tests: 0, deps: 0 }
+  for (const c of snap.caveats) cavCounts[scopeOf(c.symbol)]++
+  const scopedCaveats = caveatScope === 'all'
+    ? snap.caveats
+    : snap.caveats.filter((c) => scopeOf(c.symbol) === caveatScope)
+  const critical = severityCount(scopedCaveats, ['risk'])
+  const warn = severityCount(scopedCaveats, ['hot', 'cycle', 'boundary'])
+  const other = scopedCaveats.length - critical - warn
 
   return (
     <>
@@ -494,12 +506,30 @@ export function Dashboard() {
                 {warn > 0 && <span className="chip" style={{ color: 'var(--warn)' }}>{warn} warn</span>}
                 {other > 0 && <span className="chip faint">{other} other</span>}
               </div>
-              <button type="button" className="btn small ghost" onClick={() => router.push('/caveats')}>
-                <Icon name="expand" size={11} /> View all
-              </button>
+              <div className="hstack" style={{ gap: 8 }}>
+                <div className="seg" style={{ height: 26 }}>
+                  {(['yours', 'tests', 'deps', 'all'] as const).map((s) => (
+                    <button
+                      key={s}
+                      type="button"
+                      className={caveatScope === s ? 'active' : ''}
+                      onClick={() => setCaveatScope(s)}
+                      style={{ textTransform: 'capitalize', fontSize: 11 }}
+                    >
+                      {s}{' '}
+                      <span className="mono faint" style={{ marginLeft: 4 }}>
+                        {s === 'all' ? snap.caveats.length : cavCounts[s]}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+                <button type="button" className="btn small ghost" onClick={() => router.push('/caveats')}>
+                  <Icon name="expand" size={11} /> View all
+                </button>
+              </div>
             </div>
             <div className="card-bd">
-              <CaveatsPreview caveats={snap.caveats} onOpen={() => router.push('/caveats')} />
+              <CaveatsPreview caveats={scopedCaveats} onOpen={() => router.push('/caveats')} />
             </div>
           </div>
 

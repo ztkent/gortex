@@ -1,19 +1,37 @@
 'use client'
 
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { Icon } from '@/components/primitives/Icon'
 import { CaveatBadge } from '@/components/primitives/Caveat'
 import { useCaveats } from '@/lib/hooks'
+import { scopeOf, type CodeScope } from '@/lib/utils'
 import type { Caveat } from '@/lib/schema'
 
 const TABS = ['all', 'risk', 'deprecated', 'hot', 'unowned', 'cycle', 'boundary'] as const
 type Tab = (typeof TABS)[number]
 
+// Scope partitions caveats into first-party code ("yours"), test
+// fixtures, and vendored/third-party dependencies. Default is "yours"
+// because /caveats is dominated by upstream hotspots (Pods, sqlite,
+// node_modules) that users can't fix and tests they don't want
+// flagged.
+const SCOPES: CodeScope[] = ['yours', 'tests', 'deps', 'all']
+
 export function CaveatsView() {
   const { data, loading, error, refetch } = useCaveats()
   const [tab, setTab] = useState<Tab>('all')
+  const [scope, setScope] = useState<CodeScope>('yours')
   const all = data ?? []
-  const filtered = tab === 'all' ? all : all.filter((c: Caveat) => c.severity === tab)
+  const counts = useMemo(() => {
+    const c = { yours: 0, tests: 0, deps: 0 }
+    for (const cav of all) c[scopeOf(cav.symbol)]++
+    return c
+  }, [all])
+  const scoped = useMemo(() => {
+    if (scope === 'all') return all
+    return all.filter((c: Caveat) => scopeOf(c.symbol) === scope)
+  }, [all, scope])
+  const filtered = tab === 'all' ? scoped : scoped.filter((c: Caveat) => c.severity === tab)
 
   return (
     <>
@@ -33,7 +51,23 @@ export function CaveatsView() {
         </div>
       </div>
 
-      <div style={{ padding: '14px 22px 0', borderBottom: '1px solid var(--line-1)' }}>
+      <div style={{ padding: '14px 22px 0', borderBottom: '1px solid var(--line-1)', display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+        <div className="seg" style={{ height: 30 }}>
+          {SCOPES.map((s) => (
+            <button
+              key={s}
+              type="button"
+              className={scope === s ? 'active' : ''}
+              onClick={() => setScope(s)}
+              style={{ textTransform: 'capitalize' }}
+            >
+              {s}{' '}
+              <span className="mono faint" style={{ marginLeft: 6 }}>
+                {s === 'all' ? all.length : counts[s]}
+              </span>
+            </button>
+          ))}
+        </div>
         <div className="seg" style={{ height: 30, flexWrap: 'wrap' }}>
           {TABS.map((c) => (
             <button
@@ -45,7 +79,7 @@ export function CaveatsView() {
             >
               {c}{' '}
               <span className="mono faint" style={{ marginLeft: 6 }}>
-                {c === 'all' ? all.length : all.filter((x: Caveat) => x.severity === c).length}
+                {c === 'all' ? scoped.length : scoped.filter((x: Caveat) => x.severity === c).length}
               </span>
             </button>
           ))}
