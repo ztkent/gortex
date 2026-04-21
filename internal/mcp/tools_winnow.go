@@ -10,6 +10,50 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 )
 
+// WinnowForEval is a thin, exported wrapper around winnowSymbols for the
+// `gortex eval recall` harness. It builds a constraint chain from a plain
+// text query plus caller-supplied extras (passed through as-is), runs the
+// private scorer, and returns only the ranked IDs — everything the eval
+// pipeline needs and nothing it doesn't. Keep the surface minimal; if
+// future eval needs grow, extract the scorer into its own package.
+func (s *Server) WinnowForEval(query string, extras map[string]any, limit int) []string {
+	c := winnowConstraints{TextMatch: query, Limit: limit}
+	if limit <= 0 {
+		c.Limit = 20
+	}
+	if extras != nil {
+		if v, ok := extras["language"].(string); ok {
+			c.Language = v
+		}
+		if v, ok := extras["community"].(string); ok {
+			c.Community = v
+		}
+		if v, ok := extras["min_fan_in"].(int); ok {
+			c.MinFanIn = v
+		}
+		if v, ok := extras["min_fan_out"].(int); ok {
+			c.MinFanOut = v
+		}
+		if v, ok := extras["min_churn"].(int); ok {
+			c.MinChurn = v
+		}
+		if v, ok := extras["path_prefix"].([]string); ok {
+			c.PathPrefix = v
+		}
+		if v, ok := extras["kinds"].([]string); ok {
+			for _, k := range v {
+				c.Kinds = append(c.Kinds, graph.NodeKind(k))
+			}
+		}
+	}
+	results := s.winnowSymbols(c, nil)
+	out := make([]string, 0, len(results))
+	for _, r := range results {
+		out = append(out, r.Node.ID)
+	}
+	return out
+}
+
 // winnowAxisWeights tune the relative contribution of each ranking signal.
 // text_match dominates when present; structural axes provide meaningful
 // re-ranking within the filtered set.

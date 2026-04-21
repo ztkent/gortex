@@ -12,7 +12,10 @@
 //   - embeddings_gomlx — hugot with XLA/PJRT plugin (~100MB auto-download)
 package embedding
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
 
 // Provider generates embedding vectors from text.
 type Provider interface {
@@ -27,6 +30,25 @@ type Provider interface {
 
 	// Close releases resources.
 	Close() error
+}
+
+// NewHugotProvider exposes the pure-Go Hugot backend (MiniLM-L6-v2)
+// directly, without the NewLocalProvider fallback chain. Useful when a
+// caller wants a hard error if Hugot can't start (e.g. eval harnesses
+// that mustn't silently degrade to static GloVe).
+func NewHugotProvider() (Provider, error) { return newHugotProvider() }
+
+// NewHugotProviderWithVariant loads a specific embedder variant from
+// any registered HuggingFace repo (MiniLM variants, code-tuned models,
+// …). Pass a name returned by KnownHugotVariants (e.g. "fp32",
+// "qint8_arm64", "jina_code", "bge_code"). Returns an error if the
+// variant name is unknown or the download/load fails.
+func NewHugotProviderWithVariant(variant string) (Provider, error) {
+	v, ok := LookupHugotVariant(variant)
+	if !ok {
+		return nil, fmt.Errorf("unknown hugot variant %q (known: %v)", variant, KnownHugotVariants())
+	}
+	return newHugotProviderWithSpec(v)
 }
 
 // NewLocalProvider returns the best available local embedding provider.

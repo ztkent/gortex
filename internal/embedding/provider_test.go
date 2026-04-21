@@ -121,14 +121,19 @@ func TestStaticProvider_SemanticSimilarity(t *testing.T) {
 	assert.Greater(t, dot, 0.3, "semantically similar queries should have cosine > 0.3")
 }
 
-func TestNewLocalProvider_DefaultsToStatic(t *testing.T) {
+func TestNewLocalProvider_ReturnsWorkingProvider(t *testing.T) {
 	p, err := NewLocalProvider()
 	require.NoError(t, err)
 	defer func() { _ = p.Close() }()
 
-	// Default build should return StaticProvider.
-	_, ok := p.(*StaticProvider)
-	assert.True(t, ok, "default build should return StaticProvider")
+	// Default build walks ONNX → GoMLX → Hugot → Static and returns
+	// the first that initialises. Pre-2026-04 the Hugot path failed on
+	// the multi-onnx HuggingFace repo so Static was the fallback; with
+	// that pinned to onnx/model.onnx, Hugot now succeeds when the
+	// model is cached or the network is reachable. Either is fine —
+	// the invariant is "NewLocalProvider returns a working provider."
+	assert.NotNil(t, p)
+	assert.Greater(t, p.Dimensions(), 0, "provider must report positive dimensions")
 }
 
 func TestTokenizeForEmbedding(t *testing.T) {
