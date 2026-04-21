@@ -48,6 +48,41 @@ func EngineRanker(name string, searchFn func(query string, limit int) []string) 
 	return Ranker{Name: name, Search: searchFn}
 }
 
+// GraphRanker wraps graph-traversal queries (get_callers, get_call_chain,
+// find_usages) as Rankers so DI-dependent recall can be measured next to
+// plain text retrieval. The fixture encodes the retrieval shape in the
+// Case.Query field as "<tool>:<symbol_id>" — the Ranker parses the prefix
+// and dispatches to the appropriate engine method. Unknown prefixes and
+// unparseable queries return empty, which the scorer counts as a miss.
+//
+// Shapes supported (tool names match the equivalent MCP surface):
+//
+//	callers:<id>     → Engine.GetCallers (reverse EdgeCalls/EdgeMatches)
+//	call_chain:<id>  → Engine.GetCallChain (forward EdgeCalls/EdgeMatches)
+//	usages:<id>      → Engine.FindUsages (all references)
+//	dependents:<id>  → Engine.GetDependents (imports+calls+references, reverse)
+func GraphRanker(name string, provider GraphProvider) Ranker {
+	return Ranker{
+		Name: name,
+		Search: func(q string, limit int) []string {
+			idx := strings.IndexByte(q, ':')
+			if idx <= 0 || idx == len(q)-1 {
+				return nil
+			}
+			tool, id := q[:idx], q[idx+1:]
+			return provider.Traverse(tool, id, limit)
+		},
+	}
+}
+
+// GraphProvider is the thin interface GraphRanker needs. Implemented in
+// cmd/gortex (where the query engine is already wired) to keep this
+// package free of engine imports — keeps recall reusable from CLI eval,
+// unit tests, or any other caller that can provide the traversal.
+type GraphProvider interface {
+	Traverse(tool, id string, limit int) []string
+}
+
 // SemanticRanker adapts a vector backend + embedder to the Ranker
 // shape. Returns ranker-level skip (empty slice + registered skip
 // reason) when the vector backend is empty — callers can still emit

@@ -1,0 +1,220 @@
+# NestJS DI-recall fixture
+#
+# Measures what Gortex's retrieval stack can find on a minimal NestJS
+# app *without* DI-aware extraction — i.e. what's reachable from plain
+# BM25 + engine fallback + raw call graph. Option 1 (extend `contracts`
+# to DI) should move the "di" tier numbers up without regressing the
+# other two.
+#
+# Tiers
+# -----
+# exact   — symbol-name / signature queries. Text rankers should ace
+#           these; failure means the TypeScript extractor missed something.
+# concept — natural-language paraphrases. Baseline expectation similar
+#           to the Go concept tier.
+# di      — relational queries that only return the right answer when a
+#           DI edge exists in the graph. Queries use the GraphRanker's
+#           "callers:<id>" / "call_chain:<id>" format. Expected IDs are
+#           the controllers / services that inject the subject via a
+#           constructor parameter. Today these return 0% because no
+#           such edge is emitted.
+#
+# Expected ID format: `<relative-ts-path>::<ClassName>.<method>` —
+# matches what the in-tree TypeScript extractor produces.
+name: gortex-nestjs-di
+cases:
+
+  # ------------------------------------------------------------------
+  # Tier 1 — exact: can the TS extractor find each symbol by name?
+  # ------------------------------------------------------------------
+
+  - id: exact-UsersService
+    tier: exact
+    query: UsersService
+    expected: [src/users/users.service.ts::UsersService]
+
+  - id: exact-UsersController
+    tier: exact
+    query: UsersController
+    expected: [src/users/users.controller.ts::UsersController]
+
+  - id: exact-AuthService
+    tier: exact
+    query: AuthService
+    expected: [src/auth/auth.service.ts::AuthService]
+
+  - id: exact-AuthGuard
+    tier: exact
+    query: AuthGuard
+    expected: [src/auth/auth.guard.ts::AuthGuard]
+
+  - id: exact-findOne
+    tier: exact
+    query: findOne
+    expected: [src/users/users.service.ts::UsersService.findOne]
+
+  # ------------------------------------------------------------------
+  # Tier 2 — concept: paraphrased / intent-based text queries
+  # ------------------------------------------------------------------
+
+  - id: concept-look-up-user-by-id
+    tier: concept
+    query: look up a user by their id
+    expected: [src/users/users.service.ts::UsersService.findOne]
+
+  - id: concept-http-guard
+    tier: concept
+    query: guard that validates an incoming request
+    expected: [src/auth/auth.guard.ts::AuthGuard.canActivate]
+
+  - id: concept-issue-auth-token
+    tier: concept
+    query: issue an authentication token
+    expected: [src/auth/auth.service.ts::AuthService.issueToken]
+
+  - id: concept-create-new-user
+    tier: concept
+    query: create a new user record
+    expected: [src/users/users.service.ts::UsersService.create]
+
+  - id: concept-list-all-users
+    tier: concept
+    query: list every user
+    expected: [src/users/users.service.ts::UsersService.findAll]
+
+  # ------------------------------------------------------------------
+  # Tier 3 — di: requires a DI edge to answer correctly
+  # ------------------------------------------------------------------
+
+  # Who injects UsersService? Answer: UsersController, AuthService.
+  # Without DI edges, get_callers on the service's methods sees nothing
+  # past the class's own internal references.
+  - id: di-callers-UsersService-findOne
+    tier: di
+    query: "callers:src/users/users.service.ts::UsersService.findOne"
+    expected:
+      - src/users/users.controller.ts::UsersController.getUser
+      - src/auth/auth.service.ts::AuthService.validate
+      - src/auth/auth.service.ts::AuthService.issueToken
+
+  - id: di-callers-UsersService-findAll
+    tier: di
+    query: "callers:src/users/users.service.ts::UsersService.findAll"
+    expected:
+      - src/users/users.controller.ts::UsersController.list
+
+  - id: di-callers-UsersService-create
+    tier: di
+    query: "callers:src/users/users.service.ts::UsersService.create"
+    expected:
+      - src/users/users.controller.ts::UsersController.create
+
+  - id: di-callers-AuthService-validate
+    tier: di
+    query: "callers:src/auth/auth.service.ts::AuthService.validate"
+    expected:
+      - src/auth/auth.guard.ts::AuthGuard.canActivate
+
+  # Call chain FROM a controller method should reach the service method
+  # it injects. Tests forward traversal through DI boundaries.
+  - id: di-call_chain-UsersController-getUser
+    tier: di
+    query: "call_chain:src/users/users.controller.ts::UsersController.getUser"
+    expected:
+      - src/users/users.service.ts::UsersService.findOne
+
+  - id: di-call_chain-AuthGuard-canActivate
+    tier: di
+    query: "call_chain:src/auth/auth.guard.ts::AuthGuard.canActivate"
+    expected:
+      - src/auth/auth.service.ts::AuthService.validate
+      - src/users/users.service.ts::UsersService.findOne
+
+  # ------------------------------------------------------------------
+  # Tier 4 — di_gap: shapes Tier-2 type resolution cannot handle.
+  # These queries should be near-0% without module-aware extraction;
+  # they're the cases that would justify shipping option 1.
+  # ------------------------------------------------------------------
+
+  # Abstract-class injection: NotificationsController injects Notifier
+  # (abstract), module binds it to EmailNotifier. Finding the caller of
+  # EmailNotifier.notify requires knowing that binding.
+  - id: di_gap-callers-EmailNotifier-notify
+    tier: di_gap
+    query: "callers:src/notifications/email-notifier.service.ts::EmailNotifier.notify"
+    expected:
+      - src/notifications/notifications.controller.ts::NotificationsController.send
+
+  # Call-chain forward from the controller into the concrete method
+  # behind the abstract binding. Same gap, traversing the other way.
+  - id: di_gap-call_chain-NotificationsController-send
+    tier: di_gap
+    query: "call_chain:src/notifications/notifications.controller.ts::NotificationsController.send"
+    expected:
+      - src/notifications/email-notifier.service.ts::EmailNotifier.notify
+
+  # @Inject(DATABASE_URL) token consumer. There's no type linking
+  # ConfigService's dbUrl param to the `{ provide: DATABASE_URL,
+  # useValue: ... }` entry — only the provider registry knows.
+  - id: di_gap-usages-DATABASE_URL
+    tier: di_gap
+    query: "usages:src/config/config.tokens.ts::DATABASE_URL"
+    expected:
+      - src/config/config.service.ts::ConfigService
+      - src/config/config.module.ts::ConfigModule
+
+  - id: di_gap-usages-FEATURE_FLAGS
+    tier: di_gap
+    query: "usages:src/config/config.tokens.ts::FEATURE_FLAGS"
+    expected:
+      - src/config/config.service.ts::ConfigService
+      - src/config/config.module.ts::ConfigModule
+
+  # --- @UseGuards decorator-dispatch ---
+  # NotificationsController.send is decorated with @UseGuards(AuthGuard).
+  # The framework invokes AuthGuard.canActivate before the handler runs,
+  # but there is no explicit call site — the binding lives in the
+  # decorator metadata. get_callers on canActivate should include the
+  # guarded handler.
+  - id: di_gap-callers-AuthGuard-canActivate
+    tier: di_gap
+    query: "callers:src/auth/auth.guard.ts::AuthGuard.canActivate"
+    expected:
+      - src/notifications/notifications.controller.ts::NotificationsController.send
+
+  # --- Factory provider with inject: [Dep] ---
+  # BillingService injects DB_CONNECTION, which BillingModule binds to a
+  # DatabaseConnection produced by a factory that takes ConfigService.
+  # Two signals to check:
+  #   1. Token-level: usages of DB_CONNECTION.
+  #   2. Call chain: BillingService.charge should reach
+  #      DatabaseConnection.query via the factory's produced binding.
+  - id: di_gap-usages-DB_CONNECTION
+    tier: di_gap
+    query: "usages:src/billing/billing.tokens.ts::DB_CONNECTION"
+    expected:
+      - src/billing/billing.service.ts::BillingService
+      - src/billing/billing.module.ts::BillingModule
+
+  - id: di_gap-call_chain-BillingService-charge
+    tier: di_gap
+    query: "call_chain:src/billing/billing.service.ts::BillingService.charge"
+    expected:
+      - src/billing/database.connection.ts::DatabaseConnection.query
+
+  # --- forwardRef circular injection ---
+  # FeatureAService and FeatureBService inject each other via
+  # `forwardRef(() => …)`. Static type resolution can't evaluate the
+  # arrow, so without DI extraction the receiver types of `this.b` and
+  # `this.a` are unknown and call chains across the cycle break.
+  - id: di_gap-call_chain-FeatureAService-doA
+    tier: di_gap
+    query: "call_chain:src/feature/feature-a.service.ts::FeatureAService.doA"
+    expected:
+      - src/feature/feature-b.service.ts::FeatureBService.doB
+
+  - id: di_gap-call_chain-FeatureBService-callA
+    tier: di_gap
+    query: "call_chain:src/feature/feature-b.service.ts::FeatureBService.callA"
+    expected:
+      - src/feature/feature-a.service.ts::FeatureAService.doA

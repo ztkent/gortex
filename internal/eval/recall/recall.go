@@ -174,11 +174,22 @@ func evalOne(fixture Fixture, r Ranker, tc TokenCounter, maxK int) RankerResult 
 		Recall:  make(map[int]float64, len(Ks)),
 		PerTier: make(map[Tier]TierMetrics),
 	}
-	// Initialise per-tier buckets so the JSON shape is stable.
+	// Initialise per-tier buckets so the JSON shape is stable. The stock
+	// tiers are always included for schema consistency; any additional
+	// tier seen in the fixture (e.g. "di") is added on the fly so the
+	// harness doesn't panic when fixtures grow new categories.
 	for _, tier := range []Tier{TierExact, TierConcept, TierMultiHop} {
 		res.PerTier[tier] = TierMetrics{
 			Hits:   make(map[int]int, len(Ks)),
 			Recall: make(map[int]float64, len(Ks)),
+		}
+	}
+	for _, c := range fixture.Cases {
+		if _, ok := res.PerTier[c.Tier]; c.Tier != "" && !ok {
+			res.PerTier[c.Tier] = TierMetrics{
+				Hits:   make(map[int]int, len(Ks)),
+				Recall: make(map[int]float64, len(Ks)),
+			}
 		}
 	}
 

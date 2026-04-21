@@ -1,0 +1,9 @@
+{
+  "name": "gortex-di-nestjs-fixture",
+  "private": true,
+  "description": "Minimal NestJS fixture for Gortex DI recall evaluation. Not installed — purely a static corpus for the indexer to parse.",
+  "dependencies": {
+    "@nestjs/common": "^10.0.0",
+    "@nestjs/core": "^10.0.0"
+  }
+}

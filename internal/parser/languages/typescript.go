@@ -193,6 +193,15 @@ func (e *TypeScriptExtractor) extractClasses(root *sitter.Node, src []byte, file
 		// invisible to search; a typical VSCode class (10-30
 		// fields) loses most of its surface area in the graph.
 		e.extractClassProperties(def.Node, src, filePath, id, result)
+
+		// NestJS module providers: `@Module({ providers: [{ provide: X,
+		// useClass: Y }] })` declares that when a consumer asks for X it
+		// receives Y. Emit an EdgeProvides from the module to Y tagged
+		// with provides_for=X so the resolver can pick the bound
+		// implementation when receiver_type is abstract.
+		if def.Node != nil {
+			emitModuleBindings(def.Node, src, id, filePath, result)
+		}
 	}
 }
 
@@ -316,6 +325,20 @@ func (e *TypeScriptExtractor) extractMethods(classNode *sitter.Node, src []byte,
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: id, To: classID, Kind: graph.EdgeMemberOf, FilePath: filePath, Line: def.StartLine + 1,
 		})
+		// NestJS-style decorator dispatch: `@UseGuards(AuthGuard)` on a
+		// method binds `AuthGuard.canActivate` to framework-side invocation
+		// when the method handles a request. No source call site exists,
+		// so the graph is blind to it without this synthetic edge. Also
+		// covers @UseInterceptors / @UseFilters / @UsePipes.
+		//
+		// In tree-sitter-typescript, method decorators are SIBLINGS of the
+		// method_definition inside class_body (not children), so we walk
+		// prev siblings backward until we hit a non-decorator node.
+		if def.Node != nil {
+			for sib := def.Node.PrevSibling(); sib != nil && sib.Type() == "decorator"; sib = sib.PrevSibling() {
+				emitDispatchFromDecorator(sib, src, id, filePath, result)
+			}
+		}
 	}
 }
 
@@ -555,6 +578,15 @@ func (e *TypeScriptExtractor) buildTypeEnv(root *sitter.Node, src []byte) typeEn
 		}
 	}
 
+	// Tier 0b: constructor parameters with visibility modifiers
+	// (`constructor(private readonly svc: UsersService) {}`) are stored
+	// as class members accessible through `this.svc`. Without this the
+	// extractor can't type `this.svc.foo()` call expressions, so the
+	// resolver falls back to "caller's receiver type" and method-name
+	// collisions inside the containing class cause self-loops — as
+	// seen with UsersController.create → UsersController.create.
+	collectThisParamTypes(root, src, tenv)
+
 	// Tier 1: new expressions — const x = new Type(...)
 	// Walk all variable declarators and check if RHS is a new_expression.
 	matches, _ = parser.RunQuery(tsQVar, e.lang, root, src)
@@ -585,6 +617,320 @@ func (e *TypeScriptExtractor) buildTypeEnv(root *sitter.Node, src []byte) typeEn
 	}
 
 	return tenv
+}
+
+// emitModuleBindings walks a class_declaration's decorators, finds the
+// @Module(...) decorator (if any), and emits one EdgeProvides edge per
+// `{ provide: X, useClass: Y }` entry in its `providers` array. The
+// edge points from the module class to the concrete implementation Y;
+// Meta["provides_for"] names the abstract type X so the resolver can
+// prefer Y when a call's receiver_type is X. Non-useClass providers
+// (useValue / useFactory / useExisting / bare class references) are
+// skipped here — they'll be handled by the @Inject(TOKEN) feature.
+func emitModuleBindings(classNode *sitter.Node, src []byte, classID, filePath string, result *parser.ExtractionResult) {
+	// Decorators on classes come as siblings via an export_statement
+	// wrapper OR as children of class_declaration, depending on the
+	// grammar version and whether the class is exported. Walk both
+	// directions to be robust.
+	decorators := classDecorators(classNode)
+	for _, dec := range decorators {
+		call := nestDecoratorCall(dec)
+		if call == nil {
+			continue
+		}
+		fn := call.ChildByFieldName("function")
+		if fn == nil || fn.Type() != "identifier" || fn.Content(src) != "Module" {
+			continue
+		}
+		args := call.ChildByFieldName("arguments")
+		if args == nil {
+			continue
+		}
+		// The Module decorator takes one object literal arg.
+		var config *sitter.Node
+		for i := 0; i < int(args.NamedChildCount()); i++ {
+			c := args.NamedChild(i)
+			if c != nil && c.Type() == "object" {
+				config = c
+				break
+			}
+		}
+		if config == nil {
+			continue
+		}
+		providersNode := objectFieldValue(config, src, "providers")
+		if providersNode == nil || providersNode.Type() != "array" {
+			continue
+		}
+		for i := 0; i < int(providersNode.NamedChildCount()); i++ {
+			entry := providersNode.NamedChild(i)
+			if entry == nil || entry.Type() != "object" {
+				continue
+			}
+			abstract := objectFieldIdentifier(entry, src, "provide")
+			concrete := objectFieldIdentifier(entry, src, "useClass")
+			if abstract == "" || concrete == "" {
+				continue
+			}
+			result.Edges = append(result.Edges, &graph.Edge{
+				From:     classID,
+				To:       "unresolved::" + concrete,
+				Kind:     graph.EdgeProvides,
+				FilePath: filePath,
+				Line:     int(entry.StartPoint().Row) + 1,
+				Meta: map[string]any{
+					"provides_for": abstract,
+					"binding":      "useClass",
+				},
+			})
+		}
+	}
+}
+
+// classDecorators returns decorator nodes applicable to a class_declaration.
+// In tree-sitter-typescript, decorators appear either as children of the
+// class_declaration directly or, when the class is `export`-ed, as
+// children of the enclosing export_statement preceding the class.
+func classDecorators(classNode *sitter.Node) []*sitter.Node {
+	var decs []*sitter.Node
+	// Direct children first.
+	for i := 0; i < int(classNode.ChildCount()); i++ {
+		c := classNode.Child(i)
+		if c != nil && c.Type() == "decorator" {
+			decs = append(decs, c)
+		}
+	}
+	// Parent export_statement siblings.
+	parent := classNode.Parent()
+	if parent != nil && parent.Type() == "export_statement" {
+		for i := 0; i < int(parent.ChildCount()); i++ {
+			c := parent.Child(i)
+			if c != nil && c.Type() == "decorator" {
+				decs = append(decs, c)
+			}
+		}
+	}
+	return decs
+}
+
+// objectFieldValue returns the `value` child of a `pair` node inside the
+// given object literal whose key matches the supplied name, or nil when
+// absent. Works on tree-sitter's JS/TS object grammar.
+func objectFieldValue(objNode *sitter.Node, src []byte, name string) *sitter.Node {
+	for i := 0; i < int(objNode.NamedChildCount()); i++ {
+		p := objNode.NamedChild(i)
+		if p == nil || p.Type() != "pair" {
+			continue
+		}
+		key := p.ChildByFieldName("key")
+		if key == nil {
+			continue
+		}
+		if key.Content(src) != name {
+			continue
+		}
+		return p.ChildByFieldName("value")
+	}
+	return nil
+}
+
+// objectFieldIdentifier is a thin wrapper on objectFieldValue that only
+// returns a value when it's a plain identifier (the shape we care about
+// for `provide: X` / `useClass: Y` entries). Returns "" otherwise.
+func objectFieldIdentifier(objNode *sitter.Node, src []byte, name string) string {
+	v := objectFieldValue(objNode, src, name)
+	if v == nil || v.Type() != "identifier" {
+		return ""
+	}
+	return v.Content(src)
+}
+
+// nestDispatchDecorators maps a NestJS-style dispatch decorator name to
+// the entry-point method name on its argument class. `@UseGuards(X)`
+// causes X.canActivate to run; `@UseInterceptors(Y)` → Y.intercept; etc.
+// Decorators not in this table are ignored (they don't produce runtime
+// dispatch we can link statically).
+var nestDispatchDecorators = map[string]string{
+	"UseGuards":       "canActivate",
+	"UseInterceptors": "intercept",
+	"UseFilters":      "catch",
+	"UsePipes":        "transform",
+}
+
+// emitDispatchFromDecorator inspects one decorator node. If it's one of
+// the recognised NestJS dispatch decorators (@UseGuards, @UseInterceptors,
+// @UseFilters, @UsePipes), it emits one unresolved edge from methodID to
+// the entry-point method on each class argument. Each edge carries
+// receiver_type so the resolver's Pass 1 disambiguates by class rather
+// than falling back to name-only heuristics. Non-identifier arguments
+// (`new X()`, literals) are silently skipped.
+func emitDispatchFromDecorator(dec *sitter.Node, src []byte, methodID, filePath string, result *parser.ExtractionResult) {
+	callNode := nestDecoratorCall(dec)
+	if callNode == nil {
+		return
+	}
+	fn := callNode.ChildByFieldName("function")
+	if fn == nil || fn.Type() != "identifier" {
+		return
+	}
+	entryMethod, ok := nestDispatchDecorators[fn.Content(src)]
+	if !ok {
+		return
+	}
+	args := callNode.ChildByFieldName("arguments")
+	if args == nil {
+		return
+	}
+	for j := 0; j < int(args.NamedChildCount()); j++ {
+		arg := args.NamedChild(j)
+		if arg == nil || arg.Type() != "identifier" {
+			continue
+		}
+		argClass := arg.Content(src)
+		result.Edges = append(result.Edges, &graph.Edge{
+			From:     methodID,
+			To:       "unresolved::*." + entryMethod,
+			Kind:     graph.EdgeCalls,
+			FilePath: filePath,
+			Line:     int(dec.StartPoint().Row) + 1,
+			Meta: map[string]any{
+				"receiver_type":      argClass,
+				"dispatch_decorator": fn.Content(src),
+			},
+		})
+	}
+}
+
+// nestDecoratorCall returns the call_expression child of a decorator node
+// if the decorator has the shape `@Name(args)`. Plain `@Name` without
+// parens returns nil (those can't bind arguments, so nothing to emit).
+func nestDecoratorCall(dec *sitter.Node) *sitter.Node {
+	for i := 0; i < int(dec.NamedChildCount()); i++ {
+		c := dec.NamedChild(i)
+		if c != nil && c.Type() == "call_expression" {
+			return c
+		}
+	}
+	return nil
+}
+
+// collectThisParamTypes walks every class_declaration, finds constructors
+// that use TypeScript's "parameter property" shorthand
+// (`constructor(private readonly svc: UsersService) {}`), and seeds the
+// type env so later `this.svc.foo()` call sites can be typed. A parameter
+// property is a required_parameter whose first child is an accessibility
+// or readonly modifier — that's how the tree-sitter-typescript grammar
+// distinguishes them from plain constructor args.
+func collectThisParamTypes(root *sitter.Node, src []byte, tenv typeEnv) {
+	walkNodes(root, func(n *sitter.Node) {
+		if n.Type() != "class_declaration" {
+			return
+		}
+		walkNodes(n, func(m *sitter.Node) {
+			if m.Type() != "method_definition" {
+				return
+			}
+			nameNode := m.ChildByFieldName("name")
+			if nameNode == nil || nameNode.Content(src) != "constructor" {
+				return
+			}
+			params := m.ChildByFieldName("parameters")
+			if params == nil {
+				return
+			}
+			for i := 0; i < int(params.NamedChildCount()); i++ {
+				p := params.NamedChild(i)
+				if p == nil {
+					continue
+				}
+				// Only required_parameter nodes can carry the parameter-
+				// property shorthand; plain identifiers bail out.
+				if p.Type() != "required_parameter" && p.Type() != "optional_parameter" {
+					continue
+				}
+				if !hasParameterPropertyModifier(p) {
+					continue
+				}
+				paramName := paramIdentifier(p, src)
+				if paramName == "" {
+					continue
+				}
+				typeName := paramTypeAnnotation(p, src)
+				if typeName == "" {
+					continue
+				}
+				// Key by `this.<name>` so extractCalls' receiverText
+				// lookup ("this.svc") matches directly.
+				tenv["this."+paramName] = typeName
+			}
+		})
+	})
+}
+
+// hasParameterPropertyModifier reports whether a required_parameter node
+// carries one of the visibility/readonly modifiers that promote a ctor
+// arg to a class member in TypeScript.
+func hasParameterPropertyModifier(p *sitter.Node) bool {
+	for i := 0; i < int(p.ChildCount()); i++ {
+		c := p.Child(i)
+		if c == nil {
+			continue
+		}
+		switch c.Type() {
+		case "accessibility_modifier", "readonly":
+			return true
+		case "override_modifier":
+			// `override` can accompany a visibility modifier; keep
+			// scanning rather than returning false.
+		}
+	}
+	return false
+}
+
+// paramIdentifier finds the underlying identifier name for a required_parameter
+// — handles both `foo: T` and `foo?: T` / `foo = default`.
+func paramIdentifier(p *sitter.Node, src []byte) string {
+	pattern := p.ChildByFieldName("pattern")
+	if pattern != nil && pattern.Type() == "identifier" {
+		return pattern.Content(src)
+	}
+	// Fallback: first identifier child.
+	for i := 0; i < int(p.NamedChildCount()); i++ {
+		c := p.NamedChild(i)
+		if c != nil && c.Type() == "identifier" {
+			return c.Content(src)
+		}
+	}
+	return ""
+}
+
+// paramTypeAnnotation extracts the type name from a required_parameter's
+// type_annotation child, applying the same normalization as Tier 0 var
+// declarations (strip generics, arrays, nullable unions, primitives).
+func paramTypeAnnotation(p *sitter.Node, src []byte) string {
+	ta := p.ChildByFieldName("type")
+	if ta == nil {
+		// Some grammar versions don't expose a "type" field on parameters;
+		// fall back to the first type_annotation child.
+		for i := 0; i < int(p.NamedChildCount()); i++ {
+			c := p.NamedChild(i)
+			if c != nil && c.Type() == "type_annotation" {
+				ta = c
+				break
+			}
+		}
+	}
+	if ta == nil {
+		return ""
+	}
+	for i := 0; i < int(ta.NamedChildCount()); i++ {
+		c := ta.NamedChild(i)
+		if c == nil {
+			continue
+		}
+		return normalizeTypeName(c.Content(src))
+	}
+	return ""
 }
 
 // normalizeTypeName strips generics, arrays, and nullable markers from a type name.

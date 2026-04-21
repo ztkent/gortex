@@ -194,6 +194,17 @@ func runEvalRecall(_ *cobra.Command, _ []string) error {
 		}
 	}
 
+	// Graph-traversal ranker for DI-dependent / call-chain queries. Uses
+	// the same engine pointed at the pure text backend as Winnow above —
+	// text side doesn't matter for traversal, but keeping the engine
+	// identical makes it trivial to add text-plus-graph hybrid rankers
+	// later without re-plumbing.
+	if selected["graph"] {
+		graphEng := query.NewEngine(g)
+		graphEng.SetSearch(textBackend)
+		rankers = append(rankers, recall.GraphRanker("graph", &graphTraverser{eng: graphEng}))
+	}
+
 	// Winnow: needs a Server to run the graph-aware scorer. The Server's
 	// own engine is pointed at the PURE text backend so winnow's
 	// internal text-match step measures graph+BM25 behaviour, not
@@ -336,7 +347,7 @@ func chooseEmbedder() embedding.Provider {
 // parseSelectedRankers turns a comma-separated flag into a set. Default
 // (empty) = all known rankers on.
 func parseSelectedRankers(csv string) map[string]bool {
-	all := []string{"bm25", "semantic", "rrf", "winnow", "ripgrep"}
+	all := []string{"bm25", "semantic", "rrf", "winnow", "graph", "ripgrep"}
 	if csv == "" {
 		out := make(map[string]bool, len(all))
 		for _, r := range all {
@@ -434,4 +445,46 @@ func readGitRev(root string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// graphTraverser adapts the query engine to recall.GraphProvider. Each
+// "tool" prefix (callers, call_chain, usages, dependents) maps to a
+// specific engine method with a sane default depth for the fixture's
+// query shape.
+type graphTraverser struct {
+	eng *query.Engine
+}
+
+func (g *graphTraverser) Traverse(tool, id string, limit int) []string {
+	if g == nil || g.eng == nil {
+		return nil
+	}
+	opts := query.QueryOptions{Depth: 3, Limit: limit * 2}
+	var sg *query.SubGraph
+	switch tool {
+	case "callers":
+		sg = g.eng.GetCallers(id, opts)
+	case "call_chain":
+		sg = g.eng.GetCallChain(id, opts)
+	case "usages":
+		sg = g.eng.FindUsages(id)
+	case "dependents":
+		sg = g.eng.GetDependents(id, opts)
+	default:
+		return nil
+	}
+	if sg == nil {
+		return nil
+	}
+	out := make([]string, 0, len(sg.Nodes))
+	for _, n := range sg.Nodes {
+		if n.ID == id {
+			continue // the subject itself is not a caller/callee/user
+		}
+		out = append(out, n.ID)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
 }

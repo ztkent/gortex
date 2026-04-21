@@ -444,6 +444,34 @@ func (r *Resolver) resolveMethodCall(e *graph.Edge, methodName string, stats *Re
 				return
 			}
 		}
+		// Pass 2b: DI useClass binding. When receiver_type is an
+		// abstract/base class that has no method of this name (Passes
+		// 1 and 2 found nothing), look for a `provides_for: <type>`
+		// edge in the graph — that tells us which concrete class a
+		// @Module has bound this abstract to. Prefer candidate methods
+		// on that concrete. Without this, the final name-only fallback
+		// picks the first implementer alphabetically, which produced
+		// SmsNotifier.notify instead of the module-bound EmailNotifier
+		// on the NestJS DI fixture.
+		if bound := r.boundImplsFor(receiverType); len(bound) > 0 {
+			for _, c := range candidates {
+				if c.Kind != graph.KindMethod {
+					continue
+				}
+				recv := nodeReceiverType(c)
+				if _, ok := bound[recv]; !ok {
+					continue
+				}
+				e.To = c.ID
+				e.Confidence = 0.9
+				if e.Meta == nil {
+					e.Meta = map[string]any{}
+				}
+				e.Meta["resolution"] = "useClass_binding"
+				stats.Resolved++
+				return
+			}
+		}
 	}
 
 	// Fallback: infer receiver type from the caller node.
@@ -537,6 +565,42 @@ func (r *Resolver) applyBuiltinIfKnown(e *graph.Edge, methodName string, stats *
 	e.To = "builtin::" + lang + "::" + category + "::" + methodName
 	stats.External++
 	return true
+}
+
+// boundImplsFor returns the set of concrete class names bound to the
+// abstract type `abstractName` via @Module({ providers: [{ provide: X,
+// useClass: Y }] })` entries. Keys are class names (e.g. "EmailNotifier")
+// so the caller can match against nodeReceiverType of method candidates.
+// Empty when no binding exists.
+func (r *Resolver) boundImplsFor(abstractName string) map[string]struct{} {
+	if abstractName == "" {
+		return nil
+	}
+	out := make(map[string]struct{})
+	for _, ed := range r.graph.AllEdges() {
+		if ed.Kind != graph.EdgeProvides || ed.Meta == nil {
+			continue
+		}
+		if pf, _ := ed.Meta["provides_for"].(string); pf != abstractName {
+			continue
+		}
+		if b, _ := ed.Meta["binding"].(string); b != "useClass" {
+			continue
+		}
+		// ed.To is either a resolved class node ID or "unresolved::Name".
+		// Pull the name off either shape.
+		to := ed.To
+		if strings.HasPrefix(to, "unresolved::") {
+			out[strings.TrimPrefix(to, "unresolved::")] = struct{}{}
+			continue
+		}
+		if idx := strings.LastIndex(to, "::"); idx >= 0 {
+			out[to[idx+2:]] = struct{}{}
+		} else {
+			out[to] = struct{}{}
+		}
+	}
+	return out
 }
 
 // edgeReceiverType extracts the receiver_type from Edge.Meta, if present.

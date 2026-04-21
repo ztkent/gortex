@@ -319,3 +319,194 @@ class Server {
 		assert.Equal(t, "Server", m.Meta["receiver"], "method %s should have receiver Server", m.Name)
 	}
 }
+
+func TestTSExtractor_NestJsUseGuardsDispatch(t *testing.T) {
+	// @UseGuards on a controller method should emit a synthetic call edge
+	// from the handler to the guard's canActivate method. This is the one
+	// DI shape that has no explicit call site anywhere in source — the
+	// framework dispatches to the guard based on decorator metadata.
+	src := []byte(`
+import { Controller, Post, UseGuards } from '@nestjs/common';
+import { AuthGuard } from './auth.guard';
+
+@Controller('x')
+export class XController {
+  @Post()
+  @UseGuards(AuthGuard)
+  async handle(): Promise<void> {}
+}
+`)
+	e := NewTypeScriptExtractor()
+	result, err := e.Extract("x.controller.ts", src)
+	require.NoError(t, err)
+
+	var dispatch *graph.Edge
+	for _, ed := range edgesOfKind(result.Edges, graph.EdgeCalls) {
+		if ed.Meta == nil {
+			continue
+		}
+		if d, ok := ed.Meta["dispatch_decorator"].(string); ok && d == "UseGuards" {
+			dispatch = ed
+			break
+		}
+	}
+	require.NotNil(t, dispatch, "expected a dispatch edge tagged UseGuards")
+	assert.Equal(t, "x.controller.ts::XController.handle", dispatch.From)
+	assert.Equal(t, "unresolved::*.canActivate", dispatch.To)
+	assert.Equal(t, "AuthGuard", dispatch.Meta["receiver_type"])
+}
+
+func TestTSExtractor_NestJsUseInterceptorsDispatch(t *testing.T) {
+	// Same shape for @UseInterceptors → intercept.
+	src := []byte(`
+import { Controller, Get, UseInterceptors } from '@nestjs/common';
+import { CacheInterceptor } from './cache.interceptor';
+
+@Controller('x')
+export class XController {
+  @Get()
+  @UseInterceptors(CacheInterceptor)
+  async handle(): Promise<void> {}
+}
+`)
+	e := NewTypeScriptExtractor()
+	result, err := e.Extract("x.controller.ts", src)
+	require.NoError(t, err)
+
+	var dispatch *graph.Edge
+	for _, ed := range edgesOfKind(result.Edges, graph.EdgeCalls) {
+		if ed.Meta == nil {
+			continue
+		}
+		if d, ok := ed.Meta["dispatch_decorator"].(string); ok && d == "UseInterceptors" {
+			dispatch = ed
+			break
+		}
+	}
+	require.NotNil(t, dispatch)
+	assert.Equal(t, "unresolved::*.intercept", dispatch.To)
+	assert.Equal(t, "CacheInterceptor", dispatch.Meta["receiver_type"])
+}
+
+func TestTSExtractor_NestJsMultipleGuards(t *testing.T) {
+	// @UseGuards(A, B) must emit one edge per class argument.
+	src := []byte(`
+import { Controller, Get, UseGuards } from '@nestjs/common';
+
+@Controller('x')
+export class XController {
+  @Get()
+  @UseGuards(Auth, Role)
+  async handle(): Promise<void> {}
+}
+`)
+	e := NewTypeScriptExtractor()
+	result, err := e.Extract("x.controller.ts", src)
+	require.NoError(t, err)
+
+	var count int
+	seen := map[string]bool{}
+	for _, ed := range edgesOfKind(result.Edges, graph.EdgeCalls) {
+		if ed.Meta == nil {
+			continue
+		}
+		if d, _ := ed.Meta["dispatch_decorator"].(string); d == "UseGuards" {
+			count++
+			seen[ed.Meta["receiver_type"].(string)] = true
+		}
+	}
+	assert.Equal(t, 2, count, "expected one edge per guard class")
+	assert.True(t, seen["Auth"] && seen["Role"])
+}
+
+func TestTSExtractor_NestJsNonDispatchDecoratorIgnored(t *testing.T) {
+	// @Post / @Get / @Injectable / custom decorators must not produce
+	// dispatch edges — only the explicit @Use* set above does.
+	src := []byte(`
+import { Controller, Get, Post } from '@nestjs/common';
+
+@Controller('x')
+export class XController {
+  @Get()
+  @Post('send')
+  async handle(): Promise<void> {}
+}
+`)
+	e := NewTypeScriptExtractor()
+	result, err := e.Extract("x.controller.ts", src)
+	require.NoError(t, err)
+
+	for _, ed := range edgesOfKind(result.Edges, graph.EdgeCalls) {
+		if ed.Meta == nil {
+			continue
+		}
+		if _, ok := ed.Meta["dispatch_decorator"]; ok {
+			t.Fatalf("unexpected dispatch edge: %+v", ed)
+		}
+	}
+}
+
+func TestTSExtractor_NestJsModuleUseClassBinding(t *testing.T) {
+	// @Module({ providers: [{ provide: Abstract, useClass: Concrete }] })
+	// should produce a Provides edge from the module to Concrete, tagged
+	// provides_for: Abstract, so the resolver can pick Concrete for
+	// receiver_type=Abstract calls.
+	src := []byte(`
+import { Module } from '@nestjs/common';
+import { Notifier } from './notifier';
+import { EmailNotifier } from './email';
+
+@Module({
+  providers: [
+    { provide: Notifier, useClass: EmailNotifier },
+  ],
+})
+export class NotificationsModule {}
+`)
+	e := NewTypeScriptExtractor()
+	result, err := e.Extract("notif.module.ts", src)
+	require.NoError(t, err)
+
+	var binding *graph.Edge
+	for _, ed := range edgesOfKind(result.Edges, graph.EdgeProvides) {
+		if ed.Meta == nil {
+			continue
+		}
+		if b, _ := ed.Meta["binding"].(string); b == "useClass" {
+			binding = ed
+			break
+		}
+	}
+	require.NotNil(t, binding, "expected a useClass EdgeProvides")
+	assert.Equal(t, "notif.module.ts::NotificationsModule", binding.From)
+	assert.Equal(t, "Notifier", binding.Meta["provides_for"])
+	assert.Contains(t, binding.To, "EmailNotifier")
+}
+
+func TestTSExtractor_NestJsModuleSkipsNonUseClass(t *testing.T) {
+	// useValue / bare-class providers must not produce useClass edges —
+	// those are the @Inject(TOKEN) feature's territory, handled separately.
+	src := []byte(`
+import { Module } from '@nestjs/common';
+
+@Module({
+  providers: [
+    { provide: 'TOKEN', useValue: 42 },
+    BareService,
+  ],
+})
+export class M {}
+`)
+	e := NewTypeScriptExtractor()
+	result, err := e.Extract("m.ts", src)
+	require.NoError(t, err)
+
+	for _, ed := range edgesOfKind(result.Edges, graph.EdgeProvides) {
+		if ed.Meta == nil {
+			continue
+		}
+		if b, _ := ed.Meta["binding"].(string); b == "useClass" {
+			t.Fatalf("unexpected useClass edge: %+v", ed)
+		}
+	}
+}
