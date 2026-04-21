@@ -22,8 +22,9 @@ import (
 )
 
 var (
-	daemonDetach bool
-	daemonTail   int
+	daemonDetach     bool
+	daemonTail       int
+	daemonEmbeddings bool
 )
 
 var daemonCmd = &cobra.Command{
@@ -76,6 +77,8 @@ var daemonLogsCmd = &cobra.Command{
 func init() {
 	daemonStartCmd.Flags().BoolVar(&daemonDetach, "detach", false,
 		"fork to background after starting (writes to ~/.cache/gortex/daemon.log)")
+	daemonStartCmd.Flags().BoolVar(&daemonEmbeddings, "embeddings", false,
+		"load a semantic embedding provider (opt-in — adds ~87 MB model download on first use and ~60 ms/symbol warmup)")
 	daemonLogsCmd.Flags().IntVarP(&daemonTail, "tail", "n", 50,
 		"show only the last N log lines")
 

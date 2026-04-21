@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"go.uber.org/zap"
 
@@ -58,6 +59,19 @@ type daemonState struct {
 //
 // Any previously-tracked repos (from ~/.config/gortex/config.yaml) are
 // loaded on startup so the daemon restarts pick up where it left off.
+// isTruthyEnv returns true for the usual "yes" env-var spellings,
+// case-insensitively: "1", "true", "yes", "on", "y". Anything else —
+// including empty, "0", "false", "no", "off" — returns false.
+func isTruthyEnv(name string) bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
+	switch v {
+	case "1", "true", "yes", "on", "y":
+		return true
+	default:
+		return false
+	}
+}
+
 func buildDaemonState(logger *zap.Logger) (*daemonState, error) {
 	cfg, err := config.Load(cfgFile)
 	if err != nil {
@@ -83,16 +97,34 @@ func buildDaemonState(logger *zap.Logger) (*daemonState, error) {
 
 	idx := indexer.New(g, reg, cfg.Index, logger)
 
-	// Embeddings: default to the bundled Hugot provider (pure-Go ONNX).
-	// API-first if GORTEX_EMBEDDINGS_URL is set — lets the daemon share an
-	// embedding server with bridge mode when both are in use.
+	// Embeddings are OPT-IN on the daemon. Enabled by any of:
+	//   --embeddings (CLI flag on `gortex daemon start`)
+	//   GORTEX_EMBEDDINGS=1 / true / yes / on (env var)
+	//   GORTEX_EMBEDDINGS_URL=<url> (routes to an OpenAI-compat API)
+	//
+	// Why opt-in: the bundled Hugot MiniLM-L6-v2 model adds an ~87 MB
+	// silent download on first use and blocks warmup for ~60 ms per
+	// indexed symbol (≈8 min per 8k-symbol repo, hours on multi-repo
+	// setups). On our own retrieval fixture, BM25 beats static-GloVe
+	// semantic by 4×+ on every tier — most users never need semantic
+	// at all, and those who do can opt in explicitly.
 	var embedder embedding.Provider
-	if url := os.Getenv("GORTEX_EMBEDDINGS_URL"); url != "" {
-		embedder = embedding.NewAPIProvider(url, os.Getenv("GORTEX_EMBEDDINGS_MODEL"))
-	} else if e, embErr := embedding.NewLocalProvider(); embErr == nil {
-		embedder = e
-	} else {
-		logger.Warn("daemon: embedding provider unavailable", zap.Error(embErr))
+	apiURL := os.Getenv("GORTEX_EMBEDDINGS_URL")
+	switch {
+	case apiURL != "":
+		embedder = embedding.NewAPIProvider(apiURL, os.Getenv("GORTEX_EMBEDDINGS_MODEL"))
+		logger.Info("daemon: embeddings enabled (api)", zap.String("url", apiURL))
+	case daemonEmbeddings || isTruthyEnv("GORTEX_EMBEDDINGS"):
+		if e, embErr := embedding.NewLocalProvider(); embErr == nil {
+			embedder = e
+			logger.Info("daemon: embeddings enabled (local)",
+				zap.String("type", fmt.Sprintf("%T", e)),
+				zap.Int("dim", e.Dimensions()))
+		} else {
+			logger.Warn("daemon: embeddings requested but unavailable", zap.Error(embErr))
+		}
+	default:
+		logger.Info("daemon: embeddings disabled (default) — set --embeddings or GORTEX_EMBEDDINGS=1 to enable")
 	}
 	if embedder != nil {
 		idx.SetEmbedder(embedder)
