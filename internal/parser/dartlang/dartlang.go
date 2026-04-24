@@ -1,7 +1,8 @@
-// Package dartlang provides Go bindings for the tree-sitter-dart grammar.
-// It vendors the C parser from github.com/UserNobody14/tree-sitter-dart (ABI v14).
-//
-// The parser.c and scanner.c files are compiled directly by CGO.
+// Package dartlang provides Go bindings for the tree-sitter-dart
+// grammar. It vendors the C parser from
+// github.com/UserNobody14/tree-sitter-dart (ABI v14) and compiles it
+// directly through CGO. The exposed GetLanguage() returns a
+// tsitter.Language pointer usable with the gortex shim.
 package dartlang
 
 //#cgo CFLAGS: -std=c11 -fPIC
@@ -11,9 +12,9 @@ import "C"
 import (
 	"unsafe"
 
-	sitter "github.com/smacker/go-tree-sitter"
+	"github.com/zzet/gortex/internal/parser/tsitter"
 )
 
-func GetLanguage() *sitter.Language {
-	return sitter.NewLanguage(unsafe.Pointer(C.tree_sitter_dart()))
+func GetLanguage() *tsitter.Language {
+	return tsitter.NewLanguage(unsafe.Pointer(C.tree_sitter_dart()))
 }

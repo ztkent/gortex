@@ -4,8 +4,8 @@ import (
 	"regexp"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	tree_sitter_markdown "github.com/smacker/go-tree-sitter/markdown/tree-sitter-markdown"
+	sitter "github.com/zzet/gortex/internal/parser/tsitter"
+	tree_sitter_markdown "github.com/zzet/gortex/internal/parser/tsitter/markdown"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )

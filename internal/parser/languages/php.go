@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/php"
+	sitter "github.com/zzet/gortex/internal/parser/tsitter"
+	"github.com/zzet/gortex/internal/parser/tsitter/php"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
@@ -484,23 +484,23 @@ func (e *PHPExtractor) emitLaravelMiddleware(methodNodes map[string]*sitter.Node
 	// inward to find the middleware class) and once more as the inner
 	// middleware() call on its own (producing a duplicate, UNfiltered
 	// edge set).
-	processed := make(map[*sitter.Node]struct{})
+	processed := make(map[uintptr]struct{})
 	var walk func(*sitter.Node)
 	walk = func(n *sitter.Node) {
 		if n == nil {
 			return
 		}
 		if n.Type() == "member_call_expression" {
-			if _, dup := processed[n]; !dup {
+			if _, dup := processed[n.Id()]; !dup {
 				// Only process if the parent isn't another
 				// member_call_expression whose object is us —
 				// that would mean we're the inner call of a filter
 				// chain, already handled above.
 				parent := n.Parent()
-				if parent == nil || parent.Type() != "member_call_expression" || parent.ChildByFieldName("object") != n {
+				if parent == nil || parent.Type() != "member_call_expression" || !parent.ChildByFieldName("object").Equal(n) {
 					mw, chainCalls := parseLaravelMiddlewareCall(n, src)
 					for _, c := range chainCalls {
-						processed[c] = struct{}{}
+						processed[c.Id()] = struct{}{}
 					}
 					if mw.class != "" {
 						for _, action := range actions {

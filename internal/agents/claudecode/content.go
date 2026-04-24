@@ -160,7 +160,7 @@ Quick reference for all Gortex MCP tools and the knowledge graph schema.
 ### Coding Workflow
 | Tool | What it gives you |
 |------|-------------------|
-| get_symbol_source | Source code of a single symbol — use instead of Read. Pass ` + "`if_none_match`" + ` with previous ` + "`etag`" + ` to get ` + "`not_modified`" + ` (skip re-reading unchanged source) |
+| get_symbol_source | Source code of a single symbol — use instead of Read. Requires a symbol ID like ` + "`path/to/file.go::SymbolName`" + ` (call ` + "`get_file_summary`" + ` first if you only have a file path). Pass ` + "`if_none_match`" + ` with previous ` + "`etag`" + ` to get ` + "`not_modified`" + ` (skip re-reading unchanged source) |
 | batch_symbols | Multiple symbols with source/callers/callees in one call |
 | find_import_path | Correct import path for a symbol in a target file |
 | explain_change_impact | Risk-tiered blast radius with affected processes/communities |

@@ -3,7 +3,7 @@ package parser
 import (
 	"testing"
 
-	"github.com/smacker/go-tree-sitter/golang"
+	"github.com/zzet/gortex/internal/parser/tsitter/golang"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

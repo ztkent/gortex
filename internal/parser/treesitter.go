@@ -6,16 +6,17 @@ import (
 	"sync"
 	"time"
 
-	sitter "github.com/smacker/go-tree-sitter"
+	ts "github.com/tree-sitter/go-tree-sitter"
+	sitter "github.com/zzet/gortex/internal/parser/tsitter"
 )
 
 const parseTimeout = 5 * time.Second
 
-// NB: a sync.Pool of *sitter.Parser was attempted for allocation
-// savings but the smacker/go-tree-sitter bindings surface cross-call
-// state (bogus "operation limit was hit" errors on reused parsers
-// even after Reset + SetLanguage). Net: allocate fresh per call
-// until upstream exposes a cleaner reset path.
+// NB: a sync.Pool of *Parser was attempted under the smacker bindings
+// and tripped cross-call state bugs. The official bindings expose a
+// clean Reset(), but until we audit whether grammar switches behave
+// correctly, stay on fresh-per-call parsers — cold indexing throughput
+// was never parser-alloc-bound after we precompiled queries.
 
 // CapturedNode holds information about a single captured tree-sitter node.
 type CapturedNode struct {
@@ -80,8 +81,8 @@ func MustPreparedQuery(pattern string, lang *sitter.Language) *PreparedQuery {
 	return q
 }
 
-// Close releases the underlying sitter.Query. After Close the
-// PreparedQuery must not be used.
+// Close releases the underlying query. After Close the PreparedQuery
+// must not be used.
 func (pq *PreparedQuery) Close() {
 	if pq != nil && pq.q != nil {
 		pq.q.Close()
@@ -89,15 +90,15 @@ func (pq *PreparedQuery) Close() {
 	}
 }
 
-// cursorPool reuses *sitter.QueryCursor across query runs. Unlike
-// parsers (see NB above), cursors have no cross-call state surfacing
-// through smacker — Exec(q, n) re-initialises traversal cleanly.
+// cursorPool reuses *ts.QueryCursor across query runs. The new
+// QueryCursor is stateless across Matches() calls — each call starts
+// fresh iteration — so pooling is safe.
 var cursorPool = sync.Pool{
-	New: func() any { return sitter.NewQueryCursor() },
+	New: func() any { return ts.NewQueryCursor() },
 }
 
-func getCursor() *sitter.QueryCursor { return cursorPool.Get().(*sitter.QueryCursor) }
-func putCursor(c *sitter.QueryCursor) { cursorPool.Put(c) }
+func getCursor() *ts.QueryCursor { return cursorPool.Get().(*ts.QueryCursor) }
+func putCursor(c *ts.QueryCursor) { cursorPool.Put(c) }
 
 // RunQuery executes a tree-sitter S-expression query against a node and
 // returns all matches with their captures. The query is compiled on
@@ -120,34 +121,41 @@ func RunPrepared(pq *PreparedQuery, node *sitter.Node, src []byte) []QueryResult
 	return runQuery(pq.q, node, src)
 }
 
+// runQuery is the hot iterator: it drives the cursor, copies captures
+// out of the cursor's reusable buffer before calling Next() again, and
+// assembles QueryResult values the extractors expect.
 func runQuery(q *sitter.Query, node *sitter.Node, src []byte) []QueryResult {
+	if node == nil || node.Inner() == nil {
+		return nil
+	}
 	cursor := getCursor()
 	defer putCursor(cursor)
-	cursor.Exec(q, node)
 
+	iter := cursor.Matches(q.Inner(), node.Inner(), src)
 	var results []QueryResult
 	for {
-		match, ok := cursor.NextMatch()
-		if !ok {
+		match := iter.Next()
+		if match == nil {
 			break
 		}
-		match = cursor.FilterPredicates(match, src)
 		if len(match.Captures) == 0 {
 			continue
 		}
-
-		qr := QueryResult{
-			Captures: make(map[string]*CapturedNode, len(match.Captures)),
-		}
+		qr := QueryResult{Captures: make(map[string]*CapturedNode, len(match.Captures))}
 		for _, c := range match.Captures {
+			// c.Node is a value; copying it detaches from the cursor's
+			// per-match buffer so the pointer stays valid after Next().
+			nodeCopy := c.Node
 			name := q.CaptureNameForId(c.Index)
+			sp := nodeCopy.StartPosition()
+			ep := nodeCopy.EndPosition()
 			qr.Captures[name] = &CapturedNode{
-				Text:      c.Node.Content(src),
-				StartLine: int(c.Node.StartPoint().Row),
-				EndLine:   int(c.Node.EndPoint().Row),
-				StartCol:  int(c.Node.StartPoint().Column),
-				EndCol:    int(c.Node.EndPoint().Column),
-				Node:      c.Node,
+				Text:      nodeCopy.Utf8Text(src),
+				StartLine: int(sp.Row),
+				EndLine:   int(ep.Row),
+				StartCol:  int(sp.Column),
+				EndCol:    int(ep.Column),
+				Node:      sitter.WrapNode(nodeCopy),
 			}
 		}
 		results = append(results, qr)
@@ -165,31 +173,34 @@ func EachMatch(pq *PreparedQuery, node *sitter.Node, src []byte, fn func(QueryRe
 	if pq == nil || pq.q == nil {
 		return
 	}
+	if node == nil || node.Inner() == nil {
+		return
+	}
 	cursor := getCursor()
 	defer putCursor(cursor)
-	cursor.Exec(pq.q, node)
 
+	iter := cursor.Matches(pq.q.Inner(), node.Inner(), src)
 	for {
-		match, ok := cursor.NextMatch()
-		if !ok {
+		match := iter.Next()
+		if match == nil {
 			break
 		}
-		match = cursor.FilterPredicates(match, src)
 		if len(match.Captures) == 0 {
 			continue
 		}
-		qr := QueryResult{
-			Captures: make(map[string]*CapturedNode, len(match.Captures)),
-		}
+		qr := QueryResult{Captures: make(map[string]*CapturedNode, len(match.Captures))}
 		for _, c := range match.Captures {
+			nodeCopy := c.Node
 			name := pq.q.CaptureNameForId(c.Index)
+			sp := nodeCopy.StartPosition()
+			ep := nodeCopy.EndPosition()
 			qr.Captures[name] = &CapturedNode{
-				Text:      c.Node.Content(src),
-				StartLine: int(c.Node.StartPoint().Row),
-				EndLine:   int(c.Node.EndPoint().Row),
-				StartCol:  int(c.Node.StartPoint().Column),
-				EndCol:    int(c.Node.EndPoint().Column),
-				Node:      c.Node,
+				Text:      nodeCopy.Utf8Text(src),
+				StartLine: int(sp.Row),
+				EndLine:   int(ep.Row),
+				StartCol:  int(sp.Column),
+				EndCol:    int(ep.Column),
+				Node:      sitter.WrapNode(nodeCopy),
 			}
 		}
 		fn(qr)
