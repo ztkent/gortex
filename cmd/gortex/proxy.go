@@ -97,19 +97,35 @@ func pumpLines(src io.Reader, dst io.Writer) error {
 }
 
 // detectClientName makes a best-effort guess at which MCP client spawned
-// us. Purely for telemetry / status display — the daemon does not
-// behave differently based on this string. Env vars set by known MCP
-// hosts are the most reliable signal.
+// us. Purely for the initial handshake telemetry — the authoritative
+// answer comes from the MCP `initialize` request's clientInfo, which
+// the daemon dispatcher (cmd/gortex/daemon_mcp.go::maybeSnoopInitialize)
+// applies once the first frame arrives. The handshake-time guess
+// only matters for the few hundred milliseconds before initialize
+// reaches us.
+//
+// Env-var sniffing here favours the actual variables current MCP
+// hosts set. Claude Code: CLAUDECODE=1 (current builds set this) plus
+// CLAUDE_CODE_ENTRYPOINT=cli|sdk|... Other hosts kept best-effort.
 func detectClientName() string {
 	switch {
-	case os.Getenv("CLAUDE_CODE_WORKSPACE") != "":
+	case os.Getenv("CLAUDECODE") != "" || os.Getenv("CLAUDE_CODE_ENTRYPOINT") != "" || os.Getenv("CLAUDE_CODE_WORKSPACE") != "":
 		return "claude-code"
-	case os.Getenv("CURSOR_WORKSPACE") != "":
+	case os.Getenv("CURSOR_TRACE_ID") != "" || os.Getenv("CURSOR_WORKSPACE") != "":
 		return "cursor"
 	case os.Getenv("KIRO_WORKSPACE") != "":
 		return "kiro"
 	case os.Getenv("WINDSURF_WORKSPACE") != "":
 		return "windsurf"
+	case os.Getenv("CODEX_WORKSPACE") != "":
+		return "codex"
+	case os.Getenv("VSCODE_PID") != "" || os.Getenv("VSCODE_IPC_HOOK") != "":
+		// VS Code with the MCP extension. Coarse — Continue / Cline
+		// embedders run inside VS Code too, so this is just a hint
+		// until the MCP initialize frame lands and overrides it.
+		return "vscode"
+	case os.Getenv("ZED_TERM") != "" || os.Getenv("ZED_TERMINAL") != "":
+		return "zed"
 	}
 	return "unknown"
 }

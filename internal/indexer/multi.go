@@ -392,13 +392,16 @@ func (mi *MultiIndexer) TrackRepoCtx(ctx context.Context, entry config.RepoEntry
 	if willBeMultiRepo {
 		idx.SetRepoPrefix(prefix)
 	}
-	// §4.2 workspace / project slugs stamped on every node. Defaults
-	// per spec §4.4: workspace = `.gortex.yaml::workspace` if declared,
-	// else repoPrefix; project = `.gortex.yaml::project` if declared,
-	// else repoPrefix. The WorkspaceID-keyed contract registry (Step
-	// F/G) and the boundary-enforced matcher (Step G) consume these.
-	idx.SetWorkspaceID(resolveWorkspaceID(cfg, prefix))
-	idx.SetProjectID(resolveProjectID(cfg, prefix))
+	// §4.2 workspace / project slugs stamped on every node. Resolution
+	// order (highest priority first): RepoEntry.Workspace from the
+	// global config (lets users pin OSS repos without committing a
+	// `.gortex.yaml`) → `.gortex.yaml::workspace` → repoPrefix
+	// (default). resolveWorkspaceID encodes the precedence; the
+	// WorkspaceID-keyed contract registry and the boundary-enforced
+	// matcher both consume the result.
+	entryCopy := entry
+	idx.SetWorkspaceID(resolveWorkspaceID(&entryCopy, cfg, prefix))
+	idx.SetProjectID(resolveProjectID(&entryCopy, cfg, prefix))
 
 	result, err := idx.IndexCtx(ctx, absPath)
 	if err != nil {
@@ -503,8 +506,9 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 	if willBeMultiRepo {
 		idx.SetRepoPrefix(prefix)
 	}
-	idx.SetWorkspaceID(resolveWorkspaceID(cfg, prefix))
-	idx.SetProjectID(resolveProjectID(cfg, prefix))
+	entryCopy := entry
+	idx.SetWorkspaceID(resolveWorkspaceID(&entryCopy, cfg, prefix))
+	idx.SetProjectID(resolveProjectID(&entryCopy, cfg, prefix))
 	idx.SetRootPath(absPath)
 	idx.SetFileMtimes(priorMtimes)
 

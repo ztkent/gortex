@@ -390,6 +390,32 @@ func (s *Server) handleControl(_ *Session, req ControlRequest) ControlResponse {
 		st.UptimeSeconds = int64(time.Since(s.started).Seconds())
 		st.SocketPath = s.SocketPath
 		st.Sessions = s.sessions.Count()
+		// Per-session detail (cwd, client name, connect time) for the
+		// status command's "sessions" block. The controller can't see
+		// these — sessions live on the daemon server, not the
+		// MultiIndexer — so we attach them here. Sorted newest-first
+		// so the list reads as "what's connected right now".
+		if all := s.sessions.All(); len(all) > 0 {
+			now := time.Now()
+			rows := make([]MCPSessionStatus, 0, len(all))
+			for _, sess := range all {
+				if sess == nil {
+					continue
+				}
+				name, version := sess.SnapshotClientInfo()
+				row := MCPSessionStatus{
+					ID:            sess.ID,
+					Cwd:           sess.CWD,
+					ClientName:    name,
+					ClientVersion: version,
+				}
+				if !sess.StartedAt.IsZero() {
+					row.ConnectedSecs = int64(now.Sub(sess.StartedAt).Seconds())
+				}
+				rows = append(rows, row)
+			}
+			st.MCPSessions = rows
+		}
 		buf, _ := json.Marshal(st)
 		return ControlResponse{OK: true, Result: buf}
 

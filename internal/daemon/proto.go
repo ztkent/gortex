@@ -132,6 +132,26 @@ type StatusResponse struct {
 	// return partial results until warmup completes.
 	Ready         bool  `json:"ready"`
 	WarmupSeconds int64 `json:"warmup_seconds"`
+
+	// Workspaces aggregates TrackedRepos by §4.2 workspace slug.
+	// Empty when no repo declares one (every repo defaults to its
+	// own workspace; the table form is more compact in that case).
+	Workspaces []WorkspaceSummary `json:"workspaces,omitempty"`
+
+	// MCPSessions lists every connected proxy client (Claude Code,
+	// Cursor, Codex, etc.). Empty when the daemon hasn't yet been
+	// asked to track sessions.
+	MCPSessions []MCPSessionStatus `json:"mcp_sessions,omitempty"`
+
+	// ConfiguredServers reflects `~/.gortex/servers.toml` when
+	// present. Empty when running single-server (the §11.L file is
+	// missing or empty); in that case the daemon serves locally and
+	// the multi-server router is disabled.
+	ConfiguredServers []ConfiguredServerStatus `json:"configured_servers,omitempty"`
+	// LocalServerSlug is the slug this daemon recognises as itself
+	// when matching against ConfiguredServers — set from servers.toml
+	// `default` or the first entry. Empty when no servers.toml.
+	LocalServerSlug string `json:"local_server_slug,omitempty"`
 }
 
 // RuntimeStats captures Go runtime.MemStats fields users care about
@@ -189,13 +209,66 @@ type TrackedRepoStatus struct {
 	Prefix    string          `json:"prefix"`
 	Path      string          `json:"path"`
 	Name      string          `json:"name,omitempty"`
+	// Project is the GlobalConfig active-project slug — a named
+	// grouping of repos in `~/.config/gortex/config.yaml::projects`.
+	// Distinct from `WorkspaceProject` below, which is the §4.2
+	// project slug from `.gortex.yaml::project`. Kept here for
+	// backwards compatibility with older daemon clients that read
+	// the field.
 	Project   string          `json:"project,omitempty"`
+	// Workspace is the §4.2 workspace slug stamped onto every node
+	// emitted from this repo. Falls back to Prefix when no
+	// `.gortex.yaml::workspace` is declared. Two repos that share a
+	// Workspace pair their contracts as one logical service.
+	Workspace string          `json:"workspace,omitempty"`
+	// WorkspaceProject is the §4.2 project slug — the soft sub-
+	// boundary inside Workspace. Falls back to Prefix when no
+	// `.gortex.yaml::project` is declared.
+	WorkspaceProject string `json:"workspace_project,omitempty"`
 	Ref       string          `json:"ref,omitempty"`
 	Files     int             `json:"files"`
 	Nodes     int             `json:"nodes"`
 	Edges     int             `json:"edges"`
 	LastIndex int64           `json:"last_index_unix"`
 	Memory    MemoryBreakdown `json:"memory"`
+}
+
+// WorkspaceSummary aggregates per-workspace stats so `gortex daemon
+// status` can render a "workspaces" block above the per-repo table.
+// Reflects the §4.2 hard boundary: counts roll up across every repo
+// declaring the same workspace slug.
+type WorkspaceSummary struct {
+	Slug     string   `json:"slug"`
+	Repos    []string `json:"repos"`
+	Projects []string `json:"projects"`
+	Files    int      `json:"files"`
+	Nodes    int      `json:"nodes"`
+	Edges    int      `json:"edges"`
+}
+
+// MCPSessionStatus is one row in the sessions list. Reports the
+// per-client state the daemon tracks: connection time, current cwd
+// (used by the router for cwd-based workspace resolution), and the
+// remote agent identifier when the client supplied one in MCP's
+// `clientInfo`.
+type MCPSessionStatus struct {
+	ID            string `json:"id"`
+	Cwd           string `json:"cwd,omitempty"`
+	ClientName    string `json:"client_name,omitempty"`
+	ClientVersion string `json:"client_version,omitempty"`
+	ConnectedSecs int64  `json:"connected_secs"`
+}
+
+// ConfiguredServerStatus is one row in the servers list, mirroring a
+// `~/.gortex/servers.toml::[[server]]` entry plus a "this is us"
+// flag set when Slug equals the daemon's local slug.
+type ConfiguredServerStatus struct {
+	Slug       string   `json:"slug"`
+	URL        string   `json:"url"`
+	Default    bool     `json:"default,omitempty"`
+	Local      bool     `json:"local,omitempty"`
+	Workspaces []string `json:"workspaces,omitempty"`
+	HasAuth    bool     `json:"has_auth,omitempty"`
 }
 
 // MemoryBreakdown is a per-repo memory estimate split across the

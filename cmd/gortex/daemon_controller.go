@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -323,17 +324,76 @@ func (c *realController) Status(_ context.Context) (daemon.StatusResponse, error
 			}
 			mem.TotalBytes = mem.NodesBytes + mem.EdgesBytes + mem.SearchBytes + mem.VectorsBytes
 
+			// Pull the §4.2 workspace/project slugs straight off the
+			// per-repo Indexer — that's the source of truth that
+			// stamps every node emitted by this repo. Falls back to
+			// the prefix on legacy setups where no .gortex.yaml
+			// declares them (the resolveWorkspaceID default).
+			var ws, wsProj string
+			if idx := c.multiIndexer.GetIndexer(prefix); idx != nil {
+				ws = idx.WorkspaceID()
+				wsProj = idx.ProjectID()
+			}
+			if ws == "" {
+				ws = prefix
+			}
+			if wsProj == "" {
+				wsProj = prefix
+			}
+
 			tracked = append(tracked, daemon.TrackedRepoStatus{
-				Prefix:    prefix,
-				Path:      meta.RootPath,
-				Files:     meta.FileCount,
-				Nodes:     nodes,
-				Edges:     edges,
-				LastIndex: meta.LastIndexTime.Unix(),
-				Memory:    mem,
+				Prefix:           prefix,
+				Path:             meta.RootPath,
+				Workspace:        ws,
+				WorkspaceProject: wsProj,
+				Files:            meta.FileCount,
+				Nodes:            nodes,
+				Edges:            edges,
+				LastIndex:        meta.LastIndexTime.Unix(),
+				Memory:           mem,
 			})
 		}
 		searchBackendForResponse = backendStats.SearchBackendStats
+	}
+
+	// Aggregate per-workspace stats so the renderer can emit a
+	// "workspaces" block. Hidden when every repo defaults to its own
+	// slug (the legacy single-workspace-per-repo case where the
+	// summary just duplicates the table).
+	wsAgg := make(map[string]*daemon.WorkspaceSummary)
+	wsKeys := make([]string, 0)
+	for _, r := range tracked {
+		s, ok := wsAgg[r.Workspace]
+		if !ok {
+			s = &daemon.WorkspaceSummary{Slug: r.Workspace}
+			wsAgg[r.Workspace] = s
+			wsKeys = append(wsKeys, r.Workspace)
+		}
+		s.Repos = append(s.Repos, r.Prefix)
+		seenProj := false
+		for _, p := range s.Projects {
+			if p == r.WorkspaceProject {
+				seenProj = true
+				break
+			}
+		}
+		if !seenProj {
+			s.Projects = append(s.Projects, r.WorkspaceProject)
+		}
+		s.Files += r.Files
+		s.Nodes += r.Nodes
+		s.Edges += r.Edges
+	}
+	// Always populate the per-workspace rollup — even when every
+	// workspace is a default singleton. Hiding it on legacy setups
+	// makes the §4 boundary feature invisible, which is the opposite
+	// of what users want when they're trying to migrate. Renderer-
+	// side compaction (single-line hint vs full table) keeps the
+	// output tidy when there's nothing meaningful to summarise.
+	sort.Strings(wsKeys)
+	workspaces := make([]daemon.WorkspaceSummary, 0, len(wsKeys))
+	for _, k := range wsKeys {
+		workspaces = append(workspaces, *wsAgg[k])
 	}
 
 	var mem runtime.MemStats
@@ -353,10 +413,55 @@ func (c *realController) Status(_ context.Context) (daemon.StatusResponse, error
 			NumGC:        mem.NumGC,
 			NumGoroutine: runtime.NumGoroutine(),
 		},
-		PProfAddr:     daemonPProfAddr(),
-		Ready:         c.ready.Load(),
-		WarmupSeconds: c.warmupSeconds.Load(),
+		PProfAddr:         daemonPProfAddr(),
+		Ready:             c.ready.Load(),
+		WarmupSeconds:     c.warmupSeconds.Load(),
+		Workspaces:        workspaces,
+		ConfiguredServers: c.collectConfiguredServers(),
+		LocalServerSlug:   c.localServerSlug(),
 	}, nil
+	// MCPSessions is populated by the daemon Server (it owns the
+	// SessionRegistry — the controller doesn't have a back-pointer).
+	// See internal/daemon/server.go around the ControlStatus handler.
+}
+
+// collectConfiguredServers reads `~/.gortex/servers.toml` (best
+// effort — a missing or malformed file just returns nil) and
+// projects it onto the status response. Auth tokens are NOT
+// included; the HasAuth flag is enough for the human-facing
+// "yes/no" decision.
+func (c *realController) collectConfiguredServers() []daemon.ConfiguredServerStatus {
+	cfg, err := daemon.LoadServersConfig("")
+	if err != nil || cfg == nil || len(cfg.Server) == 0 {
+		return nil
+	}
+	local := c.localServerSlug()
+	out := make([]daemon.ConfiguredServerStatus, 0, len(cfg.Server))
+	for _, s := range cfg.Server {
+		out = append(out, daemon.ConfiguredServerStatus{
+			Slug:       s.Slug,
+			URL:        s.URL,
+			Default:    s.Default,
+			Local:      s.Slug == local,
+			Workspaces: s.Workspaces,
+			HasAuth:    s.AuthToken != "" || s.AuthTokenEnv != "",
+		})
+	}
+	return out
+}
+
+// localServerSlug returns the slug servers.toml's `default = true`
+// entry uses, falling back to the first entry when none is marked.
+// Empty when no servers.toml.
+func (c *realController) localServerSlug() string {
+	cfg, err := daemon.LoadServersConfig("")
+	if err != nil || cfg == nil || len(cfg.Server) == 0 {
+		return ""
+	}
+	if def := cfg.DefaultServer(); def != nil {
+		return def.Slug
+	}
+	return ""
 }
 
 // SearchSymbols runs a substring match over node names and returns the

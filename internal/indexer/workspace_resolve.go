@@ -9,19 +9,29 @@ import (
 // resolveWorkspaceID returns the §4.2 workspace slug for an indexer
 // emitting nodes for the repo with the given fallback prefix.
 //
-// Resolution order (matches spec-launch.md §4.4 backwards-compat
-// defaults):
+// Resolution order (highest priority first):
 //
-//  1. `.gortex.yaml::workspace:` (Step E adds this field).
-//  2. Falls back to `fallbackPrefix` (the repo prefix). This is the
-//     "files without a `.gortex.yaml::workspace` key get
-//     `workspace = repo-name`" rule from §4.3.
+//  1. RepoEntry.Workspace — user-level override in
+//     `~/.config/gortex/config.yaml`. Lets users pin OSS / read-only
+//     repos to a workspace without leaving a `.gortex.yaml` artifact
+//     in the repo itself, and lets users override a workspace the
+//     repo author chose (the OSS author's slug shouldn't pollute the
+//     user's local graph identity).
+//  2. `.gortex.yaml::workspace:` — spec-launch.md §4.2 / Step E.
+//     Source of truth when the user is the same person who owns the
+//     repo (typical for first-party / monorepo setups).
+//  3. Falls back to `fallbackPrefix` (the repo prefix). This is the
+//     §4.4 "files without a workspace declaration get workspace =
+//     repo-name" default.
 //
 // Empty `fallbackPrefix` returns "" — single-repo callers that don't
 // pass a prefix accept that the workspace slug stays empty, in which
 // case the §4 boundary checks treat the node as "no workspace
 // declared" and degrade to the legacy RepoPrefix-keyed comparison.
-func resolveWorkspaceID(cfg *config.Config, fallbackPrefix string) string {
+func resolveWorkspaceID(entry *config.RepoEntry, cfg *config.Config, fallbackPrefix string) string {
+	if entry != nil && entry.Workspace != "" {
+		return entry.Workspace
+	}
 	if cfg != nil && cfg.Workspace != "" {
 		return cfg.Workspace
 	}
@@ -31,20 +41,19 @@ func resolveWorkspaceID(cfg *config.Config, fallbackPrefix string) string {
 // resolveProjectID returns the §4.2 project slug for an indexer
 // emitting nodes for the repo with the given fallback prefix.
 //
-// Resolution order:
+// Resolution order mirrors resolveWorkspaceID:
 //
-//  1. `.gortex.yaml::project:` for single-project repos (Step E
-//     adds this field).
-//  2. Per-file `projects[]` paths-glob lookup is the monorepo case
+//  1. RepoEntry.Project — global config override.
+//  2. `.gortex.yaml::project:` — spec-launch.md §4.2 / Step E.
+//  3. Per-file `projects[]` paths-glob lookup is the monorepo case
 //     (§4.2 example). The current implementation stamps a single
-//     project slug per repo; the per-file refinement lands when
-//     Step F wires the contract extractor through a per-file project
-//     resolver. For now monorepos that declare `projects[]` get the
-//     workspace name as a sentinel and a warning at indexing time
-//     (the spec defaults call out this behaviour explicitly).
-//  3. Falls back to `fallbackPrefix` (the repo prefix). Same
+//     project slug per repo; the per-file refinement is a follow-up.
+//  4. Falls back to `fallbackPrefix` (the repo prefix). Same
 //     "missing → repo-name" rule as workspace.
-func resolveProjectID(cfg *config.Config, fallbackPrefix string) string {
+func resolveProjectID(entry *config.RepoEntry, cfg *config.Config, fallbackPrefix string) string {
+	if entry != nil && entry.Project != "" {
+		return entry.Project
+	}
 	if cfg != nil && cfg.Project != "" {
 		return cfg.Project
 	}
@@ -80,6 +89,18 @@ func (mi *MultiIndexer) BackfillWorkspaceSlugs() (nodesStamped, contractsStamped
 
 	type slugs struct{ ws, proj string }
 	bySlug := make(map[string]slugs, len(repoMeta))
+	// Map each repo prefix to its global-config RepoEntry so we honour
+	// the user-level workspace/project override even on backfill.
+	entryByPrefix := make(map[string]config.RepoEntry, len(repoMeta))
+	if mi.configMgr.Global() != nil {
+		for _, e := range mi.configMgr.Global().Repos {
+			p := config.ResolvePrefix(e)
+			if p == "" || p == "." {
+				continue
+			}
+			entryByPrefix[p] = e
+		}
+	}
 	for prefix, root := range repoMeta {
 		// Make sure the per-repo `.gortex.yaml` is loaded — at warmup
 		// time TrackRepoCtx/ReconcileRepoCtx already calls this, but
@@ -87,9 +108,14 @@ func (mi *MultiIndexer) BackfillWorkspaceSlugs() (nodesStamped, contractsStamped
 		// on a path that didn't.
 		mi.configMgr.LoadWorkspaceConfig(prefix, root)
 		cfg := mi.configMgr.GetRepoConfig(prefix)
+		var entryPtr *config.RepoEntry
+		if e, ok := entryByPrefix[prefix]; ok {
+			entryCopy := e
+			entryPtr = &entryCopy
+		}
 		bySlug[prefix] = slugs{
-			ws:   resolveWorkspaceID(cfg, prefix),
-			proj: resolveProjectID(cfg, prefix),
+			ws:   resolveWorkspaceID(entryPtr, cfg, prefix),
+			proj: resolveProjectID(entryPtr, cfg, prefix),
 		}
 	}
 
@@ -193,12 +219,30 @@ func (mi *MultiIndexer) crossWorkspaceLookup() resolver.CrossWorkspaceDepLookup 
 			repoPrefixes = append(repoPrefixes, prefix)
 		}
 		mi.mu.RUnlock()
+		// Per-repo crossWorkspaceLookup needs the same precedence as the
+		// stamp path: a global-config Workspace override changes which
+		// repos count as belonging to `sourceWS`.
+		entryByPrefix := make(map[string]config.RepoEntry)
+		if mi.configMgr.Global() != nil {
+			for _, e := range mi.configMgr.Global().Repos {
+				p := config.ResolvePrefix(e)
+				if p == "" || p == "." {
+					continue
+				}
+				entryByPrefix[p] = e
+			}
+		}
 		for _, prefix := range repoPrefixes {
 			cfg := mi.configMgr.GetRepoConfig(prefix)
 			if cfg == nil {
 				continue
 			}
-			repoWS := resolveWorkspaceID(cfg, prefix)
+			var entryPtr *config.RepoEntry
+			if e, ok := entryByPrefix[prefix]; ok {
+				entryCopy := e
+				entryPtr = &entryCopy
+			}
+			repoWS := resolveWorkspaceID(entryPtr, cfg, prefix)
 			if repoWS != sourceWS {
 				continue
 			}

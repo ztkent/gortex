@@ -21,6 +21,18 @@ type Session struct {
 	Mode          ConnectionMode
 	CWD           string
 	ClientName    string
+	// ClientVersion is the version reported by the MCP client in its
+	// `initialize` request (`params.clientInfo.version`). Empty until
+	// the daemon dispatcher sees that frame; the env-var sniff in
+	// `cmd/gortex/proxy.go::detectClientName` only fills ClientName.
+	ClientVersion string
+	// ClientNameSource records where ClientName came from so the
+	// MCP-frame snooper can decide whether to overwrite it. "handshake"
+	// is the env-var fallback the proxy posts at connect time;
+	// "initialize" is the authoritative MCP-protocol value. Anything
+	// from "initialize" wins over any "handshake" — including the
+	// "unknown" string the proxy uses when env-var detection fails.
+	ClientNameSource string
 	ClientPID     int
 	DefaultRepo   string
 	ActiveProject string
@@ -38,6 +50,42 @@ type Session struct {
 	SessionState any
 	SymHistory   any
 	TokenStats   any
+
+	// mu protects ClientName / ClientVersion / ClientNameSource which
+	// can be updated by the dispatcher mid-session when the MCP
+	// initialize frame arrives.
+	mu sync.RWMutex
+}
+
+// SetClientInfo updates the session's client metadata from the MCP
+// `initialize` frame. Called by the daemon dispatcher when it sees
+// the first `initialize` request on this session. Idempotent — a
+// second call (e.g. on protocol re-init) just overwrites.
+func (s *Session) SetClientInfo(name, version string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	if name != "" {
+		s.ClientName = name
+		s.ClientNameSource = "initialize"
+	}
+	if version != "" {
+		s.ClientVersion = version
+	}
+	s.mu.Unlock()
+}
+
+// SnapshotClientInfo returns the current client name/version pair
+// safely under the session lock. Used by the status path which reads
+// while the dispatcher may be writing.
+func (s *Session) SnapshotClientInfo() (name, version string) {
+	if s == nil {
+		return "", ""
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.ClientName, s.ClientVersion
 }
 
 // SessionRegistry tracks active sessions. Safe for concurrent access from
@@ -59,13 +107,14 @@ func NewSessionRegistry() *SessionRegistry {
 // Called after a successful handshake. Generates the session ID.
 func (r *SessionRegistry) Register(conn net.Conn, h Handshake) *Session {
 	s := &Session{
-		ID:         newSessionID(),
-		Mode:       h.Mode,
-		CWD:        h.CWD,
-		ClientName: h.ClientName,
-		ClientPID:  h.PID,
-		StartedAt:  time.Now(),
-		Conn:       conn,
+		ID:               newSessionID(),
+		Mode:             h.Mode,
+		CWD:              h.CWD,
+		ClientName:       h.ClientName,
+		ClientNameSource: "handshake",
+		ClientPID:        h.PID,
+		StartedAt:        time.Now(),
+		Conn:             conn,
 	}
 	r.mu.Lock()
 	r.sessions[s.ID] = s

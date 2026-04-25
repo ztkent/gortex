@@ -30,6 +30,16 @@ type RepoEntry struct {
 	// Exclude adds repo-specific ignore patterns layered on top of the
 	// global Exclude list (gitignore semantics).
 	Exclude []string `mapstructure:"exclude" yaml:"exclude,omitempty"`
+	// Workspace is an optional override for the spec-launch.md §4.2
+	// workspace slug, set in the user's global config when the repo
+	// itself has no `.gortex.yaml::workspace` (or when the user wants
+	// to override one — e.g. tracking an OSS repo without leaving an
+	// artifact in it). Wins over `.gortex.yaml::workspace`. Falls
+	// through to the default (repo prefix) when both are empty.
+	Workspace string `mapstructure:"workspace" yaml:"workspace,omitempty"`
+	// Project is the matching override for the §4.2 project slug.
+	// Same precedence rules as Workspace.
+	Project string `mapstructure:"project" yaml:"project,omitempty"`
 }
 
 // ProjectConfig defines a named project grouping repos.

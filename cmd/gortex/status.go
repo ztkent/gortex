@@ -62,14 +62,52 @@ func runStatusViaDaemon(cmd *cobra.Command) error {
 		_, _ = fmt.Fprintln(w, "tracked repos: (none — run `gortex track <path>` to add one)")
 		return nil
 	}
+
+	// One-line workspace rollup so the §4 boundary state is visible
+	// in the compact view too. Mirrors renderDaemonWorkspaces' compact
+	// form: a single sentence when every repo is its own default
+	// workspace, an explicit count when the user has grouped some.
+	if len(st.Workspaces) > 0 {
+		multiRepoWorkspaces := 0
+		for _, ws := range st.Workspaces {
+			if len(ws.Repos) > 1 {
+				multiRepoWorkspaces++
+			}
+		}
+		if multiRepoWorkspaces == 0 {
+			_, _ = fmt.Fprintf(w, "workspaces  %d (one per repo, default)\n", len(st.Workspaces))
+		} else {
+			_, _ = fmt.Fprintf(w, "workspaces  %d (%d shared, %d default singletons)\n",
+				len(st.Workspaces), multiRepoWorkspaces, len(st.Workspaces)-multiRepoWorkspaces)
+		}
+	}
+
 	_, _ = fmt.Fprintln(w, "tracked repos:")
 	// Sort by prefix for stable output across runs.
 	sort.Slice(st.TrackedRepos, func(i, j int) bool {
 		return st.TrackedRepos[i].Prefix < st.TrackedRepos[j].Prefix
 	})
+	// Workspace column only appears when the user actually has explicit
+	// declarations — otherwise every row just repeats the repo prefix.
+	showWS := false
 	for _, r := range st.TrackedRepos {
-		_, _ = fmt.Fprintf(w, "  %-24s %s  (%d files, %d nodes, %d edges)\n",
-			r.Prefix, r.Path, r.Files, r.Nodes, r.Edges)
+		if r.Workspace != "" && r.Workspace != r.Prefix {
+			showWS = true
+			break
+		}
+	}
+	for _, r := range st.TrackedRepos {
+		if showWS {
+			ws := r.Workspace
+			if r.WorkspaceProject != "" && r.WorkspaceProject != ws {
+				ws = ws + "/" + r.WorkspaceProject
+			}
+			_, _ = fmt.Fprintf(w, "  %-24s [%-12s] %s  (%d files, %d nodes, %d edges)\n",
+				r.Prefix, ws, r.Path, r.Files, r.Nodes, r.Edges)
+		} else {
+			_, _ = fmt.Fprintf(w, "  %-24s %s  (%d files, %d nodes, %d edges)\n",
+				r.Prefix, r.Path, r.Files, r.Nodes, r.Edges)
+		}
 	}
 	return nil
 }

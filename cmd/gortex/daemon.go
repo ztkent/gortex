@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"sort"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -403,7 +404,10 @@ func runDaemonStatus(cmd *cobra.Command, _ []string) error {
 	}
 	w := cmd.OutOrStdout()
 	renderDaemonHeader(w, st)
+	renderDaemonWorkspaces(w, st)
 	renderDaemonRepos(w, st)
+	renderDaemonSessions(w, st)
+	renderDaemonServers(w, st)
 	return nil
 }
 
@@ -505,20 +509,28 @@ func renderDaemonRepos(w io.Writer, st daemon.StatusResponse) {
 	t.Style().Format.Header = text.FormatDefault
 	t.Style().Format.Footer = text.FormatDefault
 
-	header := table.Row{
-		"repo", "total", "files", "nodes", "edges",
-		"nodes_b", "edges_b", "search_b", "vectors_b",
+	// The workspace column only adds signal when at least one repo
+	// declares an explicit workspace (i.e. one that doesn't equal the
+	// repo prefix). Pure-default setups already see the prefix in
+	// column 1; printing the same string twice is just noise.
+	showWS := false
+	for _, r := range rows {
+		if r.Workspace != "" && r.Workspace != r.Prefix {
+			showWS = true
+			break
+		}
 	}
-	colConfigs := []table.ColumnConfig{
-		{Number: 1, Align: text.AlignLeft},
-		{Number: 2, Align: text.AlignRight},
-		{Number: 3, Align: text.AlignRight},
-		{Number: 4, Align: text.AlignRight},
-		{Number: 5, Align: text.AlignRight},
-		{Number: 6, Align: text.AlignRight},
-		{Number: 7, Align: text.AlignRight},
-		{Number: 8, Align: text.AlignRight},
-		{Number: 9, Align: text.AlignRight},
+
+	header := table.Row{"repo"}
+	colConfigs := []table.ColumnConfig{{Number: 1, Align: text.AlignLeft}}
+	if showWS {
+		header = append(header, "workspace")
+		colConfigs = append(colConfigs, table.ColumnConfig{Number: len(colConfigs) + 1, Align: text.AlignLeft})
+	}
+	header = append(header, "total", "files", "nodes", "edges",
+		"nodes_b", "edges_b", "search_b", "vectors_b")
+	for i := 0; i < 8; i++ {
+		colConfigs = append(colConfigs, table.ColumnConfig{Number: len(colConfigs) + 1, Align: text.AlignRight})
 	}
 	if showDisk {
 		header = append(header, "disk_b")
@@ -532,8 +544,15 @@ func renderDaemonRepos(w io.Writer, st daemon.StatusResponse) {
 	var attributed uint64
 	for _, r := range rows {
 		attributed += r.Memory.TotalBytes
-		row := table.Row{
-			r.Prefix,
+		row := table.Row{r.Prefix}
+		if showWS {
+			ws := r.Workspace
+			if r.WorkspaceProject != "" && r.WorkspaceProject != ws {
+				ws = ws + "/" + r.WorkspaceProject
+			}
+			row = append(row, ws)
+		}
+		row = append(row,
 			formatBytes(r.Memory.TotalBytes),
 			r.Files,
 			r.Nodes,
@@ -542,7 +561,7 @@ func renderDaemonRepos(w io.Writer, st daemon.StatusResponse) {
 			formatBytes(r.Memory.EdgesBytes),
 			formatBytes(r.Memory.SearchBytes),
 			formatBytes(r.Memory.VectorsBytes),
-		}
+		)
 		if showDisk {
 			row = append(row, formatBytes(r.Memory.DiskBytes))
 		}
@@ -552,9 +571,11 @@ func renderDaemonRepos(w io.Writer, st daemon.StatusResponse) {
 
 	if st.MemoryBytes > attributed {
 		other := st.MemoryBytes - attributed
-		footer := table.Row{
-			"other", formatBytes(other), "", "", "", "", "", "", "",
+		footer := table.Row{"other"}
+		if showWS {
+			footer = append(footer, "")
 		}
+		footer = append(footer, formatBytes(other), "", "", "", "", "", "", "")
 		if showDisk {
 			footer = append(footer, "")
 		}
@@ -562,6 +583,140 @@ func renderDaemonRepos(w io.Writer, st daemon.StatusResponse) {
 		t.AppendFooter(footer)
 	}
 
+	t.Render()
+}
+
+// renderDaemonWorkspaces prints the per-workspace rollup above the
+// repos table. When every workspace is a default singleton (each
+// repo in its own auto-named workspace), it emits a one-line hint
+// pointing at `gortex workspace set` instead of a wall-of-text
+// table that just duplicates the per-repo view.
+func renderDaemonWorkspaces(w io.Writer, st daemon.StatusResponse) {
+	if len(st.Workspaces) == 0 {
+		return
+	}
+	multiRepo := false
+	for _, ws := range st.Workspaces {
+		if len(ws.Repos) > 1 {
+			multiRepo = true
+			break
+		}
+	}
+
+	if !multiRepo {
+		// Compact form: tell the user the §4 boundary is in default
+		// mode and how to opt repos into a shared workspace. Avoids
+		// printing a 33-row table where every row says "1 repo".
+		_, _ = fmt.Fprintf(w,
+			"\nworkspaces: %d (one per repo, default — every repo is its own workspace)\n",
+			len(st.Workspaces))
+		_, _ = fmt.Fprintln(w,
+			"  Group repos into a shared workspace with `gortex workspace set <repo> <slug> --global`")
+		_, _ = fmt.Fprintln(w,
+			"  or `gortex workspace set-all <slug> --root <path> --global`. See `gortex workspace --help`.")
+		return
+	}
+
+	_, _ = fmt.Fprintln(w, "\nworkspaces:")
+	t := table.NewWriter()
+	t.SetOutputMirror(w)
+	t.SetStyle(table.StyleLight)
+	t.Style().Format.Header = text.FormatDefault
+	t.AppendHeader(table.Row{"workspace", "repos", "projects", "files", "nodes", "edges"})
+	t.SetColumnConfigs([]table.ColumnConfig{
+		{Number: 1, Align: text.AlignLeft},
+		{Number: 2, Align: text.AlignRight},
+		{Number: 3, Align: text.AlignLeft},
+		{Number: 4, Align: text.AlignRight},
+		{Number: 5, Align: text.AlignRight},
+		{Number: 6, Align: text.AlignRight},
+	})
+	for _, ws := range st.Workspaces {
+		projects := strings.Join(ws.Projects, ", ")
+		if len(projects) > 50 {
+			projects = projects[:47] + "..."
+		}
+		t.AppendRow(table.Row{ws.Slug, len(ws.Repos), projects, ws.Files, ws.Nodes, ws.Edges})
+	}
+	t.Render()
+}
+
+// renderDaemonSessions lists every connected MCP client. Skipped
+// when no sessions are registered — single-process stdio embeds
+// don't go through the daemon socket so they never show up here.
+func renderDaemonSessions(w io.Writer, st daemon.StatusResponse) {
+	if len(st.MCPSessions) == 0 {
+		return
+	}
+	_, _ = fmt.Fprintln(w, "\nMCP sessions:")
+	t := table.NewWriter()
+	t.SetOutputMirror(w)
+	t.SetStyle(table.StyleLight)
+	t.Style().Format.Header = text.FormatDefault
+	t.AppendHeader(table.Row{"id", "client", "version", "connected", "cwd"})
+	t.SetColumnConfigs([]table.ColumnConfig{
+		{Number: 1, Align: text.AlignLeft},
+		{Number: 2, Align: text.AlignLeft},
+		{Number: 3, Align: text.AlignLeft},
+		{Number: 4, Align: text.AlignRight},
+		{Number: 5, Align: text.AlignLeft},
+	})
+	for _, s := range st.MCPSessions {
+		client := s.ClientName
+		if client == "" {
+			client = "unknown"
+		}
+		t.AppendRow(table.Row{
+			s.ID,
+			client,
+			s.ClientVersion,
+			formatDuration(time.Duration(s.ConnectedSecs) * time.Second),
+			s.Cwd,
+		})
+	}
+	t.Render()
+}
+
+// renderDaemonServers shows the `~/.gortex/servers.toml` roster.
+// Skipped when no file is present — the daemon is in single-server
+// mode and there's nothing to list. The "local" column flags the
+// entry the multi-server router treats as this daemon itself; auth
+// is reported as "yes/no" (token values stay private to the
+// daemon).
+func renderDaemonServers(w io.Writer, st daemon.StatusResponse) {
+	if len(st.ConfiguredServers) == 0 {
+		return
+	}
+	_, _ = fmt.Fprintln(w, "\nconfigured servers (~/.gortex/servers.toml):")
+	t := table.NewWriter()
+	t.SetOutputMirror(w)
+	t.SetStyle(table.StyleLight)
+	t.Style().Format.Header = text.FormatDefault
+	t.AppendHeader(table.Row{"slug", "url", "local", "default", "auth", "workspaces"})
+	t.SetColumnConfigs([]table.ColumnConfig{
+		{Number: 1, Align: text.AlignLeft},
+		{Number: 2, Align: text.AlignLeft},
+		{Number: 3, Align: text.AlignCenter},
+		{Number: 4, Align: text.AlignCenter},
+		{Number: 5, Align: text.AlignCenter},
+		{Number: 6, Align: text.AlignLeft},
+	})
+	yesno := func(b bool) string {
+		if b {
+			return "yes"
+		}
+		return ""
+	}
+	for _, s := range st.ConfiguredServers {
+		t.AppendRow(table.Row{
+			s.Slug,
+			s.URL,
+			yesno(s.Local),
+			yesno(s.Default),
+			yesno(s.HasAuth),
+			strings.Join(s.Workspaces, ", "),
+		})
+	}
 	t.Render()
 }
 

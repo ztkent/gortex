@@ -67,6 +67,15 @@ func (d *mcpDispatcher) Dispatch(ctx context.Context, sess *daemon.Session, fram
 
 	ctx = gortexmcp.WithSessionID(ctx, sess.ID)
 
+	// Identify the MCP client. The handshake's ClientName is the
+	// proxy's env-var-based guess (often "unknown" when no known env
+	// var matched). The MCP `initialize` request carries the
+	// authoritative `clientInfo.name` and `clientInfo.version`, so we
+	// snoop it here and overwrite the session metadata. Subsequent
+	// status calls then show "claude-code 1.0.42" instead of
+	// "unknown".
+	d.maybeSnoopInitialize(sess, frame)
+
 	// spec-launch.md §11 step P — for tools/call frames carrying a
 	// workspace scope or a cwd that routes elsewhere, the daemon
 	// proxies to the right server instead of running locally. Other
@@ -200,6 +209,40 @@ func (d *mcpDispatcher) tryProxyToolCall(ctx context.Context, sess *daemon.Sessi
 	}
 	buf, _ := json.Marshal(resp)
 	return buf, true
+}
+
+// maybeSnoopInitialize parses one inbound JSON-RPC frame and, if
+// it's an MCP `initialize` request carrying `params.clientInfo`,
+// updates the session's ClientName/ClientVersion. Non-initialize
+// frames are ignored. Errors swallowed — this is best-effort
+// metadata enrichment, not a correctness path.
+func (d *mcpDispatcher) maybeSnoopInitialize(sess *daemon.Session, frame []byte) {
+	if sess == nil || len(frame) == 0 {
+		return
+	}
+	var peek struct {
+		Method string `json:"method"`
+		Params struct {
+			ClientInfo struct {
+				Name    string `json:"name"`
+				Version string `json:"version"`
+			} `json:"clientInfo"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(frame, &peek); err != nil {
+		return
+	}
+	if peek.Method != "initialize" {
+		return
+	}
+	if peek.Params.ClientInfo.Name == "" && peek.Params.ClientInfo.Version == "" {
+		return
+	}
+	sess.SetClientInfo(peek.Params.ClientInfo.Name, peek.Params.ClientInfo.Version)
+	d.logger.Info("daemon: identified MCP client",
+		zap.String("session_id", sess.ID),
+		zap.String("client", peek.Params.ClientInfo.Name),
+		zap.String("version", peek.Params.ClientInfo.Version))
 }
 
 // notTrackedError builds a JSON-RPC error frame the agent surfaces to
