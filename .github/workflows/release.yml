@@ -128,7 +128,11 @@ jobs:
       actions: read
       id-token: write
       contents: write
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@f7dd8c54c2067bafc12ca7a55595d5ee9b75204a # v2.1.0
+    # Pinned by tag, not SHA: the SLSA generator verifies its builder
+    # binary against the tag name in its workflow ref, so SHA pinning
+    # breaks the integrity check (exits 27 with SUCCESS=false). Scorecard
+    # exempts slsa-framework reusable workflows from the SHA-pin rule.
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
     with:
       base64-subjects: ${{ needs.release.outputs.hashes }}
       upload-assets: true
