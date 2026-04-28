@@ -38,6 +38,64 @@ const (
 	CommunitiesEndMarker   = "<!-- gortex:communities:end -->"
 )
 
+// GlobalRulesStartMarker / GlobalRulesEndMarker fence the rule block
+// that `gortex install` merges into ~/.claude/CLAUDE.md. The block is
+// idempotent (re-running install replaces it in place) and removable
+// (user can delete the marked region by hand without other side
+// effects). Distinct from the communities markers above because this
+// block lives at user level and survives every project init.
+const (
+	GlobalRulesStartMarker = "<!-- gortex:rules:start -->"
+	GlobalRulesEndMarker   = "<!-- gortex:rules:end -->"
+)
+
+// GlobalInstructionsBody is the rule block written into the
+// user-level ~/.claude/CLAUDE.md by `gortex install`. Mirrors
+// InstructionsBody (the per-project rules) but trimmed to the
+// always-applicable parts — multi-repo specifics, project-skill
+// generation, and contracts hygiene are project-scoped and stay in
+// per-repo CLAUDE.md.
+const GlobalInstructionsBody = `## MANDATORY: Use Gortex MCP tools instead of Read/Grep/Glob
+
+A Gortex daemon is configured machine-wide via the ` + "`gortex` MCP server" + `. Whenever you are operating on indexed source code (any repo registered with the daemon — check ` + "`gortex daemon status`" + `), you MUST prefer graph queries over file reads. PreToolUse hooks deny ` + "`Read`" + ` / ` + "`Grep`" + ` / ` + "`Glob`" + ` against indexed source — the deny message names the right tool.
+
+### Search and Navigation
+
+| Instead of...                         | You MUST use...                          |
+|---------------------------------------|------------------------------------------|
+| ` + "`Grep`" + ` / ` + "`grep`" + ` / ` + "`rg`" + ` for a symbol      | ` + "`search_symbols`" + ` (BM25 + camelCase-aware)|
+| ` + "`Grep`" + ` for references                 | ` + "`find_usages`" + ` (zero false positives)     |
+| ` + "`Grep`" + ` to find callers                | ` + "`get_callers`" + ` / ` + "`get_call_chain`" + `         |
+| ` + "`Glob`" + ` over source files (` + "`**/*.go`" + `)  | ` + "`get_repo_outline`" + ` / ` + "`search_symbols`" + `    |
+| Multiple ` + "`Read`" + ` calls to explore      | ` + "`smart_context`" + ` (one call)               |
+
+### Reading Source
+
+| Instead of...                         | You MUST use...                          |
+|---------------------------------------|------------------------------------------|
+| ` + "`Read`" + ` whole file for one function    | ` + "`get_symbol_source`" + ` (80% fewer tokens)   |
+| ` + "`Read`" + ` to understand a file           | ` + "`get_file_summary`" + ` / ` + "`get_editing_context`" + ` |
+| ` + "`Read`" + ` to check a signature           | ` + "`get_symbol`" + ` (signature in ` + "`meta.signature`" + `) |
+| ` + "`Read`" + ` to trace calls                 | ` + "`get_call_chain`" + ` / ` + "`get_callers`" + `         |
+
+### Editing and Refactoring
+
+| Instead of...                         | You MUST use...                          |
+|---------------------------------------|------------------------------------------|
+| ` + "`Edit`" + ` / ` + "`Write`" + ` whole file rewrite  | ` + "`edit_file`" + ` (Gortex MCP — no pre-Read required) |
+| Read→Edit roundtrip for one symbol    | ` + "`edit_symbol`" + ` (edit by ID)               |
+| Manual find-and-replace for renames   | ` + "`rename_symbol`" + ` (cross-file refs)        |
+| Sequencing multi-file edits yourself  | ` + "`batch_edit`" + ` (dependency-ordered)        |
+
+### Token Economy
+
+For list-shaped responses (` + "`search_symbols`" + `, ` + "`find_usages`" + `, ` + "`analyze`" + `, ` + "`batch_symbols`" + `, ` + "`get_callers`" + `, ` + "`get_call_chain`" + `, ` + "`get_dependencies`" + `, ` + "`get_dependents`" + `, ` + "`find_implementations`" + `, ` + "`get_file_summary`" + `, ` + "`get_editing_context`" + `, ` + "`smart_context`" + `, ` + "`contracts`" + `), pass ` + "`format: \"gcx\"`" + ` to get GCX1 compact wire format — round-trippable, ~27% fewer tokens. Decode with ` + "`@gortex/wire`" + ` (npm) or ` + "`github.com/gortexhq/gcx-go`" + ` (Go).
+
+### Session Start
+
+The SessionStart hook injects daemon status (tracked repos, cwd coverage, ready/warmup state). If you see "daemon is not running" — run ` + "`gortex daemon start --detach`" + ` and re-run the task. If you see "cwd is not covered by any tracked repo" — graph tools won't be available for that directory.
+`
+
 // InstructionsBody is the shared rule block every adapter writes to
 // its agent's instructions file. Tool names in the tables (Read, Grep)
 // are Claude-Code-specific flavour; models outside Claude Code read

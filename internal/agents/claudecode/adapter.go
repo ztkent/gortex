@@ -50,8 +50,12 @@ func (a *Adapter) Plan(env agents.Env) (*agents.Plan, error) {
 		// codebase-agnostic, so duplicating them into every repo is
 		// wasted disk and drift risk.
 		p.Files = append(p.Files, agents.FileAction{Path: userClaudeJSONPath(env.Home), Action: agents.ActionWouldMerge, Keys: []string{"mcpServers"}})
+		p.Files = append(p.Files, agents.FileAction{Path: userSettingsPath(env.Home), Action: agents.ActionWouldMerge, Keys: []string{"permissions"}})
 		if env.InstallHooks {
 			p.Files = append(p.Files, agents.FileAction{Path: userSettingsLocalPath(env.Home), Action: agents.ActionWouldMerge, Keys: []string{"hooks"}})
+		}
+		if env.InstallGlobalInstructions {
+			p.Files = append(p.Files, agents.FileAction{Path: userClaudeMdPath(env.Home), Action: agents.ActionWouldMerge, Keys: []string{"gortex-rules-block"}})
 		}
 		if env.Home != "" {
 			for name := range GlobalSkills {
@@ -191,13 +195,46 @@ func (a *Adapter) applyGlobal(env agents.Env, opts agents.ApplyOpts, res *agents
 	}
 	res.Files = append(res.Files, action)
 
-	// 2. ~/.claude/settings.local.json — user-level hooks.
+	// 2. ~/.claude/settings.json — user-level MCP permission allowlist.
+	// Mirrors the project-mode call so `mcp__gortex__*` is auto-allowed
+	// machine-wide; without this every Gortex tool call shows an
+	// approval prompt until the user adds the rule by hand.
+	permAction, err := installPermissions(w, userSettingsPath(env.Home), opts)
+	if err != nil {
+		logWarn(w, "could not install global permissions: %v", err)
+	}
+	res.Files = append(res.Files, permAction)
+
+	// 3. ~/.claude/settings.local.json — user-level hooks.
 	if env.InstallHooks {
 		hookAction, err := InstallHook(w, userSettingsLocalPath(env.Home), opts)
 		if err != nil {
 			return fmt.Errorf("global hooks: %w", err)
 		}
 		res.Files = append(res.Files, hookAction)
+	}
+
+	// 4. ~/.claude/CLAUDE.md — merge the rule block. Without this,
+	// the rule only surfaces at deny-time (PreToolUse) which is
+	// late: the agent has already wasted a turn on a forbidden
+	// tool. The marker block keeps user content intact and is
+	// regeneratable on re-install.
+	if env.InstallGlobalInstructions {
+		claudeMdPath := userClaudeMdPath(env.Home)
+		mdAction, err := agents.UpsertMarkedBlock(w, claudeMdPath, agents.GlobalInstructionsBody,
+			agents.GlobalRulesStartMarker, agents.GlobalRulesEndMarker, opts)
+		if err != nil {
+			logWarn(w, "could not install global CLAUDE.md: %v", err)
+		} else {
+			logf(w, "[gortex install] wrote rule block to %s", claudeMdPath)
+		}
+		// UpsertMarkedBlock is shared with the per-repo communities
+		// block, so it labels every action with "communities-block".
+		// Relabel here so the install report distinguishes the two.
+		if mdAction.Keys != nil {
+			mdAction.Keys = []string{"gortex-rules-block"}
+		}
+		res.Files = append(res.Files, mdAction)
 	}
 
 	// 3. ~/.claude/skills/gortex-*/SKILL.md — curated tool-usage
@@ -339,6 +376,21 @@ func userClaudeJSONPath(home string) string {
 
 func userSettingsLocalPath(home string) string {
 	return filepath.Join(home, ".claude", "settings.local.json")
+}
+
+// userSettingsPath is the user-level counterpart to
+// `.claude/settings.json` in a project. Permissions live here (not
+// in settings.local.json) so they survive when the user wipes the
+// "local" overrides file.
+func userSettingsPath(home string) string {
+	return filepath.Join(home, ".claude", "settings.json")
+}
+
+// userClaudeMdPath is the machine-wide CLAUDE.md Claude Code reads on
+// every session, regardless of cwd. We merge a marker-fenced rule
+// block into it so the agent sees the Gortex rules from turn one.
+func userClaudeMdPath(home string) string {
+	return filepath.Join(home, ".claude", "CLAUDE.md")
 }
 
 func logf(w io.Writer, format string, args ...any) {

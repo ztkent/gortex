@@ -32,5 +32,7 @@ func Run(port int) {
 		runPreCompact(data, port)
 	case "Stop":
 		runPostTask(data, port)
+	case "SessionStart":
+		runSessionStart(data)
 	}
 }

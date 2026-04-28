@@ -80,6 +80,12 @@ type Env struct {
 	// currently honours it.
 	InstallHooks bool
 
+	// InstallGlobalInstructions toggles whether `gortex install`
+	// merges the rule block into ~/.claude/CLAUDE.md. Only honoured
+	// in ModeGlobal; ignored elsewhere. Default true so a fresh
+	// install delivers full enforcement; set false by --no-claude-md.
+	InstallGlobalInstructions bool
+
 	// AnalyzeRepo is true when the caller wants a dynamic CLAUDE.md
 	// preamble built from a fresh index. Only Claude Code uses it.
 	AnalyzeRepo bool

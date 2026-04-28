@@ -102,6 +102,7 @@ func TestClaudeCodeProjectModeCreatesCanonicalArtifacts(t *testing.T) {
 func TestClaudeCodeGlobalModeWritesUserFiles(t *testing.T) {
 	env, _ := agentstest.NewEnv(t)
 	env.Mode = agents.ModeGlobal
+	env.InstallGlobalInstructions = true
 	a := New()
 
 	res, err := a.Apply(env, agents.ApplyOpts{})
@@ -115,6 +116,7 @@ func TestClaudeCodeGlobalModeWritesUserFiles(t *testing.T) {
 	// User-level files exist.
 	expected := []string{
 		filepath.Join(env.Home, ".claude.json"),
+		filepath.Join(env.Home, ".claude", "settings.json"),
 		filepath.Join(env.Home, ".claude", "settings.local.json"),
 	}
 	for name := range SlashCommands {
@@ -129,6 +131,32 @@ func TestClaudeCodeGlobalModeWritesUserFiles(t *testing.T) {
 		}
 	}
 
+	// settings.json must contain the mcp__gortex__* permission rule
+	// so MCP tool calls don't prompt for approval each session.
+	settingsPath := filepath.Join(env.Home, ".claude", "settings.json")
+	body, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", settingsPath, err)
+	}
+	if !strings.Contains(string(body), "mcp__gortex__*") {
+		t.Errorf("expected mcp__gortex__* in %s, got:\n%s", settingsPath, body)
+	}
+
+	// CLAUDE.md must contain the marker-fenced rule block when
+	// InstallGlobalInstructions is true.
+	claudeMd := filepath.Join(env.Home, ".claude", "CLAUDE.md")
+	mdBody, err := os.ReadFile(claudeMd)
+	if err != nil {
+		t.Fatalf("read %s: %v", claudeMd, err)
+	}
+	if !strings.Contains(string(mdBody), agents.GlobalRulesStartMarker) ||
+		!strings.Contains(string(mdBody), agents.GlobalRulesEndMarker) {
+		t.Errorf("expected gortex marker block in %s, got:\n%s", claudeMd, mdBody)
+	}
+	if !strings.Contains(string(mdBody), "MANDATORY: Use Gortex MCP tools") {
+		t.Errorf("expected rule body in %s, got:\n%s", claudeMd, mdBody)
+	}
+
 	// Per-repo files should *not* exist under global mode.
 	for _, p := range []string{
 		filepath.Join(env.Root, ".mcp.json"),
@@ -138,6 +166,59 @@ func TestClaudeCodeGlobalModeWritesUserFiles(t *testing.T) {
 		if _, err := os.Stat(p); err == nil {
 			t.Errorf("global mode unexpectedly wrote per-repo file %s", p)
 		}
+	}
+}
+
+// TestClaudeCodeGlobalMode_NoClaudeMd skips the rule block when the
+// caller opts out via InstallGlobalInstructions=false (i.e.
+// `gortex install --no-claude-md`).
+func TestClaudeCodeGlobalMode_NoClaudeMd(t *testing.T) {
+	env, _ := agentstest.NewEnv(t)
+	env.Mode = agents.ModeGlobal
+	env.InstallGlobalInstructions = false
+	a := New()
+
+	if _, err := a.Apply(env, agents.ApplyOpts{}); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	claudeMd := filepath.Join(env.Home, ".claude", "CLAUDE.md")
+	if _, err := os.Stat(claudeMd); err == nil {
+		t.Errorf("--no-claude-md ⇒ %s should not exist", claudeMd)
+	}
+}
+
+// TestClaudeCodeGlobalMode_PreservesUserContent verifies the rule
+// block is merged with marker fences without clobbering anything
+// that already lives in ~/.claude/CLAUDE.md.
+func TestClaudeCodeGlobalMode_PreservesUserContent(t *testing.T) {
+	env, _ := agentstest.NewEnv(t)
+	env.Mode = agents.ModeGlobal
+	env.InstallGlobalInstructions = true
+
+	claudeMd := filepath.Join(env.Home, ".claude", "CLAUDE.md")
+	if err := os.MkdirAll(filepath.Dir(claudeMd), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pre := "# My personal Claude rules\n\nAlways respond in haiku.\n"
+	if err := os.WriteFile(claudeMd, []byte(pre), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	a := New()
+	if _, err := a.Apply(env, agents.ApplyOpts{}); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	body, err := os.ReadFile(claudeMd)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !strings.Contains(string(body), "Always respond in haiku.") {
+		t.Errorf("user content was clobbered, got:\n%s", body)
+	}
+	if !strings.Contains(string(body), agents.GlobalRulesStartMarker) {
+		t.Errorf("rule block missing, got:\n%s", body)
 	}
 }
 

@@ -25,6 +25,8 @@ var (
 	installForce       bool
 	installHooks       = true
 	installNoHooks     bool
+	installClaudeMd    = true
+	installNoClaudeMd  bool
 	installStartDaemon bool
 	installTrackRepo   bool
 	installTrackPath   string
@@ -51,6 +53,8 @@ func init() {
 	installCmd.Flags().BoolVar(&installForce, "force", false, "overwrite keys we would otherwise preserve during a merge")
 	installCmd.Flags().BoolVar(&installHooks, "hooks", true, "install user-level Claude Code hooks; use --no-hooks to skip")
 	installCmd.Flags().BoolVar(&installNoHooks, "no-hooks", false, "skip user-level Claude Code hooks (inverse of --hooks)")
+	installCmd.Flags().BoolVar(&installClaudeMd, "claude-md", true, "merge Gortex rule block into ~/.claude/CLAUDE.md; use --no-claude-md to skip")
+	installCmd.Flags().BoolVar(&installNoClaudeMd, "no-claude-md", false, "skip the ~/.claude/CLAUDE.md rule block (inverse of --claude-md)")
 	installCmd.Flags().BoolVar(&installStartDaemon, "start", false, "start the daemon immediately after setup (detached)")
 	installCmd.Flags().BoolVar(&installTrackRepo, "track", false, "track a repository with the daemon after setup")
 	installCmd.Flags().StringVar(&installTrackPath, "track-path", ".", "repository to track when --track is set (default: current directory)")
@@ -62,6 +66,9 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 	if installNoHooks {
 		installHooks = false
 	}
+	if installNoClaudeMd {
+		installClaudeMd = false
+	}
 
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -71,16 +78,23 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("gortex install needs a home directory; $HOME is empty")
 	}
 
+	if installClaudeMd && !installDryRun {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
+			"[gortex install] will merge a Gortex rule block into %s — use --no-claude-md to skip\n",
+			filepath.Join(home, ".claude", "CLAUDE.md"))
+	}
+
 	env := agents.Env{
 		// Root is still set so adapters that write to the daemon
 		// config use the right cwd for "this is where I was run
 		// from", but no per-repo files get written in ModeGlobal.
-		Root:         mustAbs(installTrackPath),
-		Home:         home,
-		HookCommand:  claudecode.ResolveHookCommand(cmd.ErrOrStderr()),
-		Mode:         agents.ModeGlobal,
-		InstallHooks: installHooks,
-		Stderr:       cmd.ErrOrStderr(),
+		Root:                      mustAbs(installTrackPath),
+		Home:                      home,
+		HookCommand:               claudecode.ResolveHookCommand(cmd.ErrOrStderr()),
+		Mode:                      agents.ModeGlobal,
+		InstallHooks:              installHooks,
+		InstallGlobalInstructions: installClaudeMd,
+		Stderr:                    cmd.ErrOrStderr(),
 	}
 
 	registry := buildRegistry()

@@ -11,6 +11,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/zzet/gortex/internal/daemon"
 )
 
 // HookInput is the JSON structure Claude Code sends to PreToolUse hooks via stdin.
@@ -101,6 +103,10 @@ func enrich(input HookInput, port int) enrichResult {
 		return enrichTask(input.ToolInput, port)
 	case "Bash":
 		return enrichBash(input.ToolInput, port)
+	case "Edit":
+		return enrichEdit(input.ToolInput, port)
+	case "Write":
+		return enrichWrite(input.ToolInput, port)
 	default:
 		return enrichResult{}
 	}
@@ -378,40 +384,78 @@ func enrichBash(toolInput map[string]any, port int) enrichResult {
 	return enrichResult{}
 }
 
-// enrichGlob suggests graph alternatives for file discovery.
-// Glob is not blocked — it's needed for file pattern matching.
+// daemonReachableFn is the seam tests use to fake daemon availability
+// without a real socket. Production reads daemon.IsRunning.
+var daemonReachableFn = daemon.IsRunning
+
+// enrichGlob denies "list all source files of extension X" patterns
+// when the daemon is reachable — those are exactly the queries the
+// graph already answers (via `get_repo_outline` / `search_symbols`).
+// Name-based patterns (e.g. `**/handler*.go`, `*test*.ts`) get soft
+// guidance only because grep-style filename search has no clean
+// graph equivalent. When the daemon is unreachable, every shape
+// degrades to soft guidance — no daemon means no enforcement.
 func enrichGlob(toolInput map[string]any) enrichResult {
 	pattern, ok := toolInput["pattern"].(string)
 	if !ok || pattern == "" {
 		return enrichResult{}
 	}
-
-	// Only intervene for source file patterns.
-	sourceExts := []string{
-		".go", ".ts", ".tsx", ".js", ".jsx", ".py", ".rs", ".java",
-		".kt", ".scala", ".swift", ".php", ".rb", ".ex", ".c", ".cpp",
-		".cs", ".dart", ".lua", ".zig", ".ml", ".hs",
-	}
-	isSourceGlob := false
-	lower := strings.ToLower(pattern)
-	for _, ext := range sourceExts {
-		if strings.HasSuffix(lower, ext) {
-			isSourceGlob = true
-			break
-		}
-	}
-	if !isSourceGlob {
+	if !looksLikeSourceFile(pattern) {
 		return enrichResult{}
 	}
 
-	return enrichResult{
-		context: "[Gortex] PREFER graph tools over Glob for source files:\n" +
-			"  - To find a symbol by name: use `search_symbols`\n" +
-			"  - To find files containing a symbol: use `search_symbols` (returns file paths)\n" +
-			"  - To understand file structure: use `get_file_summary`\n" +
-			"  - For task-level file discovery: use `smart_context`\n" +
-			gcxTip,
+	guidance := defaultGlobGuidance()
+
+	// Greedy source-ext patterns (`**/*.go`, `*.ts`) are the
+	// "enumerate every source file" shape. Hard-deny only when the
+	// daemon is up — we can't redirect to graph tools that aren't
+	// answering.
+	if isGreedySourceGlob(pattern) && daemonReachableFn() {
+		var b strings.Builder
+		fmt.Fprintf(&b, "[Gortex] BLOCKED: Glob `%s` enumerates source files. The graph already indexes them — use:\n", pattern)
+		b.WriteString("  - `get_repo_outline` — every file with symbol counts\n")
+		b.WriteString("  - `search_symbols` — name-based lookup that returns file paths\n")
+		b.WriteString("  - `get_file_summary` — when you have a specific file in mind\n")
+		b.WriteString(gcxTip)
+		b.WriteString("If you genuinely need a file-system listing, run `find` or `ls` via Bash with a specific filename component — Glob deny only triggers on bare extension wildcards.")
+		return enrichResult{deny: true, reason: b.String()}
 	}
+
+	return enrichResult{context: guidance}
+}
+
+// defaultGlobGuidance is the soft-guidance message returned when a
+// Glob pattern targets source files but isn't a greedy "all of this
+// extension" pattern, or when the daemon is unreachable.
+func defaultGlobGuidance() string {
+	return "[Gortex] PREFER graph tools over Glob for source files:\n" +
+		"  - To find a symbol by name: use `search_symbols`\n" +
+		"  - To find files containing a symbol: use `search_symbols` (returns file paths)\n" +
+		"  - To understand file structure: use `get_file_summary`\n" +
+		"  - For task-level file discovery: use `smart_context`\n" +
+		gcxTip
+}
+
+// isGreedySourceGlob returns true when the pattern is a bare
+// extension wildcard like `*.go`, `**/*.ts`, `src/**/*.tsx`. The
+// classifier looks at the segment between the last `/` and the
+// extension: if it's just `*` (or `**` collapsed), the agent is
+// asking for "every source file of this kind" — exactly the shape
+// `get_repo_outline` answers. Anything else (a literal filename, a
+// substring wildcard like `*test*.go`) is treated as name-based
+// search and not denied.
+func isGreedySourceGlob(pattern string) bool {
+	last := pattern
+	if idx := strings.LastIndex(pattern, "/"); idx >= 0 {
+		last = pattern[idx+1:]
+	}
+	dot := strings.LastIndex(last, ".")
+	if dot <= 0 {
+		return false
+	}
+	stem := last[:dot]
+	// Bare wildcard stems indicate "all files of this extension".
+	return stem == "*" || stem == "**"
 }
 
 func queryGortex(port int, path string) (string, error) {
@@ -431,6 +475,84 @@ func queryGortex(port int, path string) (string, error) {
 		return "", err
 	}
 	return string(body), nil
+}
+
+// editBlockingEnvVar gates Edit/Write enforcement. We ship behind a
+// flag because Edit/Write redirects are higher-blast-radius than
+// Read/Grep — false positives stop the agent from making any
+// progress at all. Once we have field telemetry showing the
+// classifier is reliable, the gate can flip default-on or be
+// removed.
+const editBlockingEnvVar = "GORTEX_HOOK_BLOCK_EDIT"
+
+// editBlockingEnabled reports whether the env-gated Edit/Write
+// redirect is on. Anything besides empty/"0"/"false"/"no"/"off"
+// enables.
+func editBlockingEnabled() bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv(editBlockingEnvVar)))
+	switch v {
+	case "", "0", "false", "no", "off":
+		return false
+	default:
+		return true
+	}
+}
+
+// enrichEdit redirects whole-file edits of indexed source to the
+// Gortex MCP edit tools. Behind GORTEX_HOOK_BLOCK_EDIT until the
+// classifier is proven; without it the hook is a no-op so Edit
+// behaves exactly as it did pre-feature.
+func enrichEdit(toolInput map[string]any, port int) enrichResult {
+	if !editBlockingEnabled() {
+		return enrichResult{}
+	}
+	filePath, ok := toolInput["file_path"].(string)
+	if !ok || filePath == "" {
+		return enrichResult{}
+	}
+	if !looksLikeSourceFile(filePath) {
+		return enrichResult{}
+	}
+	indexed, _ := queryFileIndexed(port, filePath)
+	if !indexed {
+		return enrichResult{}
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "[Gortex] BLOCKED: Edit of %s (indexed source). Use Gortex MCP edit tools — they don't require a prior Read and update the graph atomically:\n", filePath)
+	b.WriteString("  - `edit_symbol` — change one symbol's body by ID (cleanest for one-function changes)\n")
+	b.WriteString("  - `edit_file` — whole-file replace, no Read precondition\n")
+	b.WriteString("  - `rename_symbol` — coordinated rename across all references\n")
+	b.WriteString("  - `batch_edit` — multi-file edits in dependency order\n\n")
+	b.WriteString("To bypass this redirect: unset GORTEX_HOOK_BLOCK_EDIT, or target a file outside the tracked repos.\n")
+	return enrichResult{deny: true, reason: b.String()}
+}
+
+// enrichWrite mirrors enrichEdit for whole-file Write. New files
+// (not yet indexed) pass through; rewrites of existing indexed
+// files are redirected to `edit_file` / `write_file`.
+func enrichWrite(toolInput map[string]any, port int) enrichResult {
+	if !editBlockingEnabled() {
+		return enrichResult{}
+	}
+	filePath, ok := toolInput["file_path"].(string)
+	if !ok || filePath == "" {
+		return enrichResult{}
+	}
+	if !looksLikeSourceFile(filePath) {
+		return enrichResult{}
+	}
+	indexed, _ := queryFileIndexed(port, filePath)
+	if !indexed {
+		return enrichResult{}
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "[Gortex] BLOCKED: Write of %s (indexed source — would overwrite existing tracked file). Use:\n", filePath)
+	b.WriteString("  - `write_file` — whole-file write through Gortex (re-indexes after)\n")
+	b.WriteString("  - `edit_file` — when you want a delta-style replace\n\n")
+	b.WriteString("To bypass: unset GORTEX_HOOK_BLOCK_EDIT, or target a path outside tracked repos.\n")
+	return enrichResult{deny: true, reason: b.String()}
 }
 
 func looksLikeSourceFile(path string) bool {

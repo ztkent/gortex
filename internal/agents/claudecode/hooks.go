@@ -16,9 +16,12 @@ import (
 
 // CurrentPreToolUseMatcher is the canonical matcher pattern we bake
 // into Claude Code's PreToolUse hook. Older versions used
-// "Read|Grep", "Read|Grep|Glob", or "Read|Grep|Glob|Task";
-// upgradeGortexMatcher rewrites those in place.
-const CurrentPreToolUseMatcher = "Read|Grep|Glob|Task|Bash"
+// "Read|Grep", "Read|Grep|Glob", "Read|Grep|Glob|Task", or
+// "Read|Grep|Glob|Task|Bash"; upgradeGortexMatcher rewrites those in
+// place. Edit and Write are included so the hook can redirect
+// whole-file rewrites of indexed source to the Gortex MCP edit
+// tools (gated by GORTEX_HOOK_BLOCK_EDIT in the hook itself).
+const CurrentPreToolUseMatcher = "Read|Grep|Glob|Task|Bash|Edit|Write"
 
 // ResolveHookCommand returns the shell command to bake into Claude
 // Code's hook config. It prefers the `gortex` binary on PATH so
@@ -124,9 +127,10 @@ func upgradeGortexMatcher(hooks map[string]any) bool {
 		return false
 	}
 	legacyMatchers := map[string]bool{
-		"Read|Grep":           true,
-		"Read|Grep|Glob":      true,
-		"Read|Grep|Glob|Task": true,
+		"Read|Grep":                true,
+		"Read|Grep|Glob":           true,
+		"Read|Grep|Glob|Task":      true,
+		"Read|Grep|Glob|Task|Bash": true,
 	}
 	upgraded := false
 	for _, h := range pre {

@@ -5,30 +5,95 @@ import (
 	"testing"
 )
 
-func TestEnrichGlob_SourcePattern(t *testing.T) {
+func withDaemonReachable(t *testing.T, reachable bool) {
+	t.Helper()
+	prev := daemonReachableFn
+	daemonReachableFn = func() bool { return reachable }
+	t.Cleanup(func() { daemonReachableFn = prev })
+}
+
+func TestEnrichGlob_GreedySourcePattern_DaemonUp_Denies(t *testing.T) {
+	withDaemonReachable(t, true)
 	result := enrichGlob(map[string]any{"pattern": "**/*.go"})
+	if !result.deny {
+		t.Fatal("expected deny for greedy source glob with daemon up")
+	}
+	if !strings.Contains(result.reason, "BLOCKED") {
+		t.Errorf("expected BLOCKED in reason, got: %s", result.reason)
+	}
+	if !strings.Contains(result.reason, "get_repo_outline") {
+		t.Errorf("expected get_repo_outline in reason, got: %s", result.reason)
+	}
+}
+
+func TestEnrichGlob_GreedySourcePattern_DaemonDown_Soft(t *testing.T) {
+	withDaemonReachable(t, false)
+	result := enrichGlob(map[string]any{"pattern": "**/*.go"})
+	if result.deny {
+		t.Fatal("daemon down ⇒ no enforcement; expected soft guidance")
+	}
 	if result.context == "" {
-		t.Fatal("expected guidance for source glob pattern, got empty")
+		t.Fatal("expected soft guidance text, got empty")
 	}
 	if !strings.Contains(result.context, "search_symbols") {
 		t.Error("expected guidance to mention search_symbols")
 	}
-	if !strings.Contains(result.context, "PREFER graph tools") {
-		t.Error("expected PREFER graph tools header")
+}
+
+func TestEnrichGlob_NamedSourcePattern_NeverDenies(t *testing.T) {
+	withDaemonReachable(t, true)
+	cases := []string{
+		"**/handler*.go",
+		"*test*.ts",
+		"**/Server.go",
+		"src/**/component_*.tsx",
+	}
+	for _, p := range cases {
+		result := enrichGlob(map[string]any{"pattern": p})
+		if result.deny {
+			t.Errorf("name-based pattern %q should not deny, got reason: %s", p, result.reason)
+		}
+		if result.context == "" {
+			t.Errorf("name-based pattern %q should have soft guidance", p)
+		}
 	}
 }
 
 func TestEnrichGlob_NonSourcePattern(t *testing.T) {
+	withDaemonReachable(t, true)
 	result := enrichGlob(map[string]any{"pattern": "**/*.json"})
-	if result.context != "" {
-		t.Errorf("expected empty for non-source glob, got: %s", result.context)
+	if result.context != "" || result.deny {
+		t.Errorf("expected empty for non-source glob, got: ctx=%q deny=%v", result.context, result.deny)
 	}
 }
 
 func TestEnrichGlob_EmptyPattern(t *testing.T) {
 	result := enrichGlob(map[string]any{"pattern": ""})
-	if result.context != "" {
-		t.Errorf("expected empty for empty pattern, got: %s", result.context)
+	if result.context != "" || result.deny {
+		t.Errorf("expected empty for empty pattern, got: ctx=%q deny=%v", result.context, result.deny)
+	}
+}
+
+func TestIsGreedySourceGlob(t *testing.T) {
+	cases := []struct {
+		pattern string
+		want    bool
+	}{
+		{"*.go", true},
+		{"**/*.go", true},
+		{"src/**/*.tsx", true},
+		{"**/handler.go", false},
+		{"**/handler*.go", false},
+		{"*test*.ts", false},
+		{"foo.go", false}, // not a wildcard
+		{"", false},
+		{"**/*", false}, // no extension
+	}
+	for _, c := range cases {
+		got := isGreedySourceGlob(c.pattern)
+		if got != c.want {
+			t.Errorf("isGreedySourceGlob(%q) = %v, want %v", c.pattern, got, c.want)
+		}
 	}
 }
 
