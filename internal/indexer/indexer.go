@@ -57,19 +57,19 @@ type Indexer struct {
 	// When empty, the indexer operates in single-repo mode (backward compatible).
 	repoPrefix string
 
-	// workspaceID is the §4.2 hard graph boundary slug for this repo.
+	// workspaceID is the hard graph boundary slug for this repo.
 	// Stamped onto every node emitted by this indexer via applyRepoPrefix
 	// so query-time scoping doesn't have to look it up by repo prefix.
 	// Defaults at the MultiIndexer layer to the per-repo `.gortex.yaml`
 	// `workspace:` slug, falling back to repoPrefix when no slug is
-	// declared (so configs that predate the §4 design keep working).
+	// declared (so legacy configs keep working).
 	workspaceID string
 
-	// projectID is the §4.2 soft sub-boundary slug. Defaults to the
-	// repo prefix in single-project repos. Monorepos resolve a per-file
+	// projectID is the soft sub-boundary slug. Defaults to the repo
+	// prefix in single-project repos. Monorepos resolve a per-file
 	// projectID via the `projects[]` paths-glob mapping in
-	// `.gortex.yaml`; until that lookup is wired in (Step E/F), every
-	// node from this indexer carries the repo-default value.
+	// `.gortex.yaml`; until that lookup is wired in, every node from
+	// this indexer carries the repo-default value.
 	projectID string
 
 	// contractRegistry holds detected API contracts (HTTP routes, gRPC, etc.).
@@ -343,8 +343,8 @@ func (idx *Indexer) SetRepoPrefix(prefix string) { idx.repoPrefix = prefix }
 // RepoPrefix returns the current repository prefix.
 func (idx *Indexer) RepoPrefix() string { return idx.repoPrefix }
 
-// SetWorkspaceID sets the §4.2 workspace slug stamped onto nodes
-// emitted by this indexer. Empty means "no workspace declared" — the
+// SetWorkspaceID sets the workspace slug stamped onto nodes emitted
+// by this indexer. Empty means "no workspace declared" — the
 // applyRepoPrefix path will fall back to RepoPrefix so multi-repo
 // configs without `.gortex.yaml::workspace:` keep working.
 func (idx *Indexer) SetWorkspaceID(id string) { idx.workspaceID = id }
@@ -352,10 +352,10 @@ func (idx *Indexer) SetWorkspaceID(id string) { idx.workspaceID = id }
 // WorkspaceID returns the workspace slug this indexer stamps on nodes.
 func (idx *Indexer) WorkspaceID() string { return idx.workspaceID }
 
-// SetProjectID sets the §4.2 project slug stamped onto nodes emitted
-// by this indexer. Single-project repos pass their repo name (the
+// SetProjectID sets the project slug stamped onto nodes emitted by
+// this indexer. Single-project repos pass their repo name (the
 // MultiIndexer default); monorepos compute a per-file slug from the
-// `projects[]` mapping (Step E/F follow-up).
+// `projects[]` mapping (follow-up work).
 func (idx *Indexer) SetProjectID(id string) { idx.projectID = id }
 
 // ProjectID returns the project slug this indexer stamps on nodes.
@@ -446,7 +446,7 @@ func (idx *Indexer) prefixPath(relPath string) string {
 func (idx *Indexer) applyRepoPrefix(nodes []*graph.Node, edges []*graph.Edge) {
 	// Stamp WorkspaceID / ProjectID on every node emitted by this
 	// indexer regardless of mode — single-repo and multi-repo both
-	// need the §4 boundary slugs for query scoping and contract
+	// need the boundary slugs for query scoping and contract
 	// matching. Single-repo callers can leave them empty; the
 	// MultiIndexer path always sets them via SetWorkspaceID /
 	// SetProjectID before calling Index.
@@ -773,13 +773,30 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 
 	reporter.Report("indexing complete", int(fileCount), len(files))
 
+	nodes, edges := idx.repoNodeEdgeCount()
 	return &IndexResult{
-		NodeCount:  idx.graph.NodeCount(),
-		EdgeCount:  idx.graph.EdgeCount(),
+		NodeCount:  nodes,
+		EdgeCount:  edges,
 		FileCount:  int(fileCount),
 		DurationMs: time.Since(start).Milliseconds(),
 		Errors:     errors,
 	}, nil
+}
+
+// repoNodeEdgeCount returns this indexer's contribution to the graph,
+// scoped to its repoPrefix in multi-repo mode. In single-repo mode
+// (empty prefix) every node carries an empty RepoPrefix anyway, so the
+// graph totals equal the repo's contribution and we use the cheap
+// global accessors. The multi-repo path uses RepoMemoryEstimate which
+// walks only this repo's byRepo bucket — O(repo size), not O(graph) —
+// so callers that stamp RepoMetadata.NodeCount/EdgeCount no longer
+// freeze the workspace-wide total at TrackRepo time.
+func (idx *Indexer) repoNodeEdgeCount() (int, int) {
+	if idx.repoPrefix == "" {
+		return idx.graph.NodeCount(), idx.graph.EdgeCount()
+	}
+	est := idx.graph.RepoMemoryEstimate(idx.repoPrefix)
+	return est.NodeCount, est.EdgeCount
 }
 
 // IndexFile parses a single file and patches the graph (evict then
@@ -900,8 +917,25 @@ func (idx *Indexer) EvictFile(filePath string) (int, int) {
 // buildSearchIndex populates the search backend from the current graph.
 // When an embedder is set, also builds a vector index and wraps both
 // in a HybridBackend with RRF fusion.
+//
+// In multi-repo mode the search backend is shared across every repo
+// (Indexer.search is wired to MultiIndexer.search at construction).
+// Walking g.AllNodes() and re-Add()ing every node would mean each
+// freshly-tracked repo pays an O(workspace) re-index pass over all
+// previously-tracked repos' nodes — quadratic in repo count and the
+// dominant cost of warming up a 260-repo workspace. So when this
+// indexer carries a non-empty repoPrefix we walk only that repo's
+// byRepo bucket; the other repos' entries are already in the shared
+// backend from when they were tracked. Single-repo mode keeps the
+// AllNodes() path because nodes there carry an empty RepoPrefix and
+// GetRepoNodes("") would miss them.
 func (idx *Indexer) buildSearchIndex() {
-	nodes := idx.graph.AllNodes()
+	var nodes []*graph.Node
+	if idx.repoPrefix != "" {
+		nodes = idx.graph.GetRepoNodes(idx.repoPrefix)
+	} else {
+		nodes = idx.graph.AllNodes()
+	}
 
 	// Build text index. The SkipSearch filter (wired through
 	// idx.shouldIndexForSearch) drops config-key-style variable nodes
@@ -1182,9 +1216,10 @@ func (idx *Indexer) IncrementalReindex(root string) (*IndexResult, error) {
 		idx.extractContracts()
 	}
 
+	nodes, edges := idx.repoNodeEdgeCount()
 	return &IndexResult{
-		NodeCount:  idx.graph.Stats().TotalNodes,
-		EdgeCount:  idx.graph.Stats().TotalEdges,
+		NodeCount:  nodes,
+		EdgeCount:  edges,
 		FileCount:  len(staleFiles),
 		DurationMs: time.Since(start).Milliseconds(),
 	}, nil
@@ -1245,10 +1280,10 @@ func (idx *Indexer) runContractExtractorsForFile(
 		found := ex.Extract(graphPath, src, fileNodes, fileEdges)
 		for i := range found {
 			found[i].RepoPrefix = idx.repoPrefix
-			// Stamp the §4.2 workspace / project slugs alongside the
-			// repo prefix so the matcher's boundary check (Step G)
-			// has the data it needs without a second registry walk.
-			// Empty slugs default to RepoPrefix at Match time via
+			// Stamp the workspace / project slugs alongside the repo
+			// prefix so the matcher's boundary check has the data it
+			// needs without a second registry walk. Empty slugs
+			// default to RepoPrefix at Match time via
 			// Contract.EffectiveWorkspace / EffectiveProject.
 			if idx.workspaceID != "" {
 				found[i].WorkspaceID = idx.workspaceID

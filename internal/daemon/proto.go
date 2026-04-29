@@ -1,6 +1,5 @@
 // Package daemon implements the long-living Gortex daemon plus the tiny
-// stdio proxy that relays MCP traffic to it. See spec-daemon.md at the repo
-// root for the end-to-end architecture.
+// stdio proxy that relays MCP traffic to it.
 package daemon
 
 import (
@@ -133,9 +132,9 @@ type StatusResponse struct {
 	Ready         bool  `json:"ready"`
 	WarmupSeconds int64 `json:"warmup_seconds"`
 
-	// Workspaces aggregates TrackedRepos by §4.2 workspace slug.
-	// Empty when no repo declares one (every repo defaults to its
-	// own workspace; the table form is more compact in that case).
+	// Workspaces aggregates TrackedRepos by workspace slug. Empty
+	// when no repo declares one (every repo defaults to its own
+	// workspace; the table form is more compact in that case).
 	Workspaces []WorkspaceSummary `json:"workspaces,omitempty"`
 
 	// MCPSessions lists every connected proxy client (Claude Code,
@@ -144,9 +143,9 @@ type StatusResponse struct {
 	MCPSessions []MCPSessionStatus `json:"mcp_sessions,omitempty"`
 
 	// ConfiguredServers reflects `~/.gortex/servers.toml` when
-	// present. Empty when running single-server (the §11.L file is
-	// missing or empty); in that case the daemon serves locally and
-	// the multi-server router is disabled.
+	// present. Empty when running single-server (the file is missing
+	// or empty); in that case the daemon serves locally and the
+	// multi-server router is disabled.
 	ConfiguredServers []ConfiguredServerStatus `json:"configured_servers,omitempty"`
 	// LocalServerSlug is the slug this daemon recognises as itself
 	// when matching against ConfiguredServers — set from servers.toml
@@ -211,18 +210,17 @@ type TrackedRepoStatus struct {
 	Name   string `json:"name,omitempty"`
 	// Project is the GlobalConfig active-project slug — a named
 	// grouping of repos in `~/.config/gortex/config.yaml::projects`.
-	// Distinct from `WorkspaceProject` below, which is the §4.2
-	// project slug from `.gortex.yaml::project`. Kept here for
-	// backwards compatibility with older daemon clients that read
-	// the field.
+	// Distinct from `WorkspaceProject` below, which is the project
+	// slug from `.gortex.yaml::project`. Kept here for backwards
+	// compatibility with older daemon clients that read the field.
 	Project string `json:"project,omitempty"`
-	// Workspace is the §4.2 workspace slug stamped onto every node
-	// emitted from this repo. Falls back to Prefix when no
+	// Workspace is the workspace slug stamped onto every node emitted
+	// from this repo. Falls back to Prefix when no
 	// `.gortex.yaml::workspace` is declared. Two repos that share a
 	// Workspace pair their contracts as one logical service.
 	Workspace string `json:"workspace,omitempty"`
-	// WorkspaceProject is the §4.2 project slug — the soft sub-
-	// boundary inside Workspace. Falls back to Prefix when no
+	// WorkspaceProject is the project slug — the soft sub-boundary
+	// inside Workspace. Falls back to Prefix when no
 	// `.gortex.yaml::project` is declared.
 	WorkspaceProject string          `json:"workspace_project,omitempty"`
 	Ref              string          `json:"ref,omitempty"`
@@ -235,8 +233,8 @@ type TrackedRepoStatus struct {
 
 // WorkspaceSummary aggregates per-workspace stats so `gortex daemon
 // status` can render a "workspaces" block above the per-repo table.
-// Reflects the §4.2 hard boundary: counts roll up across every repo
-// declaring the same workspace slug.
+// Reflects the workspace hard boundary: counts roll up across every
+// repo declaring the same workspace slug.
 type WorkspaceSummary struct {
 	Slug     string   `json:"slug"`
 	Repos    []string `json:"repos"`

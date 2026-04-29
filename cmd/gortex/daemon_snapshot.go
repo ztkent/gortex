@@ -117,10 +117,9 @@ type snapshotHeader struct {
 //     fails any PR that drifts the fingerprint without updating the
 //     pinned golden. Runs as part of the normal `go test ./...` sweep.
 //
-// See spec-daemon-resilience.md §"Snapshot Durability" for the
-// rationale — we explicitly chose graceful degradation + additive
-// discipline over a heavy migration framework that would ossify these
-// structs prematurely.
+// We explicitly chose graceful degradation + additive discipline over
+// a heavy migration framework that would ossify these structs
+// prematurely.
 const snapshotSchemaVersion = 2
 
 // snapshotMigration runs when an on-disk snapshot is at a lower
@@ -177,10 +176,10 @@ func saveSnapshot(g *graph.Graph, repos []snapshotRepo, snapContracts []snapshot
 
 // saveSnapshotTo writes the snapshot to an explicit path. Used by
 // `gortex index --snapshot <path>` (the cloud indexer worker shells
-// this out per spec-launch.md §0a iteration 2). Returns an error
-// when the path can't be written so the caller can fail the job;
-// the daemon's saveSnapshot wrapper still swallows errors because
-// a failed snapshot must never block clean shutdown.
+// this out). Returns an error when the path can't be written so the
+// caller can fail the job; the daemon's saveSnapshot wrapper still
+// swallows errors because a failed snapshot must never block clean
+// shutdown.
 func saveSnapshotTo(g *graph.Graph, repos []snapshotRepo, snapContracts []snapshotContract, version string, path string, logger *zap.Logger) error {
 	if g == nil {
 		return errors.New("snapshot: nil graph")
@@ -327,7 +326,7 @@ func loadSnapshot(g *graph.Graph, logger *zap.Logger) (snapshotLoadResult, error
 // loadSnapshotFrom is loadSnapshot with an explicit path argument.
 // Used by `gortex server --snapshot <path>` so a per-workspace
 // process can boot from a specific snapshot file produced by the
-// cloud indexer worker (spec-launch.md §0a iteration 2).
+// cloud indexer worker.
 func loadSnapshotFrom(g *graph.Graph, path string, logger *zap.Logger) (snapshotLoadResult, error) {
 	// Allocate Contracts up front so every early-return path (missing
 	// file, gzip error, header decode error, schema mismatch) hands the

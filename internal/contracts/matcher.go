@@ -16,23 +16,21 @@ type MatchResult struct {
 }
 
 // Match analyses a registry and pairs providers with consumers by
-// contract ID, bounded by the spec-launch.md §4.2 (workspace, project)
-// boundary:
+// contract ID, bounded by the (workspace, project) boundary:
 //
 //   - Providers and consumers in different effective workspaces never
 //     pair. Each workspace is matched independently — the across-
 //     workspace contracts become orphans on their own side.
 //   - Providers and consumers in the same workspace but different
-//     projects do not pair either; the spec's "soft sub-boundary"
-//     means a project owns its own surface and a sibling project's
-//     consumer is treated as an orphan that needs an explicit
-//     inter-project import to wire up. Iteration 1 keeps it simple:
-//     orphan rather than pair.
+//     projects do not pair either: a project owns its own surface and
+//     a sibling project's consumer is treated as an orphan that needs
+//     an explicit inter-project import to wire up. Iteration 1 keeps
+//     it simple: orphan rather than pair.
 //
 // "Effective" means: WorkspaceID / ProjectID if set, else RepoPrefix —
-// the §4.4 "missing → repo-name" default. So the previous behaviour
-// (one repo = one workspace = one project) still drops out for
-// callers that haven't started populating the slugs yet.
+// the "missing → repo-name" default. So the previous behaviour (one
+// repo = one workspace = one project) still drops out for callers
+// that haven't started populating the slugs yet.
 //
 // The CrossRepo flag stays on a CrossLink whose provider and consumer
 // have different RepoPrefixes (legitimately so — two repos belonging
@@ -95,10 +93,9 @@ func Match(reg *Registry) MatchResult {
 		if _, ok := seen[key]; ok {
 			continue
 		}
-		// No provider in this bucket — every consumer is orphaned. The
-		// spec calls this out as criterion 2 of §4.5: orphan, never
-		// pair across the boundary even when an ID-equivalent exists
-		// in a sibling workspace.
+		// No provider in this bucket — every consumer is orphaned.
+		// Orphan, never pair across the boundary even when an
+		// ID-equivalent exists in a sibling workspace.
 		result.OrphanConsumers = append(result.OrphanConsumers, cons...)
 	}
 

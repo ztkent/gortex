@@ -380,7 +380,24 @@ func (g *Graph) AddNode(n *Node) {
 			}
 		}
 		if prev.RepoPrefix != n.RepoPrefix && prev.RepoPrefix != "" {
-			removeNodeFromBucket(s.byRepo, s.byRepoIdx, prev.RepoPrefix, n.ID)
+			// Preserve a previously-set RepoPrefix rather than letting
+			// an empty-prefix re-add silently strip the node out of its
+			// byRepo bucket. The downgrade-to-empty case has no
+			// legitimate caller (contract nodes use distinct IDs that
+			// never collide with symbol IDs; the parse and IncrementalReindex
+			// paths route through applyRepoPrefix which always stamps
+			// the active idx.repoPrefix on the new node) and previously
+			// caused per-repo `byRepo[prefix]` to drain mid-warmup,
+			// breaking RepoStats / RepoMemoryEstimate / GetRepoNodes.
+			// Restore the old prefix on the new node so the bucket
+			// stays populated. The legitimate RepoPrefix-change case
+			// (snapshot prefix → new prefix because config moved) still
+			// works because n.RepoPrefix is non-empty there.
+			if n.RepoPrefix == "" {
+				n.RepoPrefix = prev.RepoPrefix
+			} else {
+				removeNodeFromBucket(s.byRepo, s.byRepoIdx, prev.RepoPrefix, n.ID)
+			}
 		}
 	}
 

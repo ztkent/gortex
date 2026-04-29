@@ -25,7 +25,7 @@ var daemonServerCmd = &cobra.Command{
 	Short: "Manage the multi-server roster in ~/.gortex/servers.toml",
 	Long: `Maintain ~/.gortex/servers.toml — the multi-server roster the daemon
 and the gortex server load on startup to wire up local-fast-path vs
-proxy routing (spec-launch.md §11 step L).
+proxy routing.
 
 The file holds one [[server]] block per reachable Gortex server: a
 local socket, a remote HTTPS endpoint, etc. Changes take effect on

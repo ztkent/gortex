@@ -30,9 +30,8 @@ import (
 //     Without a migration, deployed daemons reading an old snapshot
 //     will discard the cache on upgrade and pay the full-reindex cost.
 //
-// This replaces the "CI fingerprint check on snapshot-relevant structs"
-// item from spec-daemon-resilience.md Phase 4 — runs as part of the
-// existing `go test ./...` sweep, no extra CI infrastructure required.
+// Runs as part of the existing `go test ./...` sweep, no extra CI
+// infrastructure required.
 func TestWireContractFingerprint(t *testing.T) {
 	cases := []struct {
 		name string
@@ -135,10 +134,10 @@ func describeFields(t reflect.Type) string {
 func wireContractGolden(name string) string {
 	switch name {
 	case "graph.Node":
-		// Bumped when WorkspaceID and ProjectID were added (spec-launch.md
-		// §4 / iteration-1 Step D). Additive — gob decodes unknown fields
-		// as zero, so older snapshots still load with both new fields
-		// blank; daemon warmup backfills them from config.
+		// Bumped when WorkspaceID and ProjectID were added. Additive —
+		// gob decodes unknown fields as zero, so older snapshots still
+		// load with both new fields blank; daemon warmup backfills them
+		// from config.
 		return "5783f7ad776535db819402df2b60328dcb8f813d8999b97554e6a484d25db792"
 	case "graph.Edge":
 		return "6a543f0f3f663587fc6011ab641bbd91fe66bfc70f87fe548974411e89e871de"

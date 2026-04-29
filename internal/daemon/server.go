@@ -148,6 +148,7 @@ func (s *Server) Serve() error {
 		return errors.New("daemon: Listen must be called before Serve")
 	}
 	s.Logger.Info("daemon: serving", zap.String("socket", s.SocketPath))
+	var emfileBackoff time.Duration
 	for {
 		conn, err := s.listener.Accept()
 		if err != nil {
@@ -160,9 +161,30 @@ func (s *Server) Serve() error {
 			if errors.Is(err, net.ErrClosed) {
 				return nil
 			}
+			// EMFILE means the process is out of file descriptors.
+			// Without backoff the loop spins, pinning a CPU and making
+			// the FD pressure even worse. The exponential ramp gives
+			// in-flight handlers time to release descriptors.
+			if isEMFILE(err) {
+				if emfileBackoff == 0 {
+					emfileBackoff = 5 * time.Millisecond
+				} else if emfileBackoff < time.Second {
+					emfileBackoff *= 2
+				}
+				s.Logger.Warn("daemon: accept failed, FD-starved — backing off",
+					zap.Error(err), zap.Duration("sleep", emfileBackoff))
+				select {
+				case <-time.After(emfileBackoff):
+				case <-s.shutdown:
+					return nil
+				}
+				continue
+			}
+			emfileBackoff = 0
 			s.Logger.Warn("daemon: accept failed", zap.Error(err))
 			continue
 		}
+		emfileBackoff = 0
 		s.trackConn(conn)
 		go s.handle(conn)
 	}

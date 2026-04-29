@@ -20,8 +20,8 @@ var workspaceCmd = &cobra.Command{
 	Short: "Inspect and edit per-repo workspace declarations",
 	Long: `Manage the per-repo .gortex.yaml workspace and project slugs.
 
-The hard graph boundary introduced by spec-launch.md §4 keys every
-node and contract on its workspace. Two repos that should pair their
+The hard graph boundary keys every node and contract on its
+workspace. Two repos that should pair their
 contracts as one logical service must declare the same 'workspace:'
 in their respective .gortex.yaml files. Without that declaration,
 each repo defaults to its own workspace (named after the repo) and
@@ -47,8 +47,8 @@ The repo argument is matched against the global config: it can be
 a name (e.g. 'tuck-api'), an absolute path, or a path relative to
 the cwd. Project defaults to the workspace slug when omitted.
 
-Without --global the value is written to the repo's .gortex.yaml
-(the spec source of truth). With --global the value is written to
+Without --global the value is written to the repo's .gortex.yaml.
+With --global the value is written to
 ~/.config/gortex/config.yaml (your user-level config), which is
 the right choice for OSS / read-only repos where you don't want
 to leave any artifact in the repo. Global overrides win over

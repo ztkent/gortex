@@ -8,9 +8,9 @@ import (
 
 // OverlayFile is one editor-buffer override pushed by an MCP client.
 // The daemon (or a remote graph service over the gateway) merges
-// these on top of the base graph view for the duration of a session
-// — spec-launch.md §11 step Q. Iteration 1 only models text files;
-// binary overlays would need a different shape and are not in scope.
+// these on top of the base graph view for the duration of a session.
+// Iteration 1 only models text files; binary overlays would need a
+// different shape and are not in scope.
 type OverlayFile struct {
 	// Path is repo-relative when WorkspaceID is set, absolute
 	// otherwise. The graph service maps it onto the repo root via
@@ -56,7 +56,7 @@ type OverlayManager struct {
 
 // ErrSessionNotFound is returned by OverlayManager methods that
 // reference an unknown session ID. The daemon translates this to
-// HTTP 404 on `/v1/overlay/<id>/...` endpoints (Step Q).
+// HTTP 404 on `/v1/overlay/<id>/...` endpoints.
 var ErrSessionNotFound = errors.New("overlay session not found")
 
 // ErrOverlayDrift is returned by OverlayPush when the supplied
@@ -80,7 +80,7 @@ func NewOverlayManager(idleTTL time.Duration) *OverlayManager {
 // Register starts a new session and returns its ID. The workspace
 // slug is captured at register time; later pushes that target a
 // different workspace are rejected (one session = one workspace,
-// per the §6.2 overlay model).
+// per the overlay model).
 func (m *OverlayManager) Register(workspaceID string) string {
 	id := newSessionID()
 	now := time.Now()

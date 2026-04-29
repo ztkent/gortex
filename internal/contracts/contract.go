@@ -44,10 +44,10 @@ type Contract struct {
 	FilePath   string       `json:"file_path"`
 	Line       int          `json:"line"`
 	RepoPrefix string       `json:"repo_prefix,omitempty"`
-	// WorkspaceID is the spec-launch.md §4.2 hard-boundary slug. The
-	// matcher pairs providers and consumers only inside the same
-	// (workspace, project) tuple — across-workspace contracts never
-	// pair. Empty falls back to RepoPrefix (the §4.4 default).
+	// WorkspaceID is the hard-boundary slug. The matcher pairs
+	// providers and consumers only inside the same (workspace,
+	// project) tuple — across-workspace contracts never pair. Empty
+	// falls back to RepoPrefix (the default).
 	WorkspaceID string `json:"workspace_id,omitempty"`
 	// ProjectID is the soft sub-boundary inside a workspace. Across-
 	// project (same-workspace) contracts become orphans rather than
@@ -57,11 +57,11 @@ type Contract struct {
 	Confidence float64        `json:"confidence"`
 }
 
-// EffectiveWorkspace returns the spec §4.2 workspace slug that
-// participates in the matcher's boundary check. WorkspaceID wins when
-// set; otherwise the §4.4 default is RepoPrefix (one workspace per
-// repo). Callers shouldn't reason about empty strings — always go
-// through this helper so the default rule lives in one place.
+// EffectiveWorkspace returns the workspace slug that participates in
+// the matcher's boundary check. WorkspaceID wins when set; otherwise
+// the default is RepoPrefix (one workspace per repo). Callers
+// shouldn't reason about empty strings — always go through this
+// helper so the default rule lives in one place.
 func (c Contract) EffectiveWorkspace() string {
 	if c.WorkspaceID != "" {
 		return c.WorkspaceID
@@ -69,8 +69,8 @@ func (c Contract) EffectiveWorkspace() string {
 	return c.RepoPrefix
 }
 
-// EffectiveProject returns the §4.2 project slug. Same default rule
-// as EffectiveWorkspace: ProjectID wins, otherwise RepoPrefix.
+// EffectiveProject returns the project slug. Same default rule as
+// EffectiveWorkspace: ProjectID wins, otherwise RepoPrefix.
 func (c Contract) EffectiveProject() string {
 	if c.ProjectID != "" {
 		return c.ProjectID

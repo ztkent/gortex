@@ -451,8 +451,8 @@ var httpPatterns = []httpPattern{
 // httpPrefilterMarkers is the per-language substring prefilter.
 // Files whose language appears here must contain at least one
 // marker before the ~30 HTTP regexes run — otherwise we skip the
-// file entirely. See spec-extractor-perf.md §6.3 and the gRPC
-// reference implementation. Languages whose HTTP patterns hinge on
+// file entirely. See the gRPC reference implementation for the
+// pattern's origin. Languages whose HTTP patterns hinge on
 // bare keywords (python's `path(`, ruby/elixir's top-level `get`,
 // `post`) are intentionally absent: any marker tight enough to
 // reject non-HTTP files would also reject legitimate HTTP files,

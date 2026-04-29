@@ -214,6 +214,119 @@ func TestMultiIndexer_TrackRepo(t *testing.T) {
 	assert.Nil(t, result2)
 }
 
+// TestMultiIndexer_TrackRepo_SearchSpansAllRepos verifies that scoping
+// buildSearchIndex to the current repo (the perf fix that drops the
+// O(N²) re-index of every prior repo's nodes on every TrackRepo call)
+// does not regress search recall. After three repos are tracked, the
+// shared search backend must still find symbols defined in the first,
+// second, and third repos — earlier-tracked entries are not lost
+// because each repo's TrackRepo pass already added its own nodes.
+func TestMultiIndexer_TrackRepo_SearchSpansAllRepos(t *testing.T) {
+	mkRepo := func(name, symbol string) string {
+		dir := filepath.Join(t.TempDir(), name)
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		writeFile(t, filepath.Join(dir, "main.go"), fmt.Sprintf("package main\n\nfunc %s() {}\n", symbol))
+		return dir
+	}
+	dirA := mkRepo("repo-aaa", "AlphaSymbolUnique")
+	dirB := mkRepo("repo-bbb", "BetaSymbolUnique")
+	dirC := mkRepo("repo-ccc", "GammaSymbolUnique")
+
+	// Pre-populate the global config so willBeMultiRepo trips on the
+	// first TrackRepo too — that's the production warmup-loop path.
+	tmpCfg := filepath.Join(t.TempDir(), "config.yaml")
+	gc := &config.GlobalConfig{Repos: []config.RepoEntry{
+		{Path: dirA, Name: "repo-aaa"},
+		{Path: dirB, Name: "repo-bbb"},
+		{Path: dirC, Name: "repo-ccc"},
+	}}
+	gc.SetConfigPath(tmpCfg)
+	require.NoError(t, gc.Save())
+	cm, err := config.NewConfigManager(tmpCfg)
+	require.NoError(t, err)
+
+	g := graph.New()
+	mi := NewMultiIndexer(g, newTestRegistry(), search.NewBM25(), cm, zap.NewNop())
+
+	for _, e := range []config.RepoEntry{
+		{Path: dirA, Name: "repo-aaa"},
+		{Path: dirB, Name: "repo-bbb"},
+		{Path: dirC, Name: "repo-ccc"},
+	} {
+		_, err := mi.TrackRepo(e)
+		require.NoError(t, err)
+	}
+
+	// Query the camelCase-split tokens individually — that's how the
+	// BM25 backend stores them at Add time, and Search.TokenizeQuery
+	// doesn't perform the same camelCase split.
+	for _, want := range []struct{ query, prefix string }{
+		{"alpha", "repo-aaa"},
+		{"beta", "repo-bbb"},
+		{"gamma", "repo-ccc"},
+	} {
+		hits := mi.Search().Search(want.query, 10)
+		require.NotEmpty(t, hits, "shared search backend must find %q after all repos tracked", want.query)
+		assert.True(t, strings.HasPrefix(hits[0].ID, want.prefix+"/"),
+			"top hit for %q should belong to %s, got %s", want.query, want.prefix, hits[0].ID)
+	}
+}
+
+// TestMultiIndexer_TrackRepo_EmptyAfterPopulated regresses the bug
+// where IndexResult/RepoMetadata stamped the *whole multi-repo graph*
+// counts onto an empty repo at TrackRepo time. A second tracked repo
+// that contributed zero source files used to come back with the same
+// node count as the populated repo because IndexResult.NodeCount was
+// graph.NodeCount() rather than the per-repo contribution. Downstream
+// daemon-status code multiplied search backend bytes by share = 1 for
+// every empty row, attributing the entire workspace search budget to
+// each empty repo. The fix: IndexResult counts come from
+// graph.RepoMemoryEstimate(prefix) when repoPrefix is non-empty, and
+// daemon_controller.Status no longer falls back to meta when
+// RepoStats has no entry for the prefix.
+func TestMultiIndexer_TrackRepo_EmptyAfterPopulated(t *testing.T) {
+	populated := setupRepoDir(t, "populated")
+	empty := filepath.Join(t.TempDir(), "empty")
+	require.NoError(t, os.MkdirAll(empty, 0o755))
+
+	g := graph.New()
+	cm := newTestConfigManager(t)
+	mi := NewMultiIndexer(g, newTestRegistry(), search.NewBM25(), cm, zap.NewNop())
+
+	first, err := mi.TrackRepo(config.RepoEntry{Path: populated, Name: "populated"})
+	require.NoError(t, err)
+	require.NotNil(t, first)
+	require.Greater(t, first.NodeCount, 0, "populated repo must contribute nodes")
+
+	globalNodesBefore := g.NodeCount()
+	require.Greater(t, globalNodesBefore, 0)
+
+	second, err := mi.TrackRepo(config.RepoEntry{Path: empty, Name: "empty"})
+	require.NoError(t, err)
+	require.NotNil(t, second)
+
+	// Per-repo IndexResult must not echo the workspace-wide graph total.
+	assert.Equal(t, 0, second.NodeCount,
+		"empty repo IndexResult.NodeCount must be 0, got %d (global graph has %d)",
+		second.NodeCount, globalNodesBefore)
+	assert.Equal(t, 0, second.EdgeCount,
+		"empty repo IndexResult.EdgeCount must be 0, got %d", second.EdgeCount)
+
+	// RepoMetadata is stamped from IndexResult, so it must agree.
+	emptyMeta := mi.GetMetadata("empty")
+	require.NotNil(t, emptyMeta)
+	assert.Equal(t, 0, emptyMeta.NodeCount, "empty repo metadata must record 0 nodes")
+	assert.Equal(t, 0, emptyMeta.EdgeCount, "empty repo metadata must record 0 edges")
+
+	// And the populated repo's metadata must reflect only its own
+	// contribution, not its size + everything that came after.
+	populatedMeta := mi.GetMetadata("populated")
+	require.NotNil(t, populatedMeta)
+	assert.Greater(t, populatedMeta.NodeCount, 0)
+	assert.LessOrEqual(t, populatedMeta.NodeCount, globalNodesBefore,
+		"populated repo metadata must not exceed graph total at its track time")
+}
+
 func TestMultiIndexer_TrackRepo_InvalidPath(t *testing.T) {
 	g := graph.New()
 	cm := newTestConfigManager(t)

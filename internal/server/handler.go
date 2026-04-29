@@ -135,18 +135,16 @@ func (h *Handler) registerRoutes() {
 	h.mux.HandleFunc("GET /v1/contracts/validate", h.handleContractsValidate)
 	h.mux.HandleFunc("GET /v1/communities", h.handleCommunities)
 	h.mux.HandleFunc("GET /v1/guards", h.handleGuards)
-	// spec-launch.md §11 step N — workspace roster discovery. The
-	// daemon side calls this when it doesn't yet know which server
-	// owns a given workspace; the response lets the daemon's lookup
-	// path skip a roundtrip on every subsequent query against the
-	// workspace.
+	// Workspace roster discovery. The daemon side calls this when it
+	// doesn't yet know which server owns a given workspace; the
+	// response lets the daemon's lookup path skip a roundtrip on every
+	// subsequent query against the workspace.
 	h.mux.HandleFunc("GET /v1/workspaces/{ws}/repos", h.handleWorkspaceRoster)
-	// spec-launch.md §11 step Q — editor overlay sessions. Clients
-	// register a session, push file overlays for in-flight edits, and
-	// the server merges them on top of the indexed graph for the
-	// duration of the session. The actual merge is the daemon's
-	// responsibility (Step P routing); these endpoints just
-	// expose the OverlayManager to MCP clients.
+	// Editor overlay sessions. Clients register a session, push file
+	// overlays for in-flight edits, and the server merges them on top
+	// of the indexed graph for the duration of the session. The actual
+	// merge is the daemon's responsibility (router); these endpoints
+	// just expose the OverlayManager to MCP clients.
 	h.mux.HandleFunc("POST /v1/overlay/sessions", h.handleOverlayRegister)
 	h.mux.HandleFunc("DELETE /v1/overlay/sessions/{id}", h.handleOverlayDrop)
 	h.mux.HandleFunc("PUT /v1/overlay/sessions/{id}/files", h.handleOverlayPush)
@@ -159,8 +157,8 @@ func (h *Handler) registerRoutes() {
 // during construction; nil disables those endpoints (they return 503).
 func (h *Handler) SetOverlayManager(m *daemon.OverlayManager) { h.overlays = m }
 
-// SetRouter wires the spec-launch.md §11 step P hybrid-read query
-// router. When set, /v1/tools/<name> calls flow through the router;
+// SetRouter wires the hybrid-read query router. When set,
+// /v1/tools/<name> calls flow through the router;
 // remote workspaces proxy via daemon.ServerClient.ProxyTool, local
 // ones fall through to the in-process MCP tool dispatch. Nil
 // disables routing (the legacy single-server behaviour).
@@ -284,8 +282,8 @@ func (h *Handler) handleToolCall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// spec-launch.md §11 steps M+P: if a Router is wired, peek the
-	// body for `workspace` / `cwd` overrides and let the router
+	// If a Router is wired, peek the body for `workspace` / `cwd`
+	// overrides and let the router
 	// decide local vs remote. Local path falls through to the
 	// existing in-process tool dispatch below; remote path returns
 	// the proxied response verbatim. Only the proxy short-circuits

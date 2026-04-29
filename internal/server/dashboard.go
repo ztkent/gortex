@@ -200,7 +200,7 @@ func (h *Handler) handleRepos(w http.ResponseWriter, _ *http.Request) {
 	WriteJSON(w, http.StatusOK, map[string]any{"repos": reposFromGraph(h.graph)})
 }
 
-// --- /v1/overlay/* — spec-launch.md §11 step Q ---
+// --- /v1/overlay/* ---
 
 // handleOverlayRegister handles POST /v1/overlay/sessions.
 // Body: {"workspace_id": "<slug>"}. Response: {"session_id": "..."}.
@@ -334,9 +334,9 @@ func (h *Handler) handleOverlayList(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, map[string]any{"files": out})
 }
 
-// handleWorkspaceRoster serves `GET /v1/workspaces/{ws}/repos` —
-// spec-launch.md §11 step N. Returns the deduplicated list of repo
-// prefixes for the requested workspace slug, or 404 when no node in
+// handleWorkspaceRoster serves `GET /v1/workspaces/{ws}/repos`.
+// Returns the deduplicated list of repo prefixes for the requested
+// workspace slug, or 404 when no node in
 // the graph carries that workspace. The daemon-side
 // WorkspaceRosterCache calls this once per (slug, workspace) and
 // caches the result for ~1 minute (see daemon.NewWorkspaceRosterCache).
@@ -349,9 +349,9 @@ func (h *Handler) handleWorkspaceRoster(w http.ResponseWriter, r *http.Request) 
 	seen := make(map[string]struct{})
 	for _, n := range h.graph.AllNodes() {
 		// Effective workspace match — match on either the explicit
-		// WorkspaceID or the §4.4 fallback (RepoPrefix). Either way
-		// the result list reports RepoPrefix so callers can address
-		// the underlying repo without translating slugs.
+		// WorkspaceID or the RepoPrefix fallback. Either way the
+		// result list reports RepoPrefix so callers can address the
+		// underlying repo without translating slugs.
 		nodeWS := n.WorkspaceID
 		if nodeWS == "" {
 			nodeWS = n.RepoPrefix

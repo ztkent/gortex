@@ -33,7 +33,7 @@ var daemonCmd = &cobra.Command{
 	Short: "Manage the long-living Gortex daemon",
 	Long: `The daemon holds the graph for all tracked repositories and serves every
 MCP client (Claude Code, Cursor, Kiro, ...) plus the CLI from one shared
-index. See spec-daemon.md for the architecture.
+index.
 
 If no daemon is running, ` + "`gortex mcp`" + ` still works standalone — the daemon
 is additive, not required.`,
@@ -104,6 +104,20 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 		return spawnDetachedDaemon()
 	}
 	logger := newLogger()
+
+	// Raise the per-process file-descriptor cap as early as possible.
+	// fsnotify holds one FD per watched directory on Linux and one FD
+	// per directory plus every file inside it on macOS, so a multi-repo
+	// install easily blows past the inherited soft cap (256 on macOS,
+	// 1024 on most Linuxes) and surfaces as "accept: too many open
+	// files" once the daemon is hot.
+	if fdl, err := daemon.RaiseFDLimit(); err != nil {
+		logger.Warn("daemon: could not raise file-descriptor limit", zap.Error(err))
+	} else {
+		logger.Info("daemon: file-descriptor cap",
+			zap.Uint64("soft", fdl.Soft), zap.Uint64("hard", fdl.Hard))
+	}
+
 	srv := daemon.New(daemon.SocketPath(), canonicalVersion(), logger)
 
 	// Fast path: snapshot load + indexer + MCP server wiring. The
@@ -140,8 +154,8 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 	}
 	srv.Controller = controller
 	disp := newMCPDispatcher(state.mcpServer, state.multiIndexer, logger)
-	// spec-launch.md §11 step P — wire the multi-server router into
-	// the daemon dispatcher when servers.toml exists. Local-only
+	// Wire the multi-server router into the daemon dispatcher when
+	// servers.toml exists. Local-only
 	// daemons (no servers.toml) leave router=nil and dispatch flows
 	// straight to the in-process MCP server unchanged.
 	if scfg, scfgErr := daemon.LoadServersConfig(""); scfgErr == nil && scfg != nil && len(scfg.Server) > 0 {
@@ -604,8 +618,9 @@ func renderDaemonWorkspaces(w io.Writer, st daemon.StatusResponse) {
 	}
 
 	if !multiRepo {
-		// Compact form: tell the user the §4 boundary is in default
-		// mode and how to opt repos into a shared workspace. Avoids
+		// Compact form: tell the user the workspace boundary is in
+		// default mode and how to opt repos into a shared workspace.
+		// Avoids
 		// printing a 33-row table where every row says "1 repo".
 		_, _ = fmt.Fprintf(w,
 			"\nworkspaces: %d (one per repo, default — every repo is its own workspace)\n",

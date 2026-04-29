@@ -12,7 +12,7 @@ type Registry struct {
 	byRepo      map[string][]Contract // repoPrefix -> contracts
 	bySymbol    map[string][]Contract // symbolID -> contracts
 	byFilePath  map[string][]Contract // filePath -> contracts
-	byWorkspace map[string][]Contract // workspaceID -> contracts (§4.2)
+	byWorkspace map[string][]Contract // workspaceID -> contracts
 }
 
 // NewRegistry creates an empty contract registry.
@@ -51,7 +51,7 @@ func (r *Registry) AddAll(contracts []Contract, repoPrefix string) {
 }
 
 // AddAllScoped inserts multiple contracts, assigning the repo prefix
-// and (when non-empty) the §4.2 WorkspaceID / ProjectID slugs. Mirrors
+// and (when non-empty) the WorkspaceID / ProjectID slugs. Mirrors
 // the indexer-side stamp applied to graph nodes via Indexer.applyRepoPrefix.
 // Empty workspaceID / projectID arguments leave the contract's existing
 // values untouched (so a per-file resolver can pre-stamp a stricter
@@ -203,7 +203,7 @@ func (r *Registry) ByFile(filePath string) []Contract {
 }
 
 // ByWorkspace returns every contract whose effective workspace
-// (WorkspaceID || RepoPrefix per §4.4) equals workspaceID. Used by
+// (WorkspaceID || RepoPrefix default) equals workspaceID. Used by
 // per-workspace `contracts check` calls so each workspace's matcher
 // pass sees only its own contracts.
 func (r *Registry) ByWorkspace(workspaceID string) []Contract {
@@ -217,7 +217,7 @@ func (r *Registry) ByWorkspace(workspaceID string) []Contract {
 
 // AllWorkspaces returns the deduplicated list of effective workspace
 // slugs present in the registry. The matcher uses this to drive its
-// per-workspace pairing pass (§4.3 boundary).
+// per-workspace pairing pass.
 func (r *Registry) AllWorkspaces() []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -305,9 +305,9 @@ func (r *Registry) EvictRepo(repoPrefix string) int {
 	}
 
 	// Remove from byWorkspace index. A workspace can span multiple
-	// repos (the spec's whole point), so a workspace bucket may still
-	// have entries from sibling repos after this evict — we only
-	// delete the bucket when it goes empty.
+	// repos by design, so a workspace bucket may still have entries
+	// from sibling repos after this evict — we only delete the bucket
+	// when it goes empty.
 	for _, c := range contracts {
 		ws := c.EffectiveWorkspace()
 		r.byWorkspace[ws] = removeContract(r.byWorkspace[ws], c)

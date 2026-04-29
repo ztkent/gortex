@@ -14,9 +14,9 @@ import (
 // 9+ `parser.RunQuery` calls (counting the per-class jsQMethod re-run).
 // Capture names are disjoint across patterns so the dispatch in Extract
 // can branch on which name is set. Method-to-class membership uses a
-// parent walk on method_definition; the const-arrow-vs-var dedupe from
-// spec §4 is handled by emitting arrow first and skipping the var
-// pattern when the name is already owned by an arrow.
+// parent walk on method_definition; the const-arrow-vs-var dedupe is
+// handled by emitting arrow first and skipping the var pattern when
+// the name is already owned by an arrow.
 const qJSAll = `
 [
   (function_declaration
@@ -169,7 +169,7 @@ func (e *JavaScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 	})
 
 	// Module-level variable emission — skip names already emitted as
-	// arrow functions (the const-arrow-vs-var dedupe from spec §4).
+	// arrow functions (const-arrow-vs-var dedupe).
 	for _, v := range vars {
 		if arrowNames[v.name] {
 			continue

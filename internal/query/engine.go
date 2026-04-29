@@ -154,11 +154,11 @@ func (e *Engine) FindUsages(nodeID string) *SubGraph {
 	return e.FindUsagesScoped(nodeID, QueryOptions{})
 }
 
-// FindUsagesScoped is FindUsages with an optional §4.2 scope. When
-// opts.WorkspaceID is set, only callers from that workspace are
-// returned — the spec-launch.md §4.5 criterion 3 invariant
-// ("find_usages on a tuck symbol returns hits only from tuck").
-// Empty WorkspaceID preserves the legacy global-graph behaviour.
+// FindUsagesScoped is FindUsages with an optional workspace scope.
+// When opts.WorkspaceID is set, only callers from that workspace are
+// returned — i.e. find_usages on a tuck symbol returns hits only
+// from tuck. Empty WorkspaceID preserves the legacy global-graph
+// behaviour.
 func (e *Engine) FindUsagesScoped(nodeID string, opts QueryOptions) *SubGraph {
 	edges := e.g.GetInEdges(nodeID)
 	nodeMap := make(map[string]*graph.Node)
@@ -208,19 +208,20 @@ func (e *Engine) SearchSymbols(query string, limit int) []*graph.Node {
 	return e.SearchSymbolsScoped(query, limit, QueryOptions{})
 }
 
-// SearchSymbolsScoped is SearchSymbols with the optional spec-launch.md
-// §4.2 workspace/project scope. When opts.WorkspaceID is set, results
+// SearchSymbolsScoped is SearchSymbols with the optional
+// workspace/project scope. When opts.WorkspaceID is set, results
 // outside that scope are filtered out and the search re-fetches as
 // needed to fill the requested limit. Empty scope preserves the
-// legacy global behaviour. Step I.
+// legacy global behaviour.
 func (e *Engine) SearchSymbolsScoped(query string, limit int, opts QueryOptions) []*graph.Node {
 	if limit <= 0 {
 		limit = 20
 	}
 
 	// Workspace-scoped searches need to over-fetch from the backend
-	// because the BM25 / substring layers don't know about the §4.2
-	// boundary; we filter post-hoc and may need to keep going to fill
+	// because the BM25 / substring layers don't know about the
+	// workspace boundary; we filter post-hoc and may need to keep
+	// going to fill
 	// `limit`. The 4× factor is a heuristic — most workspace-bounded
 	// users have an ~all-mine result distribution and so the first
 	// page is usually enough; the extras get truncated cheaply. We
@@ -547,13 +548,13 @@ func (e *Engine) bfs(nodeID string, opts QueryOptions, forward bool, edgeKinds [
 				continue
 			}
 
-			// Step I: §4.2 workspace/project scope. When opts.WorkspaceID
-			// is set, neighbours outside that scope are dropped along
-			// with the edge that pointed at them. Cross-workspace edges
-			// produced by the resolver (Step H) only exist when an
-			// explicit cross_workspace_dep allows them, so this filter
-			// also acts as the query-time enforcement of criterion 3
-			// (find_usages on a tuck symbol returns hits only from tuck).
+			// Workspace/project scope. When opts.WorkspaceID is set,
+			// neighbours outside that scope are dropped along with the
+			// edge that pointed at them. Cross-workspace edges produced
+			// by the resolver only exist when an explicit
+			// cross_workspace_dep allows them, so this filter also
+			// acts as the query-time enforcement of "find_usages on a
+			// tuck symbol returns hits only from tuck".
 			if opts.WorkspaceID != "" {
 				if n := e.g.GetNode(neighborID); n != nil && !opts.scopeAllows(n) {
 					continue

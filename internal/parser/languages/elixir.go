@@ -30,9 +30,8 @@ var elixirKeywords = map[string]bool{
 	"test": true, "describe": true, "setup": true,
 }
 
-// ElixirExtractor extracts Elixir source files.
-// Tier B per spec-extractor-perf.md: only two queries (plain
-// call + dot call), so we precompile each but don't merge.
+// ElixirExtractor extracts Elixir source files. Only two queries
+// (plain call + dot call), so we precompile each but don't merge.
 // extractCalls runs after walkNode so funcRanges is ready.
 type ElixirExtractor struct {
 	lang      *sitter.Language

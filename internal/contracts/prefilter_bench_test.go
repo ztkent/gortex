@@ -6,8 +6,8 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 )
 
-// Fixtures for the §6.3 prefilter benchmarks. Each represents a
-// "cold" file — typical source that the extractor should skip on
+// Fixtures for the prefilter benchmarks. Each represents a "cold"
+// file — typical source that the extractor should skip on
 // its own, not a file containing the contract pattern. The speedup
 // ratio from the prefilter only surfaces on these cold files, and
 // cold files dominate a mixed-language repo.

@@ -7,9 +7,8 @@ import "bytes"
 // short-circuit before running their regex suites — bytes.Contains
 // over a handful of distinctive substrings skips the vast majority
 // of files in a repo that has zero usage of a given contract style
-// (e.g. gRPC-free TS files, WebSocket-free Go files). See
-// spec-extractor-perf.md §6.3 for the pattern's origin (gRPC) and
-// measured impact.
+// (e.g. gRPC-free TS files, WebSocket-free Go files). The pattern
+// originated in the gRPC extractor.
 func srcHasAnyMarker(src []byte, markers [][]byte) bool {
 	for _, m := range markers {
 		if bytes.Contains(src, m) {

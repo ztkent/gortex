@@ -1,23 +1,19 @@
 package graph_test
 
-// Step B (spec-launch.md §11 Week 1): node-id stability parity test.
+// Node-id stability parity test.
 //
-// §13.2 (overlay & cloud) and §8 of spec-launch.md assume node IDs
-// produced by two different indexer invocations of the same source
-// commit are byte-identical. If that ever drifts (host-local state in
-// the ID, parse-order leaks, RNG, time, etc.), overlay merging
-// silently breaks: the daemon's overlay node IDs no longer match the
-// server's base node IDs, edges land on dangling endpoints, and
-// queries return half-true answers.
+// Overlay and cloud paths assume node IDs produced by two different
+// indexer invocations of the same source commit are byte-identical.
+// If that ever drifts (host-local state in the ID, parse-order leaks,
+// RNG, time, etc.), overlay merging silently breaks: the daemon's
+// overlay node IDs no longer match the server's base node IDs, edges
+// land on dangling endpoints, and queries return half-true answers.
 //
 // This test runs the live indexer pipeline twice on a freshly-copied
 // pair of identical source trees. Different absolute paths simulate
 // "two checkouts on one machine" (the cheap proxy for "two machines"
 // — the only difference between the two cases is the absolute parent
 // directory which the indexer is supposed to strip via repo-prefixing).
-//
-// Failure here gates §8/§9 hard. Better to discover divergence in
-// Week 1 than Week 5.
 
 import (
 	"context"
@@ -165,7 +161,7 @@ func TestNodeIDStability_Parity(t *testing.T) {
 	got := stripped(idsA.NodeIDs, idsA.Prefix)
 	want := stripped(idsB.NodeIDs, idsB.Prefix)
 
-	if !assert.Equal(t, want, got, "node IDs must be byte-identical across two indexings of the same source tree (after stripping repo prefix). divergence breaks overlay merging in §8 and §9.") {
+	if !assert.Equal(t, want, got, "node IDs must be byte-identical across two indexings of the same source tree (after stripping repo prefix). divergence breaks overlay merging across daemon and cloud.") {
 		// Surface the first few divergences directly so the failure
 		// message points at the offending IDs rather than the full
 		// list-of-thousands diff.
@@ -188,8 +184,8 @@ type fixtureResult struct {
 //
 // We use MultiIndexer with two configured repos (the fixture + a
 // throwaway sibling) so that willBeMultiRepo is true and the prefix
-// path is exercised — that's the production code path the daemon runs
-// and the one §8/§9 will rely on.
+// path is exercised — that's the production code path the daemon
+// runs and the one overlay/cloud merging will rely on.
 func indexFixture(t *testing.T, checkoutName string) fixtureResult {
 	t.Helper()
 
@@ -233,12 +229,11 @@ func indexFixture(t *testing.T, checkoutName string) fixtureResult {
 	ids := []string{}
 	prefix := checkoutName
 	for _, n := range g.AllNodes() {
-		// Step B is about source-symbol IDs (functions, methods,
-		// types, files) — the things §8 overlay merging keys on.
+		// This test is about source-symbol IDs (functions, methods,
+		// types, files) — the things overlay merging keys on.
 		// Contract-kind nodes (kind=contract) don't currently carry a
-		// RepoPrefix field; their workspace/project boundary will be
-		// addressed in Steps F/G of iteration 1. Skip them here so
-		// the parity gate is precise about what it gates.
+		// RepoPrefix field; skip them here so the parity gate is
+		// precise about what it gates.
 		if n.Kind == graph.KindContract {
 			continue
 		}

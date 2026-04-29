@@ -63,8 +63,9 @@ func runStatusViaDaemon(cmd *cobra.Command) error {
 		return nil
 	}
 
-	// One-line workspace rollup so the §4 boundary state is visible
-	// in the compact view too. Mirrors renderDaemonWorkspaces' compact
+	// One-line workspace rollup so the workspace boundary state is
+	// visible in the compact view too. Mirrors renderDaemonWorkspaces'
+	// compact
 	// form: a single sentence when every repo is its own default
 	// workspace, an explicit count when the user has grouped some.
 	if len(st.Workspaces) > 0 {

@@ -52,11 +52,11 @@ type CrossWorkspaceDepLookup func(sourceWorkspaceID string) []CrossWorkspaceDepR
 // Edge.To in place. Sharing g.ResolveMutex() serialises both resolver
 // types against the same graph.
 //
-// crossWorkspaceLookup is the §4.2 workspace-boundary check (Step H).
-// Empty (nil) means the resolver is in legacy mode: cross-repo /
-// cross-workspace candidates resolve as if no boundary existed —
-// preserving pre-§4 behaviour for callers that haven't plumbed config
-// through yet. When set, candidates whose WorkspaceID differs from
+// crossWorkspaceLookup is the workspace-boundary check. Empty (nil)
+// means the resolver is in legacy mode: cross-repo / cross-workspace
+// candidates resolve as if no boundary existed — for callers that
+// haven't plumbed config through yet. When set, candidates whose
+// WorkspaceID differs from
 // the caller's are accepted only when the source workspace declared
 // the target workspace via `cross_workspace_deps` AND, for import
 // edges, the import path has a declared-module prefix.
@@ -73,19 +73,19 @@ func NewCrossRepo(g *graph.Graph) *CrossRepoResolver {
 	return &CrossRepoResolver{graph: g, mu: g.ResolveMutex()}
 }
 
-// SetCrossWorkspaceDepLookup wires the §4.2 boundary rule. After this
+// SetCrossWorkspaceDepLookup wires the boundary rule. After this
 // call, the resolver will refuse cross-workspace candidates that
 // aren't covered by an explicit declaration in the source workspace's
-// `cross_workspace_deps`. Pre-§4 graphs (no WorkspaceID on either
+// `cross_workspace_deps`. Legacy graphs (no WorkspaceID on either
 // side) keep working — when both From and To carry empty workspace
 // slugs the boundary check trivially passes.
 func (cr *CrossRepoResolver) SetCrossWorkspaceDepLookup(lookup CrossWorkspaceDepLookup) {
 	cr.crossWorkspaceLookup = lookup
 }
 
-// callerWorkspaceID returns the §4.2 workspace slug for the From-side
-// of an edge. Falls back to RepoPrefix to match Contract.Effective-
-// Workspace's "missing → repo-name" rule (§4.4 default).
+// callerWorkspaceID returns the workspace slug for the From-side of
+// an edge. Falls back to RepoPrefix to match Contract.Effective-
+// Workspace's "missing → repo-name" rule.
 func (cr *CrossRepoResolver) callerWorkspaceID(e *graph.Edge) string {
 	from := cr.graph.GetNode(e.From)
 	if from == nil {
@@ -270,8 +270,8 @@ func (cr *CrossRepoResolver) resolveFunctionCall(e *graph.Edge, funcName string,
 	}
 
 	// 2. Cross-repo fallback: first function/method match honoring the
-	// §4.2 workspace boundary (Step H). Same-workspace cross-repo is
-	// always eligible; cross-workspace requires a declared
+	// workspace boundary. Same-workspace cross-repo is always
+	// eligible; cross-workspace requires a declared
 	// cross_workspace_deps entry covering the workspace pair.
 	for _, c := range candidates {
 		if c.Kind != graph.KindFunction && c.Kind != graph.KindMethod {
@@ -298,9 +298,9 @@ func (cr *CrossRepoResolver) resolveImport(e *graph.Edge, importPath string, sta
 	// Look for a package node with matching qualified name.
 	node := cr.graph.GetNodeByQualName(importPath)
 	if node != nil {
-		// §4.2 boundary check: if the candidate is in a different
-		// workspace, allow only when an explicit cross_workspace_dep
-		// declares it.
+		// Workspace boundary check: if the candidate is in a
+		// different workspace, allow only when an explicit
+		// cross_workspace_dep declares it.
 		if !cr.crossWorkspaceEligible(callerWS, candidateWorkspaceID(node), importPath) {
 			// Treat as external — the dep wasn't opted in.
 			e.To = "external::" + importPath
@@ -380,7 +380,7 @@ func (cr *CrossRepoResolver) resolveImport(e *graph.Edge, importPath string, sta
 		return
 	}
 	if crossRepo != nil {
-		// Apply §4.2 boundary on the directory-match path too.
+		// Apply workspace boundary on the directory-match path too.
 		if !cr.crossWorkspaceEligible(callerWS, candidateWorkspaceID(crossRepo), importPath) {
 			e.To = "external::" + importPath
 			stats.Unresolved++
@@ -423,7 +423,7 @@ func (cr *CrossRepoResolver) resolveMethodCall(e *graph.Edge, methodName string,
 				return
 			}
 		}
-		// Cross-repo + exact type — bounded by §4.2 workspace check.
+		// Cross-repo + exact type — bounded by workspace check.
 		for _, c := range candidates {
 			if c.Kind != graph.KindMethod || nodeReceiverType(c) != receiverType {
 				continue

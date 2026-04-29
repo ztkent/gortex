@@ -137,10 +137,9 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 	// as they're matched, so the post-pass can run a single
 	// walkClassMembers per class — covering @Inject consumer edges,
 	// NestJS dynamic-module factory providers, and `this.<field>`
-	// tenv seeding all in one walk. Replaces three separate
-	// walkNodes passes (emitInjectConsumers, emitDynamicModuleBindings,
-	// collectThisParamTypesInClass) per the §6.6 consolidation in
-	// spec-extractor-perf.md.
+	// tenv seeding all in one walk. Replaces three separate walkNodes
+	// passes (emitInjectConsumers, emitDynamicModuleBindings,
+	// collectThisParamTypesInClass).
 	var classCarries []classCarry
 
 	parser.EachMatch(e.qAll, root, src, func(m parser.QueryResult) {
@@ -216,8 +215,7 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 	// `this.<field>` tenv seeding from constructor parameter-property
 	// shorthand or class field annotations / inject() initializers.
 	// Folding the three previous walks into one cuts per-class
-	// walkNodes cost by ~3× on NestJS-style class-heavy files
-	// (spec-extractor-perf.md §6.6).
+	// walkNodes cost by ~3× on NestJS-style class-heavy files.
 	for _, cc := range classCarries {
 		walkClassMembers(cc.node, src, cc.id, filePath, result, tenv)
 	}
@@ -352,7 +350,7 @@ func (e *TypeScriptExtractor) emitArrow(m parser.QueryResult, filePath, fileID s
 // shallow @Module(...) decorator scan. The deeper per-class walk
 // (constructor / fields / static factories) is deferred to the
 // post-pass walkClassMembers loop so all three concerns can share
-// one walkNodes traversal — see §6.6.
+// one walkNodes traversal.
 func (e *TypeScriptExtractor) emitClass(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult) string {
 	name := m.Captures["class.name"].Text
 	def := m.Captures["class.def"]
@@ -675,7 +673,7 @@ func emitModuleBindings(classNode *sitter.Node, src []byte, classID, filePath st
 	// Dynamic-module factory bindings (forRoot/forFeature/register/*Async)
 	// are emitted by walkClassMembers in the post-pass — same walkNodes
 	// pass that handles @Inject consumers and `this.<field>` tenv
-	// seeding (§6.6).
+	// seeding.
 }
 
 func emitProvidersFromObject(config *sitter.Node, src []byte, classID, filePath string, result *parser.ExtractionResult, originTag string) {
@@ -760,8 +758,7 @@ type classCarry struct {
 //     returned object.
 //
 // Replaces three previous walkNodes passes (emitInjectConsumers,
-// emitDynamicModuleBindings, collectThisParamTypesInClass) — see
-// spec-extractor-perf.md §6.6.
+// emitDynamicModuleBindings, collectThisParamTypesInClass).
 func walkClassMembers(classNode *sitter.Node, src []byte, classID, filePath string, result *parser.ExtractionResult, tenv typeEnv) {
 	seenInject := make(map[string]struct{})
 	walkNodes(classNode, func(n *sitter.Node) {

@@ -82,7 +82,7 @@ func (mi *MultiIndexer) IndexAll() (map[string]*IndexResult, error) {
 	return mi.IndexScoped("", "")
 }
 
-// IndexScoped is IndexAll restricted to repos whose §4.2 workspace and
+// IndexScoped is IndexAll restricted to repos whose workspace and
 // project slugs match. Empty filters disable that axis (so empty/empty
 // is equivalent to IndexAll). Resolution honours the same precedence
 // as resolveWorkspaceID/resolveProjectID — RepoEntry override →
@@ -123,7 +123,7 @@ func (mi *MultiIndexer) IndexScoped(workspaceSlug, projectSlug string) (map[stri
 	return r, err
 }
 
-// filterReposByScope returns the subset of repos whose resolved §4.2
+// filterReposByScope returns the subset of repos whose resolved
 // workspace and project slugs match the supplied filters. Empty
 // filters disable that axis. Loads each repo's `.gortex.yaml` first so
 // resolution sees the workspace/project declared there — matching only
@@ -322,14 +322,14 @@ func (mi *MultiIndexer) indexMultiRepo(repos []config.RepoEntry) (map[string]*In
 		}
 	}
 
-	// spec-launch.md §11 step H: run a global cross-repo resolution
-	// pass once every repo is indexed, with the §4.2 cross-workspace
-	// boundary check wired in. Without this, repos that import each
-	// other have unresolved edges that only resolve when an editor
-	// touches a file (the watcher path is the only other place this
-	// resolver runs). The boundary lookup means cross-workspace
-	// candidates only resolve when an explicit `cross_workspace_deps`
-	// declaration covers them — preserving §4.5 criterion 4.
+	// Run a global cross-repo resolution pass once every repo is
+	// indexed, with the cross-workspace boundary check wired in.
+	// Without this, repos that import each other have unresolved
+	// edges that only resolve when an editor touches a file (the
+	// watcher path is the only other place this resolver runs). The
+	// boundary lookup means cross-workspace candidates only resolve
+	// when an explicit `cross_workspace_deps` declaration covers
+	// them.
 	cr := resolver.NewCrossRepo(mi.graph)
 	cr.SetCrossWorkspaceDepLookup(mi.crossWorkspaceLookup())
 	cr.ResolveAll()
@@ -448,7 +448,7 @@ func (mi *MultiIndexer) TrackRepoCtx(ctx context.Context, entry config.RepoEntry
 	willBeMultiRepo := len(mi.repos)+1 >= 2 || totalConfigured >= 2
 
 	// Lazy-load the per-repo `.gortex.yaml` so GetRepoConfig sees the
-	// §4.2 workspace / project slugs declared inside the repo. Without
+	// workspace / project slugs declared inside the repo. Without
 	// this the production code path never reads the file and every
 	// repo silently falls back to `workspace = repoPrefix`, making
 	// shared-workspace cross-repo matching impossible to express. Idempotent
@@ -466,7 +466,7 @@ func (mi *MultiIndexer) TrackRepoCtx(ctx context.Context, entry config.RepoEntry
 	if willBeMultiRepo {
 		idx.SetRepoPrefix(prefix)
 	}
-	// §4.2 workspace / project slugs stamped on every node. Resolution
+	// Workspace / project slugs stamped on every node. Resolution
 	// order (highest priority first): RepoEntry.Workspace from the
 	// global config (lets users pin OSS repos without committing a
 	// `.gortex.yaml`) → `.gortex.yaml::workspace` → repoPrefix
@@ -793,8 +793,9 @@ func (mi *MultiIndexer) MergedContractRegistry() *contracts.Registry {
 		if cr == nil {
 			continue
 		}
-		// Re-stamp the §4.2 slugs from the indexer alongside the repo
-		// prefix on merge. The contracts already carry these slugs from
+		// Re-stamp the workspace/project slugs from the indexer
+		// alongside the repo prefix on merge. The contracts already
+		// carry these slugs from
 		// their source registry, but AddAllScoped is idempotent (skips
 		// non-empty existing values) so this stays correct even if a
 		// future code path forgets the stamp on first insert.

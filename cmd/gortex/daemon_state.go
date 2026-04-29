@@ -262,13 +262,13 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger) *indexer.MultiWat
 		}
 	}
 
-	// spec-launch.md §11 step D — backfill `WorkspaceID` / `ProjectID`
-	// onto nodes and contracts loaded from a pre-§4 snapshot. Old
-	// snapshots have these fields as zero (gob decodes unknown fields
-	// silently); without this stamp the matcher's
-	// EffectiveWorkspace falls back to RepoPrefix and explicit
-	// shared-workspace declarations stop working until every file is
-	// touched. Idempotent — re-running on a stamped graph is a no-op.
+	// Backfill `WorkspaceID` / `ProjectID` onto nodes and contracts
+	// loaded from a legacy snapshot. Old snapshots have these fields
+	// as zero (gob decodes unknown fields silently); without this
+	// stamp the matcher's EffectiveWorkspace falls back to RepoPrefix
+	// and explicit shared-workspace declarations stop working until
+	// every file is touched. Idempotent — re-running on a stamped
+	// graph is a no-op.
 	if nodes, conts := state.multiIndexer.BackfillWorkspaceSlugs(); nodes+conts > 0 {
 		logger.Info("daemon: backfilled workspace/project slugs from .gortex.yaml",
 			zap.Int("nodes", nodes),

@@ -83,9 +83,9 @@ type Server struct {
 	activeProject string
 	// scopeWorkspace / scopeProject default-scope every query at this
 	// server instance to a single (workspace, project) tuple. Set by
-	// `gortex server --workspace <slug> [--scope-project <slug>]`
-	// (spec §4.2 / Step J). Tool handlers consult these via the
-	// QueryScope() helper rather than reading the fields directly.
+	// `gortex server --workspace <slug> [--scope-project <slug>]`.
+	// Tool handlers consult these via the QueryScope() helper rather
+	// than reading the fields directly.
 	scopeWorkspace string
 	scopeProject   string
 	logger         *zap.Logger
@@ -345,12 +345,12 @@ type MultiRepoOptions struct {
 	MultiIndexer  *indexer.MultiIndexer
 	ConfigManager *config.ConfigManager
 	ActiveProject string
-	// ScopeWorkspace is the spec-launch.md §4.2 workspace slug filter
-	// applied as the default scope on every query. Set by `gortex
-	// server --workspace <slug>` (Step J). Empty disables the filter.
+	// ScopeWorkspace is the workspace slug filter applied as the
+	// default scope on every query. Set by `gortex server --workspace
+	// <slug>`. Empty disables the filter.
 	ScopeWorkspace string
 	// ScopeProject narrows further inside ScopeWorkspace (no effect
-	// without it). §4.2 project slug.
+	// without it).
 	ScopeProject string
 }
 
@@ -414,13 +414,13 @@ func (s *Server) InitFeedback(cacheDir, repoPath string) {
 	s.feedback = newFeedbackManager(cacheDir, repoPath)
 }
 
-// WorkspaceScope returns the default §4.2 workspace slug filter
-// applied to every query (set by `gortex server --workspace`). Empty
+// WorkspaceScope returns the default workspace slug filter applied
+// to every query (set by `gortex server --workspace`). Empty
 // means no scope; tools that consult it should fall back to the
 // global multi-workspace view.
 func (s *Server) WorkspaceScope() string { return s.scopeWorkspace }
 
-// ProjectScope returns the §4.2 project slug filter; meaningful only
+// ProjectScope returns the project slug filter; meaningful only
 // when WorkspaceScope() is non-empty.
 func (s *Server) ProjectScope() string { return s.scopeProject }
 
@@ -429,8 +429,8 @@ func (s *Server) ProjectScope() string { return s.scopeProject }
 // call passing `workspace: "tuck"` against a server with
 // `--workspace acme` produces a tuck-scoped query. An empty caller
 // arg falls through to the server default. Used by tool handlers to
-// seed QueryOptions in one place; the spec §11 step P "scope
-// overrides" semantics live here.
+// seed QueryOptions in one place; the "scope overrides" semantics
+// live here.
 func (s *Server) resolveQueryScope(argWorkspace, argProject string) (workspace, project string) {
 	workspace = s.scopeWorkspace
 	if argWorkspace != "" {

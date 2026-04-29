@@ -20,11 +20,10 @@ const (
 		name: (command_name) @cmd.name) @cmd.expr`
 )
 
-// BashExtractor extracts Bash/Shell source files.
-// Tier B per spec-extractor-perf.md: three small queries with an
-// inter-pass ordering constraint (funcRanges must be built before
-// command attribution), so we precompile each query at init but
-// don't merge into an alternation.
+// BashExtractor extracts Bash/Shell source files. Three small queries
+// with an inter-pass ordering constraint (funcRanges must be built
+// before command attribution), so we precompile each query at init
+// but don't merge into an alternation.
 type BashExtractor struct {
 	lang      *sitter.Language
 	qFunction *parser.PreparedQuery

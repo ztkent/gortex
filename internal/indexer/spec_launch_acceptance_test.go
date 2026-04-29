@@ -1,15 +1,14 @@
 package indexer
 
-// Spec-launch.md §4.5 acceptance suite — Step R of iteration 1's
-// validation plan. The five criteria below are the alpha-launch exit
-// signal: all five must pass on a fresh local setup with two
-// unrelated workspaces (`tuck` and `personal`), each defining
-// `POST /api/auth/login`.
+// Workspace-isolation acceptance suite. The five criteria below are
+// the alpha-launch exit signal: all five must pass on a fresh local
+// setup with two unrelated workspaces (`tuck` and `personal`), each
+// defining `POST /api/auth/login`.
 //
 // The suite uses the same MultiIndexer + ConfigManager wiring real
 // users go through, populated with fixture repos under `t.TempDir()`.
-// No cloud, no daemon — purely local, mirroring the spec's "all five
-// are mechanically testable on a single laptop" promise.
+// No cloud, no daemon — purely local; all five criteria are
+// mechanically testable on a single laptop.
 
 import (
 	"context"
@@ -29,7 +28,7 @@ import (
 )
 
 // writeWorkspaceYAML drops a `.gortex.yaml` declaring workspace and
-// optional project. Callers pass project="" for the spec's
+// optional project. Callers pass project="" for the
 // "single-project repo, project = workspace" default.
 func writeWorkspaceYAML(t *testing.T, dir, workspace, project string) {
 	t.Helper()
@@ -127,10 +126,10 @@ func TestSpecLaunch_4_5_OrphansAreReportedPerWorkspace(t *testing.T) {
 // the matcher is impossible by construction."
 //
 // Both workspaces have BOTH a provider and a consumer for
-// POST /api/auth/login. Pre-§4 the matcher would have produced 4
-// cross-workspace pairs. With Step F/G's boundary enforcement we
-// expect exactly 2 pairs, one per workspace, neither crossing the
-// workspace line.
+// POST /api/auth/login. Without workspace bucketing the matcher
+// would have produced 4 cross-workspace pairs. With boundary
+// enforcement we expect exactly 2 pairs, one per workspace, neither
+// crossing the workspace line.
 func TestSpecLaunch_4_5_NoCrossWorkspacePairs(t *testing.T) {
 	tuckRoot := setupHTTPLoginProvider(t, "tuck-api")
 	tuckConsumerRoot := setupHTTPLoginConsumer(t, "tuck-app")

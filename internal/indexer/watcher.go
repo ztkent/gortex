@@ -1,12 +1,16 @@
 package indexer
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/fsnotify/fsnotify"
+	"github.com/sgtdi/fswatcher"
 	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/config"
@@ -43,7 +47,8 @@ type SymbolChangeCallback func(filePath string, oldSymbols, newSymbols []*graph.
 // Watcher keeps the knowledge graph in live sync with the filesystem.
 type Watcher struct {
 	indexer          *Indexer
-	fsw              *fsnotify.Watcher
+	fsw              fswatcher.Watcher
+	fsCancel         context.CancelFunc
 	config           config.WatchConfig
 	excludes         *excludes.Matcher
 	events           chan GraphChangeEvent
@@ -76,11 +81,6 @@ const maxHistory = 1000
 // that bypasses ConfigManager — the watcher falls back to the builtin
 // baseline so the obvious non-source dirs stay ignored.
 func NewWatcher(idx *Indexer, cfg config.WatchConfig, logger *zap.Logger) (*Watcher, error) {
-	fsw, err := fsnotify.NewWatcher()
-	if err != nil {
-		return nil, err
-	}
-
 	debounce := cfg.DebounceMs
 	if debounce <= 0 {
 		debounce = 150
@@ -108,7 +108,6 @@ func NewWatcher(idx *Indexer, cfg config.WatchConfig, logger *zap.Logger) (*Watc
 
 	return &Watcher{
 		indexer:    idx,
-		fsw:        fsw,
 		config:     cfg,
 		excludes:   excludes.New(patterns),
 		events:     make(chan GraphChangeEvent, 64),
@@ -120,28 +119,113 @@ func NewWatcher(idx *Indexer, cfg config.WatchConfig, logger *zap.Logger) (*Watc
 	}, nil
 }
 
-// Start begins watching the given paths recursively.
+// Start begins watching the given paths recursively. The backend is
+// fswatcher, which uses FSEvents on macOS (one stream per root,
+// constant FD cost) and inotify on Linux (one watch per directory in
+// the tree). On the inotify path the per-user `max_user_watches` cap
+// applies; bump that sysctl if a multi-repo install grows beyond it.
 func (w *Watcher) Start(paths []string) error {
+	if len(paths) == 0 {
+		return errors.New("watcher: no paths to watch")
+	}
+	ready := make(chan struct{})
+	opts := []fswatcher.WatcherOpt{
+		// 1ms is the smallest cooldown the library accepts. Setting it
+		// minimal keeps fswatcher's aggregator from merging events for
+		// the same path across our debounce window — our per-file
+		// debounce + storm-mode logic stays the authoritative coalescer.
+		fswatcher.WithCooldown(time.Millisecond),
+		// Drop the library's own logging chatter; we surface what we
+		// care about through our own logger.
+		fswatcher.WithSeverity(fswatcher.SeverityError),
+		// Block Start until the OS-level streams are actually live.
+		// Without this the first events after Start race against
+		// stream registration and silently disappear.
+		fswatcher.WithReadyChannel(ready),
+	}
 	for _, p := range paths {
 		absPath, err := filepath.Abs(p)
 		if err != nil {
 			return err
 		}
-		if err := w.addRecursive(absPath); err != nil {
-			return err
-		}
+		opts = append(opts, fswatcher.WithPath(absPath))
 	}
+	fsw, err := fswatcher.New(opts...)
+	if err != nil {
+		return err
+	}
+	w.fsw = fsw
 
+	ctx, cancel := context.WithCancel(context.Background())
+	w.fsCancel = cancel
+	watchErr := make(chan error, 1)
+	go func() {
+		err := fsw.Watch(ctx)
+		watchErr <- err
+		if err != nil && !errors.Is(err, context.Canceled) && w.logger != nil {
+			w.logger.Warn("watcher: backend stopped", zap.Error(err))
+		}
+	}()
+	// Wait for the backend to become ready or fail fast on early
+	// initialisation errors (e.g. an inotify add returning ENOSPC).
+	select {
+	case <-ready:
+	case err := <-watchErr:
+		cancel()
+		return err
+	case <-time.After(5 * time.Second):
+		cancel()
+		return errors.New("watcher: backend did not become ready within 5s")
+	}
+	// FSEvents reports its stream as "started" the instant the C call
+	// returns, but immediately fires synthetic "this file exists"
+	// events for every pre-existing file under the watched root. The
+	// flags on those events are indistinguishable from real changes
+	// (Create + Modified are set), so we'd re-index every file on
+	// every daemon start. Drain everything that lands in the events
+	// buffer within a short grace window before starting the real
+	// loop — anything genuinely happening to a file during that
+	// window will fire again as new events.
+	if runtime.GOOS == "darwin" {
+		w.drainInitialReplay(150 * time.Millisecond)
+	}
 	go w.loop()
 	return nil
+}
+
+// drainInitialReplay reads from the backend's events channel until
+// `window` of quiet has elapsed with no further events. macOS FSEvents
+// streams emit a burst of synthetic "exists" events at startup; this
+// burst is bounded by the per-stream latency (~50 ms). The first call
+// blocks at least one window so early events have a chance to arrive.
+func (w *Watcher) drainInitialReplay(window time.Duration) {
+	if w.fsw == nil {
+		return
+	}
+	eventsCh := w.fsw.Events()
+	t := time.NewTimer(window)
+	defer t.Stop()
+	for {
+		select {
+		case <-eventsCh:
+			t.Reset(window)
+		case <-t.C:
+			return
+		}
+	}
 }
 
 // Stop halts the watcher and cleans up resources.
 func (w *Watcher) Stop() error {
 	close(w.done)
-	err := w.fsw.Close()
+	if w.fsCancel != nil {
+		w.fsCancel()
+	}
+	if w.fsw != nil {
+		w.fsw.Close()
+	}
 	<-w.stopped
-	return err
+	return nil
 }
 
 // Events returns a read-only channel of graph change events.
@@ -182,26 +266,28 @@ func (w *Watcher) OnSymbolChange(cb SymbolChangeCallback) {
 
 func (w *Watcher) loop() {
 	defer close(w.stopped)
+	if w.fsw == nil {
+		// Test path: handleEvent is being driven directly without
+		// having called Start. Block until Stop closes w.done.
+		<-w.done
+		return
+	}
+	eventsCh := w.fsw.Events()
 	for {
 		select {
 		case <-w.done:
 			return
-		case event, ok := <-w.fsw.Events:
+		case event, ok := <-eventsCh:
 			if !ok {
 				return
 			}
 			w.handleEvent(event)
-		case err, ok := <-w.fsw.Errors:
-			if !ok {
-				return
-			}
-			w.logger.Warn("watcher error", zap.Error(err))
 		}
 	}
 }
 
-func (w *Watcher) handleEvent(event fsnotify.Event) {
-	path := event.Name
+func (w *Watcher) handleEvent(event fswatcher.WatchEvent) {
+	path := normalizeEventPath(event.Path, w.indexer.rootPath)
 
 	// Skip events from excluded paths. A single matcher call covers
 	// what the old code split across inExcludedDir + isExcluded.
@@ -209,10 +295,16 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 		return
 	}
 
-	// If a new directory is created, watch it recursively.
-	if event.Has(fsnotify.Create) {
+	kind := pickKind(event.Types)
+	if kind == "" {
+		return
+	}
+
+	// fswatcher with WatchNested is recursive on every backend, so we
+	// don't need to manually re-attach watches on directory creates;
+	// drop dir events before they reach indexer logic.
+	if kind == ChangeCreated || kind == ChangeModified {
 		if info, err := os.Stat(path); err == nil && info.IsDir() {
-			_ = w.addRecursive(path)
 			return
 		}
 	}
@@ -220,23 +312,9 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	// Only process files with known extensions.
 	if _, ok := w.indexer.registry.DetectLanguage(path); !ok {
 		// Still handle remove for previously indexed files.
-		if !event.Has(fsnotify.Remove) && !event.Has(fsnotify.Rename) {
+		if kind != ChangeDeleted && kind != ChangeRenamed {
 			return
 		}
-	}
-
-	var kind ChangeKind
-	switch {
-	case event.Has(fsnotify.Create):
-		kind = ChangeCreated
-	case event.Has(fsnotify.Write):
-		kind = ChangeModified
-	case event.Has(fsnotify.Remove):
-		kind = ChangeDeleted
-	case event.Has(fsnotify.Rename):
-		kind = ChangeRenamed
-	default:
-		return
 	}
 
 	// Storm mode — if more than StormThreshold events arrived within
@@ -505,66 +583,66 @@ func (w *Watcher) snapshotSymbols(relPath string) []*graph.Node {
 	return snapshot
 }
 
-// addRecursive walks the tree under root and registers an fsnotify watch
-// for every directory that contains at least one indexable file. Empty
-// directories and trees full of binary/doc files (where no parser claims
-// any of the contents) are skipped — that's where the savings come from
-// on huge repos. Linux's default inotify limit is 8192 user watches; a
-// 200k-file monorepo can have 50k+ subdirectories, but typically only a
-// fraction host code we care about.
-//
-// Errors from fsw.Add (most commonly ENOSPC when the inotify limit is
-// exhausted) are counted but never bubble up — a partial watch is still
-// useful, and aborting the walk would leave the user with no watcher at
-// all. A single warning summarises the skipped count plus the OS-level
-// hint for raising the limit.
-func (w *Watcher) addRecursive(root string) error {
-	needed := make(map[string]struct{})
-	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if d.IsDir() {
-			if w.isExcluded(path) {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if w.isExcluded(path) {
-			return nil
-		}
-		// File: only mark the parent as needing a watch when a parser
-		// claims this extension. Avoids subscribing to dirs full of
-		// PNGs, fixtures, generated assets, etc.
-		if _, ok := w.indexer.registry.DetectLanguage(path); ok {
-			needed[filepath.Dir(path)] = struct{}{}
-		}
-		return nil
-	})
-	if err != nil {
-		return err
+// normalizeEventPath aligns an event path emitted by the OS-level
+// backend with the form the indexer stored when it walked the tree.
+// On macOS, FSEvents reports paths under /private/var/... and
+// /private/tmp/... even when the watcher was registered with /var/...
+// or /tmp/... — those are real /private/-rooted symlinks. The indexer
+// keyed its symbols by the user-facing form, so without this we'd
+// fail to find any symbols to evict on modify or delete.
+func normalizeEventPath(path, rootPath string) string {
+	if runtime.GOOS != "darwin" {
+		return path
 	}
+	if !strings.HasPrefix(path, "/private/") {
+		return path
+	}
+	// Without a rootPath we have no way to know which form (the
+	// /private/-prefixed canonical or the symlink form) the rest of
+	// the daemon expects, so leave it alone.
+	if rootPath == "" || strings.HasPrefix(rootPath, "/private/") {
+		return path
+	}
+	stripped := path[len("/private"):]
+	if !strings.HasPrefix(stripped, rootPath) {
+		// Different prefix entirely — leave the canonical form alone.
+		return path
+	}
+	return stripped
+}
 
-	var watched, skipped int
-	var firstErr error
-	for dir := range needed {
-		if addErr := w.fsw.Add(dir); addErr != nil {
-			skipped++
-			if firstErr == nil {
-				firstErr = addErr
-			}
-			continue
+// pickKind reduces the aggregated event-type set from fswatcher to a
+// single ChangeKind. Priority: Remove > Rename > Modify > Create.
+// Modify outranks Create because FSEvents flags are cumulative — a
+// write to an existing file fires with both Create and Modify set,
+// and treating that as "created" loses the old-symbols snapshot the
+// modify path produces. An event with only types we don't act on
+// (e.g. chmod alone) returns "".
+func pickKind(types []fswatcher.EventType) ChangeKind {
+	var hasCreate, hasModify, hasRemove, hasRename bool
+	for _, t := range types {
+		switch t {
+		case fswatcher.EventCreate:
+			hasCreate = true
+		case fswatcher.EventMod:
+			hasModify = true
+		case fswatcher.EventRemove:
+			hasRemove = true
+		case fswatcher.EventRename:
+			hasRename = true
 		}
-		watched++
 	}
-	if skipped > 0 && w.logger != nil {
-		w.logger.Warn("watcher: some directories could not be watched",
-			zap.Int("skipped", skipped),
-			zap.Int("watched", watched),
-			zap.Error(firstErr),
-			zap.String("hint", "Linux: bump fs.inotify.max_user_watches; macOS: usually no limit"))
+	switch {
+	case hasRemove:
+		return ChangeDeleted
+	case hasRename:
+		return ChangeRenamed
+	case hasModify:
+		return ChangeModified
+	case hasCreate:
+		return ChangeCreated
 	}
-	return nil
+	return ""
 }
 
 // isExcluded reports whether path is excluded by the effective pattern list.

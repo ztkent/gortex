@@ -279,16 +279,35 @@ func (c *realController) Status(_ context.Context) (daemon.StatusResponse, error
 		totalNodes               int
 	)
 	if c.multiIndexer != nil {
-		// meta.NodeCount / meta.EdgeCount were frozen at TrackRepo time
-		// from graph.NodeCount() — which is the *whole* multi-repo graph,
-		// not this repo's slice. Recompute from graph.RepoStats() at
-		// status time so the numbers actually reflect this repo's
-		// contribution. Falls back to the stored counts when the graph
-		// has no entry for the prefix (shouldn't happen in practice,
-		// but keeps the output complete rather than zeroed).
+		// Prefer the live byRepo bucket counts from graph.RepoStats()
+		// when the prefix is present there — that's the authoritative
+		// view. Fall back to meta.NodeCount / meta.EdgeCount when it
+		// isn't: indexer.repoNodeEdgeCount writes per-repo counts at
+		// TrackRepo time, so meta is now safe to use directly (no longer
+		// a leaked workspace total). Empty repos legitimately have no
+		// byRepo entry; keeping the meta fallback also keeps the table
+		// stable across post-warmup graph mutations that drop a prefix
+		// from byRepo without touching meta.
 		var repoStats map[string]graph.GraphStats
 		if c.graph != nil {
 			repoStats = c.graph.RepoStats()
+		}
+
+		// Diagnostic: when AllMetadata has tracked repos but RepoStats
+		// returns nothing (or a much smaller set), some path has cleared
+		// byRepo without clearing the underlying nodes. Logged once per
+		// status call so the warning fires every poll until the cause
+		// is found and fixed; the meta fallback below keeps the table
+		// usable in the meantime.
+		if c.logger != nil {
+			tracked := len(c.multiIndexer.AllMetadata())
+			bucketed := len(repoStats)
+			if tracked > 0 && bucketed < tracked {
+				c.logger.Warn("daemon: byRepo bucket count below tracked-repo count — graph mutation cleared per-repo index?",
+					zap.Int("tracked_repos", tracked),
+					zap.Int("byrepo_buckets", bucketed),
+					zap.Int("graph_total_nodes", c.graph.NodeCount()))
+			}
 		}
 
 		// Search and vector backends are process-wide (one shared index
@@ -300,6 +319,18 @@ func (c *realController) Status(_ context.Context) (daemon.StatusResponse, error
 		backendStats := resolveSearchBackend(c.multiIndexer.Search())
 		for _, s := range repoStats {
 			totalNodes += s.TotalNodes
+		}
+		// totalNodes drives the SearchBytes share split below. When
+		// byRepo is empty for every prefix (the post-warmup-wipe case
+		// described above), fall back to summing per-repo meta so the
+		// share denominator stays nonzero and the search budget gets
+		// attributed instead of falling on the floor.
+		if totalNodes == 0 {
+			for _, meta := range c.multiIndexer.AllMetadata() {
+				if meta != nil {
+					totalNodes += meta.NodeCount
+				}
+			}
 		}
 
 		for prefix, meta := range c.multiIndexer.AllMetadata() {
@@ -324,7 +355,7 @@ func (c *realController) Status(_ context.Context) (daemon.StatusResponse, error
 			}
 			mem.TotalBytes = mem.NodesBytes + mem.EdgesBytes + mem.SearchBytes + mem.VectorsBytes
 
-			// Pull the §4.2 workspace/project slugs straight off the
+			// Pull the workspace/project slugs straight off the
 			// per-repo Indexer — that's the source of truth that
 			// stamps every node emitted by this repo. Falls back to
 			// the prefix on legacy setups where no .gortex.yaml
@@ -386,7 +417,7 @@ func (c *realController) Status(_ context.Context) (daemon.StatusResponse, error
 	}
 	// Always populate the per-workspace rollup — even when every
 	// workspace is a default singleton. Hiding it on legacy setups
-	// makes the §4 boundary feature invisible, which is the opposite
+	// makes the boundary feature invisible, which is the opposite
 	// of what users want when they're trying to migrate. Renderer-
 	// side compaction (single-line hint vs full table) keeps the
 	// output tidy when there's nothing meaningful to summarise.

@@ -15,8 +15,8 @@ import (
 )
 
 // TestMultiIndexer_IndexScoped_WorkspaceFromGortexYAML verifies that
-// IndexScoped picks up the §4.2 workspace slug declared in a repo's
-// own `.gortex.yaml` — the typical first-party setup. Repos with a
+// IndexScoped picks up the workspace slug declared in a repo's own
+// `.gortex.yaml` — the typical first-party setup. Repos with a
 // different workspace slug must be excluded.
 func TestMultiIndexer_IndexScoped_WorkspaceFromGortexYAML(t *testing.T) {
 	repoA := setupRepoDir(t, "repo-a")
@@ -85,7 +85,7 @@ func TestMultiIndexer_IndexScoped_RepoEntryOverride(t *testing.T) {
 }
 
 // TestMultiIndexer_IndexScoped_FallsBackToRepoPrefix verifies the
-// §4.4 default: repos with no `.gortex.yaml::workspace` and no
+// default: repos with no `.gortex.yaml::workspace` and no
 // RepoEntry.Workspace use the repo prefix as their workspace slug.
 func TestMultiIndexer_IndexScoped_FallsBackToRepoPrefix(t *testing.T) {
 	repoA := setupRepoDir(t, "repo-a")

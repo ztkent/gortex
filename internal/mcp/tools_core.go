@@ -562,11 +562,11 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 	sess := s.sessionFor(ctx)
 	sess.recordSearch(q)
 
-	// spec-launch.md §4.2 / §11 step P — apply server-default scope
-	// merged with caller args. `workspace` / `project` args win
-	// per-field; empty falls through to the server's --workspace
-	// flag. SearchSymbolsScoped over-fetches and post-filters, so
-	// ranking is preserved while results stay inside the boundary.
+	// Apply server-default scope merged with caller args. `workspace`
+	// / `project` args win per-field; empty falls through to the
+	// server's --workspace flag. SearchSymbolsScoped over-fetches and
+	// post-filters, so ranking is preserved while results stay inside
+	// the boundary.
 	workspaceArg := req.GetString("workspace", "")
 	projectArg := req.GetString("project", "")
 	scopeWS, scopeProj := s.resolveQueryScope(workspaceArg, projectArg)
@@ -813,9 +813,9 @@ func (s *Server) handleFindUsages(_ context.Context, req mcp.CallToolRequest) (*
 	}
 	minTier := req.GetString("min_tier", "")
 
-	// spec-launch.md §4.5 criterion 3 — find_usages on a tuck symbol
-	// returns hits only from tuck. Server-level --workspace + caller
-	// `workspace` arg compose the same way as on search_symbols.
+	// find_usages on a tuck symbol returns hits only from tuck.
+	// Server-level --workspace + caller `workspace` arg compose the
+	// same way as on search_symbols.
 	workspaceArg := req.GetString("workspace", "")
 	projectArg := req.GetString("project", "")
 	scopeWS, scopeProj := s.resolveQueryScope(workspaceArg, projectArg)

@@ -41,9 +41,9 @@ func NewMultiWatcher(
 		events:      make(chan GraphChangeEvent, 128),
 		done:        make(chan struct{}),
 	}
-	// Wire the §4.2 cross-workspace boundary check into the resolver so
+	// Wire the cross-workspace boundary check into the resolver so
 	// cross-repo edges are only resolved when the source workspace
-	// declared the target via `cross_workspace_deps` (Step H).
+	// declared the target via `cross_workspace_deps`.
 	mw.resolver.SetCrossWorkspaceDepLookup(mi.crossWorkspaceLookup())
 
 	for prefix, cfg := range configs {

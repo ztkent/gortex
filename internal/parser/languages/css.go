@@ -16,10 +16,10 @@ const (
 	qCssId     = `(id_selector (id_name) @id.name) @id.def`
 )
 
-// CSSExtractor extracts CSS files into graph nodes and edges.
-// Tier B per spec-extractor-perf.md: only three queries, so the
-// merged-alternation pattern wouldn't pay; precompiling each query
-// once at init still removes the per-file sitter.NewQuery cost.
+// CSSExtractor extracts CSS files into graph nodes and edges. Only
+// three queries, so the merged-alternation pattern wouldn't pay;
+// precompiling each query once at init still removes the per-file
+// sitter.NewQuery cost.
 type CSSExtractor struct {
 	lang    *sitter.Language
 	qImport *parser.PreparedQuery

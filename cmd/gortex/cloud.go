@@ -20,8 +20,7 @@ import (
 // cloud is the umbrella command for all cloud-side flows that run
 // from the local CLI: login, list, logout. These commands talk to
 // the gortex-cloud control plane (API) — they never run cloud code
-// in-process. Per spec-launch.md §5.3 the two repos are decoupled
-// at the module boundary.
+// in-process. The two repos are decoupled at the module boundary.
 var cloudCmd = &cobra.Command{
 	Use:   "cloud",
 	Short: "Manage Gortex Cloud connections (login, list, logout)",

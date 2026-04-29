@@ -13,8 +13,8 @@ import (
 )
 
 // newLocalToolExecutor builds the daemon.LocalExecutor closure used by
-// the spec-launch.md §11 step P router. It wraps the in-process MCP
-// server's tool dispatch with the same body-shape the HTTP handler
+// the multi-server router. It wraps the in-process MCP server's tool
+// dispatch with the same body-shape the HTTP handler
 // accepts (`{"arguments": {...}}` or flat-args), so a router-routed
 // local call returns bytes shaped exactly like a remote-proxied
 // response — the caller can't tell the difference and the response

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fsnotify/fsnotify"
+	"github.com/sgtdi/fswatcher"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -22,8 +22,8 @@ import (
 // stop flowing through the per-file debounce path and instead land
 // in a batch that drains after the quiet period. Without this, a
 // 1000-file checkout runs 1000 per-file resolver + search rebuilds
-// back-to-back, which is the slow branch-switch problem the spec
-// calls out.
+// back-to-back — the slow branch-switch problem this mode exists
+// to avoid.
 func TestWatcher_StormModeBatches(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.MkdirAll(dir, 0o755))
@@ -39,9 +39,8 @@ func TestWatcher_StormModeBatches(t *testing.T) {
 		StormQuietPeriodMs: 50,
 	}, zap.NewNop())
 	require.NoError(t, err)
-	// We're exercising handleEvent directly; no Start/Stop. Close
-	// the fsnotify watcher so it doesn't leak a kqueue fd.
-	t.Cleanup(func() { _ = w.fsw.Close() })
+	// We're exercising handleEvent directly; Start was never called,
+	// so there's no backend to clean up.
 
 	// Signal when the drain finishes so the test doesn't have to
 	// poll — the production path has no such hook, but tests need
@@ -102,7 +101,6 @@ func TestWatcher_StormModeDisabled(t *testing.T) {
 		StormThreshold: 0, // disabled
 	}, zap.NewNop())
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = w.fsw.Close() })
 
 	var mu sync.Mutex
 	drainedCalls := 0
@@ -217,8 +215,12 @@ func TestIndexer_IndexFileNoResolve_SkipsResolver(t *testing.T) {
 	idx.ResolveAll() // must not panic
 }
 
-// fakeCreate builds a minimal fsnotify.Event for unit testing the
-// storm path without spinning up a real watcher.
-func fakeCreate(path string) fsnotify.Event {
-	return fsnotify.Event{Name: path, Op: fsnotify.Create}
+// fakeCreate builds a minimal fswatcher.WatchEvent for unit testing
+// the storm path without spinning up a real watcher.
+func fakeCreate(path string) fswatcher.WatchEvent {
+	return fswatcher.WatchEvent{
+		Path:  path,
+		Types: []fswatcher.EventType{fswatcher.EventCreate},
+		Time:  time.Now(),
+	}
 }

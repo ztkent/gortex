@@ -120,8 +120,8 @@ func TestSnapshot_BackwardCompat_OldSnapshotLoads_NoRepos(t *testing.T) {
 // pass: edges whose endpoints aren't in the loaded node set are
 // dropped, not stored. A corrupt or truncated snapshot that landed
 // with dangling refs used to surface later as "edge pointing at nil
-// node" panics in traversal code; the spec calls out dropping them on
-// load as the contract.
+// node" panics in traversal code; the loader's contract is to drop
+// them at load time.
 func TestSnapshot_DanglingEdgesDropped(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("GORTEX_DAEMON_SNAPSHOT", filepath.Join(dir, "snap.gob.gz"))

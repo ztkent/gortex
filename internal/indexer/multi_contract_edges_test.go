@@ -28,12 +28,11 @@ func newMultiLangRegistry() *parser.Registry {
 
 // writeSharedWorkspaceYAML drops a `.gortex.yaml` into dir declaring
 // `workspace: shared-test` and `project: shared-test`. The cross-
-// repo bridge tests in this file exercise the §4.3 boundary's
-// positive case: two distinct repos in the SAME (workspace, project)
-// must produce CrossRepo provider/consumer pairs. The §4.4 defaults
+// repo bridge tests in this file exercise the boundary's positive
+// case: two distinct repos in the SAME (workspace, project) must
+// produce CrossRepo provider/consumer pairs. The defaults
 // (workspace = repo-name, project = repo-name) put each repo in its
-// own bucket; without explicit shared slugs the matcher (correctly,
-// per spec §4.5 criterion 2 and the cross-project rule in §4.3)
+// own bucket; without explicit shared slugs the matcher (correctly)
 // declines to pair them. The shared-project declaration is the
 // explicit "yes, these repos are one logical service" opt-in.
 func writeSharedWorkspaceYAML(t *testing.T, dir string) {

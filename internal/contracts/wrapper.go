@@ -87,11 +87,12 @@ func InlineWrappers(reg *Registry, g *graph.Graph, read SourceReader) []Contract
 						FilePath:   caller.FilePath,
 						Line:       edge.Line,
 						RepoPrefix: caller.RepoPrefix,
-						// §4.2 boundary slugs flow from the caller's graph
-						// node — Step D stamped those at index time. Without
-						// this carry-over the inlined contract gets the
-						// default workspace = repoPrefix and the matcher
-						// can't pair it with a same-workspace provider.
+						// Workspace/project boundary slugs flow from the
+						// caller's graph node — stamped at index time.
+						// Without this carry-over the inlined contract
+						// gets the default workspace = repoPrefix and the
+						// matcher can't pair it with a same-workspace
+						// provider.
 						WorkspaceID: caller.WorkspaceID,
 						ProjectID:   caller.ProjectID,
 						Meta: map[string]any{

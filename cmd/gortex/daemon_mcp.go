@@ -36,8 +36,8 @@ func newMCPDispatcher(srv *gortexmcp.Server, mi *indexer.MultiIndexer, logger *z
 	return &mcpDispatcher{srv: srv, multiIndexer: mi, logger: logger}
 }
 
-// SetRouter wires the spec §11 step P hybrid-read router into the
-// daemon's MCP dispatch. With a router set, tools/call frames carrying
+// SetRouter wires the hybrid-read router into the daemon's MCP
+// dispatch. With a router set, tools/call frames carrying
 // a `workspace` arg or a session cwd that resolves to a non-local
 // server are proxied; all other frames flow through the local
 // MCPServer.HandleMessage path unchanged.
@@ -80,8 +80,8 @@ func (d *mcpDispatcher) Dispatch(ctx context.Context, sess *daemon.Session, fram
 	// "unknown".
 	d.maybeSnoopInitialize(sess, frame)
 
-	// spec-launch.md §11 step P — for tools/call frames carrying a
-	// workspace scope or a cwd that routes elsewhere, the daemon
+	// For tools/call frames carrying a workspace scope or a cwd that
+	// routes elsewhere, the daemon
 	// proxies to the right server instead of running locally. Other
 	// frames (initialize, tools/list, notifications) flow through
 	// the local MCPServer below; routing them across a federation

@@ -8,15 +8,15 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
-// spec-launch.md §11 step S — structured MCP error responses.
+// Structured MCP error responses.
 //
 // MCP tool handlers historically returned errors as text content with
 // no machine-readable code, leaving agents to regex-parse English
 // strings to decide whether to retry, reauth, or surface to the user.
 // Iteration 1 introduces a small set of stable error codes for the
-// failure modes the §4 boundary checks introduce, plus the multi-
-// server routing (§9.5, §11 steps M/O/P) that can fail in distinct
-// ways the agent should react to differently.
+// failure modes the workspace boundary checks introduce, plus the
+// multi-server routing that can fail in distinct ways the agent
+// should react to differently.
 //
 // The codes live here (one place to grep) so cross-package code that
 // surfaces MCP errors can refer to a single canonical list. The

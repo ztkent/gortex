@@ -1,23 +1,19 @@
 package contracts
 
-// Step C/F/G (spec-launch.md §11 Weeks 1-3) acceptance: cross-workspace
-// contract-extraction must NOT pair across the §4.2 hard boundary.
+// Cross-workspace contract-extraction must NOT pair across the
+// workspace hard boundary.
 //
-// The §4 design problem made concrete:
+// The design problem made concrete:
 //
 // Two unrelated services — say `tuck/api` and an unrelated personal
 // project — both implement `POST /api/auth/login` with similar request
-// shapes (because both copied the same auth template). Pre-§4, the
-// matcher pairs them as producer/consumer because the contract ID
-// (`http::POST::/api/auth/login`) is keyed only on (kind, identifier).
-// With Step F (workspace-keyed contract registry) and Step G (Match
-// boundary enforcement) the matcher buckets contracts by
-// (workspace_id, project_id) before pairing, so the two workspaces
-// stay isolated.
-//
-// This test is the §4.5 criterion 2 acceptance fixture. It was added
-// during Week 1 (Step C) as a failing repro and flipped to its
-// post-fix assertions when Steps F/G landed.
+// shapes (because both copied the same auth template). Without
+// workspace bucketing, the matcher pairs them as producer/consumer
+// because the contract ID (`http::POST::/api/auth/login`) is keyed
+// only on (kind, identifier). With a workspace-keyed contract
+// registry and Match boundary enforcement the matcher buckets
+// contracts by (workspace_id, project_id) before pairing, so the two
+// workspaces stay isolated.
 
 import (
 	"strings"
@@ -25,7 +21,7 @@ import (
 )
 
 // fixtureRegistry builds two workspaces' worth of contracts. Each
-// workspace declares its own WorkspaceID slug so the matcher's §4.3
+// workspace declares its own WorkspaceID slug so the matcher's
 // boundary check kicks in. Inside `tuck` the API repo and the app
 // repo legitimately pair (one CrossRepo link, both within
 // WorkspaceID="tuck"). Inside `personal` same. Across the two — never.
@@ -87,12 +83,11 @@ func fixtureRegistry(t *testing.T) *Registry {
 	return reg
 }
 
-// TestCrossWorkspaceContractMatching is §4.5 criterion 2 of the
-// spec-launch.md acceptance set: `gortex contracts check` for `tuck`
-// and `personal` must report orphans, never pair them. With the
-// post-F/G matcher we expect exactly 2 matches (one per workspace,
-// each cross-repo within its own workspace) and zero spurious cross-
-// workspace pairs.
+// TestCrossWorkspaceContractMatching pins the boundary: `gortex
+// contracts check` for `tuck` and `personal` must report orphans,
+// never pair them. We expect exactly 2 matches (one per workspace,
+// each cross-repo within its own workspace) and zero spurious
+// cross-workspace pairs.
 func TestCrossWorkspaceContractMatching(t *testing.T) {
 	reg := fixtureRegistry(t)
 	result := Match(reg)
@@ -118,8 +113,8 @@ func TestCrossWorkspaceContractMatching(t *testing.T) {
 	}
 }
 
-// TestCrossWorkspaceContractOrphansArePerWorkspace pins down §4.5
-// criterion 2's negative side: the `contracts check` orphans report
+// TestCrossWorkspaceContractOrphansArePerWorkspace pins down the
+// negative side of the boundary: the `contracts check` orphans report
 // must isolate workspaces. Removing both consumers leaves both
 // providers as orphans, but each orphan must remain attributable to
 // its own workspace — not silently lumped into a global list that a

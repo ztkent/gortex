@@ -5,11 +5,11 @@ import "testing"
 func TestMatch_ProviderConsumerPairing(t *testing.T) {
 	reg := NewRegistry()
 
-	// Two repos, ONE workspace — the §4.2 spec model for legitimate
-	// cross-repo pairing (microservices behind a shared gateway). Both
-	// contracts declare WorkspaceID="acme" so the matcher's boundary
-	// check pairs them as a CrossRepo link. Without a shared workspace
-	// the §4.3 boundary would (correctly) treat them as orphans.
+	// Two repos, ONE workspace — the model for legitimate cross-repo
+	// pairing (microservices behind a shared gateway). Both contracts
+	// declare WorkspaceID="acme" so the matcher's boundary check pairs
+	// them as a CrossRepo link. Without a shared workspace the
+	// boundary would (correctly) treat them as orphans.
 	reg.Add(Contract{
 		ID:          "http::GET::/api/users",
 		Type:        ContractHTTP,
@@ -143,7 +143,7 @@ func TestMatch_MultipleProvidersSingleConsumer(t *testing.T) {
 
 	// Two providers for the same route (e.g., two microservices behind
 	// a gateway). All three repos declare the same WorkspaceID="acme"
-	// so the §4.3 boundary lets the matcher pair them.
+	// so the boundary lets the matcher pair them.
 	reg.Add(Contract{
 		ID:          "http::GET::/api/users",
 		Type:        ContractHTTP,

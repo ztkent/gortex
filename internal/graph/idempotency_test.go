@@ -150,6 +150,39 @@ func TestAddNode_MigrateBuckets(t *testing.T) {
 	assert.NotNil(t, g.GetNodeByQualName("pkg.New"))
 }
 
+// TestAddNode_PreservesRepoPrefixOnEmptyDowngrade pins the warmup bug
+// where some path re-AddNode'd existing repo-stamped nodes with
+// RepoPrefix="" — clearing them out of byRepo[prefix] without touching
+// the underlying nodes map. The user-visible symptom: per-repo queries
+// (RepoStats / GetRepoNodes / RepoMemoryEstimate) returned empty for
+// repos whose nodes were still present in the graph. Defensive fix:
+// a non-empty prev RepoPrefix is sticky — the empty new value is
+// promoted to prev's value rather than allowed to silently strip the
+// node from its bucket.
+func TestAddNode_PreservesRepoPrefixOnEmptyDowngrade(t *testing.T) {
+	g := New()
+	original := &Node{
+		ID: "myrepo/file.go::Foo", Name: "Foo", Kind: KindFunction,
+		FilePath: "myrepo/file.go", RepoPrefix: "myrepo",
+	}
+	g.AddNode(original)
+	require.Len(t, g.GetRepoNodes("myrepo"), 1, "node must land in byRepo at first add")
+
+	// Re-add with empty RepoPrefix (the buggy caller).
+	g.AddNode(&Node{
+		ID: "myrepo/file.go::Foo", Name: "Foo", Kind: KindFunction,
+		FilePath: "myrepo/file.go",
+		// RepoPrefix intentionally empty.
+	})
+
+	assert.Len(t, g.GetRepoNodes("myrepo"), 1,
+		"byRepo[myrepo] must still contain the node after empty-prefix re-add")
+	assert.NotNil(t, g.GetNode("myrepo/file.go::Foo"),
+		"node itself must still exist")
+	assert.Equal(t, "myrepo", g.GetNode("myrepo/file.go::Foo").RepoPrefix,
+		"RepoPrefix on the stored node must be preserved")
+}
+
 // TestEvictFile_SwapWithLast exercises the sidecar-based swap-with-last
 // removal path. Uses enough nodes per file that iteration order would
 // surface a mis-tracked sidecar position. The assertion is simple: post

@@ -24,8 +24,8 @@ type GuardsConfig struct {
 
 // MultiRepoConfig holds workspace-discovery settings used by the
 // multi-repo bootstrapper. Carries the (formerly `workspace.auto_detect`)
-// flag — moved out from under `workspace:` because §4.2 reclaims that
-// key for the workspace-identity slug.
+// flag — moved out from under `workspace:` because that key is now
+// reclaimed for the workspace-identity slug.
 type MultiRepoConfig struct {
 	// AutoDetect — when true, `gortex index <parent-dir>` walks
 	// immediate subdirectories looking for `.git/`, treating each
@@ -37,7 +37,6 @@ type MultiRepoConfig struct {
 }
 
 // ProjectGlob declares a project's path-globs inside a monorepo.
-// Spec-launch.md §4.2 example:
 //
 //	projects:
 //	  - name: api
@@ -54,7 +53,7 @@ type ProjectGlob struct {
 }
 
 // CrossWorkspaceDep declares an explicit, opt-in dependency from this
-// workspace into another. Spec-launch.md §4.2:
+// workspace into another.
 //
 //	cross_workspace_deps:
 //	  - workspace: gortex
@@ -199,15 +198,15 @@ type Config struct {
 	// re-include something an outer layer excluded.
 	Exclude []string `mapstructure:"exclude" yaml:"exclude,omitempty"`
 
-	// Workspace is the §4.2 hard-boundary slug this repo belongs to.
+	// Workspace is the hard-boundary slug this repo belongs to.
 	// Top-level `workspace: <slug>` in `.gortex.yaml`. Empty → defaults
 	// to the repo name (resolved by the indexer; see
 	// resolveWorkspaceID). Two repos with different non-empty slugs
 	// have their contract surfaces and queries strictly isolated.
 	Workspace string `mapstructure:"workspace" yaml:"workspace,omitempty"`
 
-	// Project is the §4.2 soft sub-boundary slug for single-project
-	// repos. Top-level `project: <slug>`. When `Projects[]` is set
+	// Project is the soft sub-boundary slug for single-project repos.
+	// Top-level `project: <slug>`. When `Projects[]` is set
 	// (monorepo case) this scalar field is ignored — file-to-project
 	// mapping comes from the glob list instead.
 	Project string `mapstructure:"project" yaml:"project,omitempty"`
@@ -219,8 +218,7 @@ type Config struct {
 	Projects []ProjectGlob `mapstructure:"projects" yaml:"projects,omitempty"`
 
 	// CrossWorkspaceDeps declares opt-in dependencies into other
-	// workspaces. Spec-launch.md §4.2 — only `mode: read-only` is
-	// accepted in iteration 1.
+	// workspaces. Only `mode: read-only` is accepted in iteration 1.
 	CrossWorkspaceDeps []CrossWorkspaceDep `mapstructure:"cross_workspace_deps" yaml:"cross_workspace_deps,omitempty"`
 
 	Index    IndexConfig     `mapstructure:"index"    yaml:"index,omitempty"`
@@ -339,8 +337,8 @@ func Default() *Config {
 // Load reads config from file, environment, and returns a merged Config.
 // configPath may be empty; in that case only default locations are searched.
 //
-// Legacy-shape handling: prior to spec-launch.md §4 the `workspace:` key
-// held a struct (`workspace: { auto_detect: true }`). The new schema
+// Legacy-shape handling: previously the `workspace:` key held a struct
+// (`workspace: { auto_detect: true }`). The new schema
 // reclaims `workspace:` as a scalar slug. Existing configs are migrated
 // in place — `workspace.auto_detect` lifts into `multi.auto_detect`,
 // and the loader emits a one-line deprecation note via the returned
@@ -390,7 +388,7 @@ func Load(configPath string) (*Config, error) {
 
 // migrateLegacyWorkspaceKey rewrites `workspace.auto_detect` → `multi.auto_detect`
 // in the viper key store before unmarshal, so a `.gortex.yaml` written
-// against the pre-§4 schema still produces a working Config without the
+// against the legacy schema still produces a working Config without the
 // caller seeing a parse error. The migration is silent — there's no
 // global logger here — but the audit step (`gortex audit_agent_config`,
 // reserved for a follow-up) can flag the deprecated key.
@@ -432,13 +430,13 @@ func migrateLegacyWorkspaceKey(v *viper.Viper) {
 	}
 }
 
-// validateWorkspaceSchema enforces the §4.4 defaults / boundaries that
+// validateWorkspaceSchema enforces the defaults / boundaries that
 // can't be expressed via struct tags alone:
 //
 //   - `Project` and `Projects[]` are mutually exclusive (a repo is
 //     either single-project or a monorepo, never both).
 //   - Every `CrossWorkspaceDeps[].Mode` must be `read-only`. Iteration 1
-//     ships only the read-only mode per spec-launch.md §4.2.
+//     ships only the read-only mode.
 //   - `Workspace` slug, when set, may not be empty after trimming.
 //
 // Errors are concatenated so a malformed file surfaces every problem

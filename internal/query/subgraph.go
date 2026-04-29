@@ -23,10 +23,10 @@ type QueryOptions struct {
 	Detail  string `json:"detail"`             // "brief" or "full"
 	MinTier string `json:"min_tier,omitempty"` // see graph.Origin* constants; "" = no filter
 	// WorkspaceID, when set, restricts traversal to nodes whose
-	// effective workspace (Node.WorkspaceID || Node.RepoPrefix per
-	// spec-launch.md §4.4) equals this slug. Empty disables the
-	// filter — preserves the legacy global-graph behaviour for
-	// callers that don't care about the §4 boundary. Step I.
+	// effective workspace (Node.WorkspaceID || Node.RepoPrefix
+	// fallback) equals this slug. Empty disables the filter —
+	// preserves the legacy global-graph behaviour for callers that
+	// don't care about the workspace boundary.
 	WorkspaceID string `json:"workspace_id,omitempty"`
 	// ProjectID applies the same scoping for the soft sub-boundary.
 	// Honoured only when WorkspaceID is also set; on its own it would

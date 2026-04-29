@@ -41,13 +41,12 @@ var (
 	serverWatch      bool
 	serverTrack      []string
 	serverProject    string
-	// serverWorkspace is the spec-launch.md §4.2 workspace slug filter
-	// (Step J). When set, the MCP layer scopes every query to this
-	// workspace by default — equivalent to passing `workspace: <slug>`
-	// on each call. Empty means "no scope" (legacy multi-workspace
-	// view).
+	// serverWorkspace is the workspace slug filter. When set, the MCP
+	// layer scopes every query to this workspace by default —
+	// equivalent to passing `workspace: <slug>` on each call. Empty
+	// means "no scope" (legacy multi-workspace view).
 	serverWorkspace string
-	// serverScopeProject is the §4.2 project slug filter, intended to
+	// serverScopeProject is the project slug filter, intended to
 	// further narrow inside `--workspace`. Named --scope-project to
 	// avoid colliding with the existing --project flag (which selects
 	// the GlobalConfig active-project — a named group of repos, a
@@ -85,8 +84,8 @@ func init() {
 	serverCmd.Flags().BoolVar(&serverWatch, "watch", false, "keep graph in sync with filesystem changes")
 	serverCmd.Flags().StringSliceVar(&serverTrack, "track", nil, "additional repository paths to track")
 	serverCmd.Flags().StringVar(&serverProject, "project", "", "active project name (GlobalConfig group of repos)")
-	serverCmd.Flags().StringVar(&serverWorkspace, "workspace", "", "spec §4.2 workspace slug — restricts BOTH indexing and queries to repos whose resolved workspace matches (RepoEntry override → .gortex.yaml::workspace → repo prefix). Empty means all workspaces.")
-	serverCmd.Flags().StringVar(&serverScopeProject, "scope-project", "", "spec §4.2 project slug — narrows further inside --workspace (also gates indexing). No effect without --workspace.")
+	serverCmd.Flags().StringVar(&serverWorkspace, "workspace", "", "workspace slug — restricts BOTH indexing and queries to repos whose resolved workspace matches (RepoEntry override → .gortex.yaml::workspace → repo prefix). Empty means all workspaces.")
+	serverCmd.Flags().StringVar(&serverScopeProject, "scope-project", "", "project slug — narrows further inside --workspace (also gates indexing). No effect without --workspace.")
 	serverCmd.Flags().StringVar(&serverCacheDir, "cache-dir", "", "graph cache directory (default ~/.cache/gortex/)")
 	serverCmd.Flags().BoolVar(&serverNoCache, "no-cache", false, "disable graph caching")
 	serverCmd.Flags().BoolVar(&serverEmbeddings, "embeddings", false, "enable semantic search")
@@ -148,7 +147,7 @@ func runServer(_ *cobra.Command, _ []string) error {
 	// local disk, then launches `gortex server --snapshot <path>`).
 	// Failures here are logged but non-fatal — the server proceeds
 	// with an empty graph and `--index` / multi-repo paths populate
-	// it. spec-launch.md §0a iteration 2.
+	// it.
 	if serverSnapshot != "" {
 		if res, err := loadSnapshotFrom(g, serverSnapshot, logger); err != nil {
 			fmt.Fprintf(os.Stderr, "[gortex] server: snapshot load failed: %v\n", err)
@@ -306,15 +305,15 @@ func runServer(_ *cobra.Command, _ []string) error {
 	if serverID != "" {
 		serverHandler.SetServerID(serverID)
 	}
-	// spec-launch.md §11 step Q — editor overlay sessions. 5-minute
-	// idle TTL is the iteration-1 default: long enough for an MCP
-	// client to push, query, and tear down between turns; short
-	// enough that a crashed client doesn't leak buffers indefinitely.
+	// Editor overlay sessions. 5-minute idle TTL is long enough for
+	// an MCP client to push, query, and tear down between turns;
+	// short enough that a crashed client doesn't leak buffers
+	// indefinitely.
 	overlays := daemon.NewOverlayManager(5 * time.Minute)
 	serverHandler.SetOverlayManager(overlays)
 
-	// spec-launch.md §11 steps L, M, O, P — wire the multi-server
-	// router. When `~/.gortex/servers.toml` is present, every
+	// Wire the multi-server router. When `~/.gortex/servers.toml` is
+	// present, every
 	// /v1/tools/<name> call flows through the router which decides
 	// local-fast-path vs proxy. Missing or empty servers.toml leaves
 	// the router nil and the handler keeps its single-server
@@ -387,8 +386,8 @@ func runServer(_ *cobra.Command, _ []string) error {
 
 	errCh := make(chan error, 1)
 	if usingUnixSocket {
-		// Step K: Unix-domain socket transport. Path follows
-		// "unix://" — `unix:///var/run/gortex/<slug>.sock` is the
+		// Unix-domain socket transport. Path follows "unix://" —
+		// `unix:///var/run/gortex/<slug>.sock` is the
 		// recommended per-slug shape. Cleaning up a stale socket file
 		// from a previous (crashed) run lets restart-on-failure
 		// supervisors not need a wrapping rm.

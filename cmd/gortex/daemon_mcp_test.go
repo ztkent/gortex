@@ -204,6 +204,64 @@ func TestDispatcher_RemoteRoutableCWD_Passes(t *testing.T) {
 	}
 }
 
+// TestDispatcher_LocalWorkspaceUmbrellaCWD_Passes covers the case
+// where the cwd is the umbrella directory of a multi-repo workspace:
+// it has a `.gortex.yaml` declaring `workspace: <slug>` but is NOT
+// itself a tracked repo, AND no server in servers.toml claims that
+// workspace. The repos belonging to the workspace are tracked
+// individually as siblings/subdirectories.
+//
+// Without this, agents started in the umbrella get a `repo_not_tracked`
+// error even though RouteForCwd resolves Source="config-yaml" from
+// the .gortex.yaml — making local-only workspace declarations useless
+// from the dispatcher's perspective. The contract is: any "config-yaml"
+// resolution is reachable, regardless of whether a server claimed it.
+func TestDispatcher_LocalWorkspaceUmbrellaCWD_Passes(t *testing.T) {
+	// Local daemon tracks something unrelated — proves the guard does
+	// not rely on isCWDTracked seeing the umbrella itself.
+	tracked := t.TempDir()
+	d, _ := trackedPathMCPSetup(t, tracked)
+
+	// Umbrella directory with .gortex.yaml::workspace = "vio". The
+	// umbrella itself is NOT tracked. No server in servers.toml claims
+	// "vio" — only some other workspace.
+	umbrella := t.TempDir()
+	require.NoError(t,
+		writeFile(filepath.Join(umbrella, ".gortex.yaml"), "workspace: vio\n"))
+
+	cfg := &daemon.ServersConfig{
+		Server: []daemon.ServerEntry{
+			{Slug: "self", URL: "unix:///tmp/never.sock", Workspaces: []string{"gortex"}, Default: true},
+		},
+	}
+	require.NoError(t, cfg.Validate())
+	router := daemon.NewRouter(daemon.RouterConfig{
+		Servers:   cfg,
+		Rosters:   daemon.NewWorkspaceRosterCache(0),
+		LocalSlug: "self",
+		Logger:    zap.NewNop(),
+	})
+	d.SetRouter(router)
+
+	assert.True(t, d.cwdReachable(umbrella),
+		"workspace-umbrella cwd must be reachable when .gortex.yaml declares a workspace, even when no server claims it")
+
+	sess := &daemon.Session{ID: "sess_umbrella", CWD: umbrella}
+	frame := []byte(`{"jsonrpc":"2.0","id":9,"method":"graph_stats","params":{}}`)
+	reply, err := d.Dispatch(context.Background(), sess, frame)
+	require.NoError(t, err)
+	require.NotNil(t, reply)
+
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal(reply, &parsed))
+	if errObj, ok := parsed["error"].(map[string]any); ok {
+		if data, ok := errObj["data"].(map[string]any); ok {
+			assert.NotEqual(t, "repo_not_tracked", data["error_code"],
+				"workspace-umbrella cwd wrongly rejected by guard: %v", parsed)
+		}
+	}
+}
+
 // TestDispatcher_UnreachableCWD_StillRejected guards against the
 // fix becoming too permissive. A cwd that's neither locally tracked
 // nor matches any workspace declared in the roster (and has no

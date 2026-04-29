@@ -65,9 +65,8 @@ func New(g *graph.Graph) *Resolver {
 
 // ResolveAll resolves all unresolved edges in the graph.
 //
-// Edge resolution is partitioned across runtime.NumCPU() workers
-// (§6.5 of spec-extractor-perf.md). Each worker iterates a disjoint
-// slice and calls resolveEdge, which:
+// Edge resolution is partitioned across runtime.NumCPU() workers.
+// Each worker iterates a disjoint slice and calls resolveEdge, which:
 //
 //   - mutates only its own e.To field (per-edge ownership, no
 //     write-write races between workers),

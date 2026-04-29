@@ -6,7 +6,7 @@ import (
 	"github.com/zzet/gortex/internal/resolver"
 )
 
-// resolveWorkspaceID returns the §4.2 workspace slug for an indexer
+// resolveWorkspaceID returns the workspace slug for an indexer
 // emitting nodes for the repo with the given fallback prefix.
 //
 // Resolution order (highest priority first):
@@ -17,17 +17,17 @@ import (
 //     in the repo itself, and lets users override a workspace the
 //     repo author chose (the OSS author's slug shouldn't pollute the
 //     user's local graph identity).
-//  2. `.gortex.yaml::workspace:` — spec-launch.md §4.2 / Step E.
-//     Source of truth when the user is the same person who owns the
-//     repo (typical for first-party / monorepo setups).
+//  2. `.gortex.yaml::workspace:` — source of truth when the user is
+//     the same person who owns the repo (typical for first-party /
+//     monorepo setups).
 //  3. Falls back to `fallbackPrefix` (the repo prefix). This is the
-//     §4.4 "files without a workspace declaration get workspace =
+//     "files without a workspace declaration get workspace =
 //     repo-name" default.
 //
 // Empty `fallbackPrefix` returns "" — single-repo callers that don't
 // pass a prefix accept that the workspace slug stays empty, in which
-// case the §4 boundary checks treat the node as "no workspace
-// declared" and degrade to the legacy RepoPrefix-keyed comparison.
+// case the boundary checks treat the node as "no workspace declared"
+// and degrade to the legacy RepoPrefix-keyed comparison.
 func resolveWorkspaceID(entry *config.RepoEntry, cfg *config.Config, fallbackPrefix string) string {
 	if entry != nil && entry.Workspace != "" {
 		return entry.Workspace
@@ -38,16 +38,16 @@ func resolveWorkspaceID(entry *config.RepoEntry, cfg *config.Config, fallbackPre
 	return fallbackPrefix
 }
 
-// resolveProjectID returns the §4.2 project slug for an indexer
-// emitting nodes for the repo with the given fallback prefix.
+// resolveProjectID returns the project slug for an indexer emitting
+// nodes for the repo with the given fallback prefix.
 //
 // Resolution order mirrors resolveWorkspaceID:
 //
 //  1. RepoEntry.Project — global config override.
-//  2. `.gortex.yaml::project:` — spec-launch.md §4.2 / Step E.
-//  3. Per-file `projects[]` paths-glob lookup is the monorepo case
-//     (§4.2 example). The current implementation stamps a single
-//     project slug per repo; the per-file refinement is a follow-up.
+//  2. `.gortex.yaml::project:`.
+//  3. Per-file `projects[]` paths-glob lookup is the monorepo case.
+//     The current implementation stamps a single project slug per
+//     repo; the per-file refinement is a follow-up.
 //  4. Falls back to `fallbackPrefix` (the repo prefix). Same
 //     "missing → repo-name" rule as workspace.
 func resolveProjectID(entry *config.RepoEntry, cfg *config.Config, fallbackPrefix string) string {
@@ -64,8 +64,8 @@ func resolveProjectID(entry *config.RepoEntry, cfg *config.Config, fallbackPrefi
 // the MultiIndexer's tracked repos and stamps WorkspaceID / ProjectID
 // from the per-repo `.gortex.yaml` whenever those fields are empty.
 //
-// This closes the upgrade gap: a snapshot written by a pre-§4 daemon
-// has WorkspaceID="" everywhere because the field didn't exist; gob
+// This closes the upgrade gap: a snapshot written by a daemon
+// before WorkspaceID existed has WorkspaceID="" everywhere; gob
 // decodes additive fields as zero. Without backfill, EffectiveWorkspace
 // falls back to RepoPrefix and explicit shared-workspace setups
 // (multiple repos declaring `workspace: shared`) silently lose
@@ -139,7 +139,7 @@ func (mi *MultiIndexer) BackfillWorkspaceSlugs() (nodesStamped, contractsStamped
 	}
 
 	// Per-repo contract registries: rehydrated from snapshot they
-	// carry RepoPrefix but no Workspace/Project slugs (pre-§4).
+	// carry RepoPrefix but no Workspace/Project slugs.
 	mi.mu.RLock()
 	indexers := make(map[string]*Indexer, len(mi.indexers))
 	for k, v := range mi.indexers {
@@ -202,7 +202,7 @@ func (mi *MultiIndexer) RunGlobalResolve() {
 // picked up automatically — each call walks the current per-repo
 // configs and aggregates declarations whose source workspace matches.
 //
-// Why iterate per-repo: the §4.2 schema places `cross_workspace_deps`
+// Why iterate per-repo: the schema places `cross_workspace_deps`
 // inside a repo's `.gortex.yaml`, keyed implicitly to that repo's
 // `workspace`. Two repos can both declare workspace = "tuck" with
 // overlapping but possibly extended dep lists; the union forms the

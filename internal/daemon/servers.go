@@ -19,12 +19,11 @@ import (
 )
 
 // ServerEntry describes one Gortex server reachable from the daemon.
-// Lifted out of `~/.gortex/servers.toml` (spec-launch.md §11 step L).
+// Lifted out of `~/.gortex/servers.toml`.
 //
 // The "slug" is the local identity used in CLI output, log lines, and
 // daemon-side routing. URL accepts both TCP (`http://host:port`,
-// `https://...`) and Unix-domain socket forms (`unix:///path/to.sock`)
-// per Step K.
+// `https://...`) and Unix-domain socket forms (`unix:///path/to.sock`).
 //
 // Auth: prefer AuthTokenEnv (an env-var name the daemon resolves at
 // connect time) over AuthToken (a literal value). Putting raw
@@ -59,11 +58,11 @@ type ServersConfig struct {
 //
 //  1. $GORTEX_DAEMON_SERVERS — explicit override (tests, custom
 //     deployments).
-//  2. $HOME/.gortex/servers.toml — the canonical user-level file
-//     spec-launch.md §11 step L names. Note this is NOT under
-//     `~/.config/gortex/` (where global.yaml lives) — `~/.gortex/`
-//     is the daemon-control directory and is the same place tracking
-//     scripts and `gortex daemon` already write to.
+//  2. $HOME/.gortex/servers.toml — the canonical user-level file.
+//     Note this is NOT under `~/.config/gortex/` (where global.yaml
+//     lives) — `~/.gortex/` is the daemon-control directory and is
+//     the same place tracking scripts and `gortex daemon` already
+//     write to.
 //  3. $TEMPDIR/gortex-servers.toml — last-resort fallback so the
 //     daemon can still come up in an environment with no $HOME.
 func ServersConfigPath() string {
@@ -279,7 +278,7 @@ func (c *ServersConfig) DefaultServer() *ServerEntry {
 
 // ServerClient is the daemon-side HTTP client targeting one
 // ServerEntry. Holds a transport configured for the entry's URL form
-// (TCP vs unix:// chooses Dial vs DialUnix transparently). Step M.
+// (TCP vs unix:// chooses Dial vs DialUnix transparently).
 //
 // The client is goroutine-safe; the daemon shares one per slug
 // across multiple worker goroutines and reuses connections via the
@@ -340,8 +339,8 @@ func (c *ServerClient) resolveAuthToken() string {
 
 // ProxyTool forwards a single MCP tool invocation to this server's
 // `POST /v1/tools/<name>` endpoint and returns the raw response
-// bytes. Step M — used by the daemon's hybrid-read router (Step P)
-// when a query's scope routes to a remote workspace.
+// bytes. Used by the daemon's hybrid-read router when a query's
+// scope routes to a remote workspace.
 //
 // The body is passed through verbatim — the caller (typically the
 // daemon's RouteToolCall) is responsible for shape, the server
@@ -376,8 +375,8 @@ func (c *ServerClient) ProxyTool(toolName string, body []byte) ([]byte, int, err
 
 // FetchWorkspaceRoster calls `GET /v1/workspaces/<ws>/repos` on the
 // server and returns the list of repo prefixes in that workspace.
-// Step N — used by the daemon's lookup logic to know which server
-// owns a given workspace.
+// Used by the daemon's lookup logic to know which server owns a
+// given workspace.
 func (c *ServerClient) FetchWorkspaceRoster(workspace string) ([]string, error) {
 	u, err := url.JoinPath(c.BaseURL, "v1", "workspaces", workspace, "repos")
 	if err != nil {
@@ -421,7 +420,7 @@ var ErrWorkspaceNotFound = errors.New("workspace not found on server")
 // TTL is intentionally short — the alpha use case is a developer
 // adding/removing repos in one of their tracked workspaces and
 // expecting the daemon to notice within a minute or two without a
-// restart. Step N.
+// restart.
 type WorkspaceRosterCache struct {
 	mu      sync.RWMutex
 	entries map[rosterKey]rosterEntry
@@ -496,7 +495,7 @@ func (c *WorkspaceRosterCache) Invalidate() {
 
 // LookupResult is what RouteForCwd returns: the chosen ServerEntry
 // (nil when no server claims the workspace), the workspace slug
-// resolved from cwd, and an explanation of which §9.3 priority fired.
+// resolved from cwd, and an explanation of which priority fired.
 type LookupResult struct {
 	Server    *ServerEntry
 	Workspace string
@@ -511,7 +510,7 @@ type LookupResult struct {
 // CwdResolver looks up a workspace slug for a current working directory
 // by walking up to find a `.gortex.yaml` with a `workspace:` key. Lifted
 // out as an interface so tests can inject a stub instead of touching
-// the filesystem. Step O.
+// the filesystem.
 type CwdResolver func(cwd string) (workspace string, ok bool)
 
 // DefaultCwdResolver walks parent directories from `cwd` looking for
@@ -521,7 +520,7 @@ type CwdResolver func(cwd string) (workspace string, ok bool)
 // The implementation is deliberately tiny — the daemon's hot path
 // will hit it on every routed query, so we don't shell out to the
 // full config loader for one field. yaml-shaped scan that just looks
-// for `workspace: <slug>` at the top level matches the §4.4 schema.
+// for `workspace: <slug>` at the top level matches the schema.
 func DefaultCwdResolver(cwd string) (string, bool) {
 	dir := cwd
 	for i := 0; i < 32; i++ {
@@ -562,8 +561,8 @@ func scanWorkspaceField(data []byte) string {
 		v = strings.Trim(v, `"' `)
 		if v == "" {
 			// Could be a struct shape (e.g. `workspace:\n  auto_detect: true`)
-			// — that's the legacy config.WorkspaceConfig shape from before
-			// §4.2, and the spec migrated it to `multi:` already. Skip.
+			// — that's the legacy config.WorkspaceConfig shape, now
+			// migrated to `multi:` instead. Skip.
 			continue
 		}
 		return v
@@ -571,7 +570,7 @@ func scanWorkspaceField(data []byte) string {
 	return ""
 }
 
-// RouteForCwd implements the §9.3 priority chain:
+// RouteForCwd implements the priority chain:
 //
 //  1. ScopeOverride (caller-supplied workspace/server slug) wins.
 //  2. `.gortex.yaml::workspace` resolved from cwd.
@@ -580,7 +579,7 @@ func scanWorkspaceField(data []byte) string {
 //  4. servers.toml's `default` entry.
 //
 // `scopeOverride` is the workspace slug the caller passed via the
-// query's scope field (Step P) — empty means "no override". When the
+// query's scope field — empty means "no override". When the
 // caller passed a slug, we still resolve which ServerEntry hosts it
 // via the same roster lookup the cwd path would use.
 //

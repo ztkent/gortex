@@ -10,8 +10,8 @@ import (
 	"go.uber.org/zap"
 )
 
-// Router is the spec-launch.md §11 step P "hybrid-read query router".
-// It takes a tool invocation plus an optional scope override, decides
+// Router is the "hybrid-read query router". It takes a tool
+// invocation plus an optional scope override, decides
 // whether the request should run locally or be proxied to a remote
 // server, and returns the result bytes the daemon hands back to its
 // MCP client.
@@ -27,9 +27,9 @@ import (
 //     don't roundtrip on every query.
 //   - localSlug: the slug this daemon hosts itself. When the
 //     resolved server matches localSlug, the router calls localExec
-//     instead of proxying — this is what the spec calls the "hybrid"
-//     part. Empty disables the local-fast path; useful for tests and
-//     for daemons that only proxy.
+//     instead of proxying — this is the "hybrid" part. Empty disables
+//     the local-fast path; useful for tests and for daemons that only
+//     proxy.
 //
 // Server clients are created lazily on first use and cached; HTTP
 // keep-alive in net/http reuses connections across calls.
@@ -97,7 +97,7 @@ type RouteContext struct {
 // workspace declared and no default server set" error.
 var ErrRouteUnresolved = errors.New("no server resolves for this request")
 
-// RouteToolCall implements the §9.3 priority chain:
+// RouteToolCall implements the priority chain:
 //
 //  1. If the resolved server slug is empty, the daemon has no remote
 //     servers configured: fall back to localExecute.
