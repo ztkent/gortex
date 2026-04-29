@@ -23,6 +23,7 @@ type LoginReq struct {
 	s := ExtractShape("pkg/req.go", src, 3, 10)
 	if s == nil {
 		t.Fatal("expected shape, got nil")
+		return
 	}
 	if s.Kind != "struct" {
 		t.Errorf("kind = %q, want struct", s.Kind)
@@ -53,6 +54,7 @@ func TestShape_TS_InterfaceAndOptional(t *testing.T) {
 	s := ExtractShape("pkg/types.ts", src, 1, 7)
 	if s == nil {
 		t.Fatal("expected shape, got nil")
+		return
 	}
 	if s.Kind != "interface" {
 		t.Errorf("kind = %q, want interface", s.Kind)
@@ -82,6 +84,7 @@ func TestShape_Python_PydanticClass(t *testing.T) {
 	s := ExtractShape("pkg/models.py", src, 1, 6)
 	if s == nil {
 		t.Fatal("expected shape, got nil")
+		return
 	}
 	if s.Kind != "class" {
 		t.Errorf("kind = %q, want class", s.Kind)
@@ -115,6 +118,7 @@ func TestShape_Java_ClassWithJacksonAnnotations(t *testing.T) {
 	s := ExtractShape("pkg/LoginReq.java", src, 1, 10)
 	if s == nil {
 		t.Fatal("expected shape, got nil")
+		return
 	}
 	want := map[string]ShapeField{
 		"email": {Name: "email", Type: "String", JSONTag: "email", Required: true},
@@ -152,6 +156,7 @@ func TestShape_Dart_ClassWithFields(t *testing.T) {
 	s := ExtractShape("lib/models/entry.dart", src, 1, 19)
 	if s == nil {
 		t.Fatal("expected shape, got nil")
+		return
 	}
 	if s.Kind != "class" {
 		t.Errorf("kind = %q, want class", s.Kind)
@@ -182,6 +187,7 @@ func TestShape_Proto_MessageFields(t *testing.T) {
 	s := ExtractShape("proto/login.proto", src, 1, 7)
 	if s == nil {
 		t.Fatal("expected shape, got nil")
+		return
 	}
 	if s.Kind != "message" {
 		t.Errorf("kind = %q, want message", s.Kind)
