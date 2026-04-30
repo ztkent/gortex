@@ -12,7 +12,8 @@ LDFLAGS   := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.d
 .PHONY: build build-onnx build-gomlx build-hugot \
        test bench bench-rpi bench-rpi-quick bench-rpi-profile bench-compare \
        lint fmt clean install tag-release \
-       deps-onnx deps-gomlx deps-hugot deps-vectors
+       deps-onnx deps-gomlx deps-hugot deps-vectors \
+       claude-plugin claude-plugin-check
 
 # ---------------------------------------------------------------------------
 # Build variants
@@ -116,6 +117,29 @@ build-rpi32:
 	CGO_ENABLED=1 GOOS=linux GOARCH=arm GOARM=7 CC=arm-linux-gnueabihf-gcc \
 		go build -ldflags '$(LDFLAGS)' -o gortex-rpi32 ./cmd/gortex/
 	@echo "✓ Built gortex-rpi32 (linux/arm/v7)"
+
+# ---------------------------------------------------------------------------
+# Marketplace plugin bundle
+# ---------------------------------------------------------------------------
+
+# claude-plugin regenerates the Anthropic Plugin Marketplace bundle at
+# claude-plugin/. The bundle is checked in so the marketplace's
+# "git-subdir" source can pull it directly. The CI guard
+# (claude-plugin-check) asserts that re-running this target produces
+# no diff against what's checked in — drift means the bundle is stale
+# vs the source-of-truth content in
+# internal/agents/claudecode/content.go.
+claude-plugin: build
+	./$(BINARY) plugin emit --target ./claude-plugin --variant anthropic
+	@echo "✓ Regenerated claude-plugin/ from internal/agents/claudecode content"
+
+claude-plugin-check: claude-plugin
+	@if ! git diff --exit-code -- claude-plugin >/dev/null 2>&1; then \
+		echo "claude-plugin/ is out of date — run 'make claude-plugin' and commit the result"; \
+		git --no-pager diff --stat -- claude-plugin; \
+		exit 1; \
+	fi
+	@echo "✓ claude-plugin/ matches generated output"
 
 # ---------------------------------------------------------------------------
 # Embedding backend dependencies

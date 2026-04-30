@@ -1,0 +1,170 @@
+# publish-claude-plugin syncs the generated marketplace bundle from
+# this repo to gortexhq/claude-plugin on every gortex release.
+#
+# How it works:
+#   1. Checkout gortex at the released tag
+#   2. Regenerate the bundle via `make claude-plugin`
+#   3. Checkout gortexhq/claude-plugin into a sibling directory
+#   4. rsync the regenerated bundle into the publish-target checkout
+#   5. If git status is empty (bundle unchanged vs current HEAD of the
+#      publish target) — exit 0, no push, no marketplace notification
+#   6. Otherwise commit + push + tag
+#
+# The "skip when unchanged" step is what gates marketplace update
+# notifications on real content changes. A gortex bug-fix release that
+# doesn't touch internal/agents/claudecode/content.go produces no diff
+# in the regenerated bundle, so the publish target is not updated and
+# marketplace users are not pinged.
+#
+# Auth: CLAUDE_PLUGIN_TOKEN is a fine-grained PAT scoped to
+# gortexhq/claude-plugin with `contents: write`. Mirrors the
+# HOMEBREW_TAP_TOKEN pattern used by .goreleaser.yml's homebrew_casks
+# block — same trust profile.
+
+name: publish-claude-plugin
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Gortex tag (or branch) to publish from. Required for manual runs."
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  # Serialise publishes; two concurrent runs against the same target
+  # repo would race on the push.
+  group: publish-claude-plugin
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    env:
+      PLUGIN_REPO: gortexhq/claude-plugin
+      # Branch on the publish target repo to push to. Plugin repo is
+      # single-branch by design; tags drive provenance.
+      PLUGIN_BRANCH: main
+
+    steps:
+      - name: Resolve gortex ref
+        id: resolve
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            REF="${{ inputs.ref }}"
+          else
+            REF="${{ github.ref_name }}"
+          fi
+          if [ -z "$REF" ]; then
+            echo "::error::could not resolve gortex ref to publish from"
+            exit 1
+          fi
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+          echo "Publishing from gortex ref: $REF"
+
+      - name: Checkout gortex
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ steps.resolve.outputs.ref }}
+          path: gortex
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: gortex/go.mod
+          cache: true
+          cache-dependency-path: gortex/go.sum
+
+      - name: Regenerate plugin bundle
+        working-directory: gortex
+        run: make claude-plugin
+
+      - name: Checkout publish target
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: ${{ env.PLUGIN_REPO }}
+          ref: ${{ env.PLUGIN_BRANCH }}
+          path: plugin-repo
+          token: ${{ secrets.CLAUDE_PLUGIN_TOKEN }}
+          # Need full history so the tag-already-exists check works
+          # against historical tags, not just HEAD.
+          fetch-depth: 0
+
+      - name: Sync bundle into publish target
+        run: |
+          # rsync replaces the publish target's tracked content with
+          # the freshly-regenerated bundle. --delete removes files that
+          # no longer exist in the source (e.g. a removed skill). The
+          # --exclude entries protect repo-level files we don't manage
+          # from the gortex side: .git/, .github/ (publish target may
+          # carry its own readme-only CI), and a top-level README/LICENSE
+          # if the publish target maintains its own.
+          rsync -av --delete \
+            --exclude='.git/' \
+            --exclude='.github/' \
+            gortex/claude-plugin/ \
+            plugin-repo/
+
+      - name: Detect content changes
+        id: diff
+        working-directory: plugin-repo
+        run: |
+          git add -A
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No content changes vs ${{ env.PLUGIN_REPO }}@${{ env.PLUGIN_BRANCH }}; nothing to publish"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Detected content changes:"
+            git diff --cached --stat
+          fi
+
+      - name: Commit and push
+        if: steps.diff.outputs.changed == 'true'
+        working-directory: plugin-repo
+        env:
+          GORTEX_TAG: ${{ steps.resolve.outputs.ref }}
+        run: |
+          git config user.name "gortex-bot"
+          git config user.email "bot@gortex.dev"
+          git commit -m "Sync from gortex ${GORTEX_TAG}"
+          git push origin "${{ env.PLUGIN_BRANCH }}"
+
+      - name: Tag publish target with gortex version
+        if: steps.diff.outputs.changed == 'true'
+        working-directory: plugin-repo
+        env:
+          GORTEX_TAG: ${{ steps.resolve.outputs.ref }}
+        run: |
+          # Tag the publish target with the gortex tag that produced
+          # the content. Useful for provenance: a marketplace user can
+          # cross-reference the plugin version against the gortex
+          # release that built it.
+          #
+          # Skip silently if the tag already exists in the publish
+          # target. Re-running the workflow against a tag that already
+          # produced no content change would otherwise leave the
+          # workflow in a half-pushed state on retry.
+          if git rev-parse --verify "refs/tags/${GORTEX_TAG}" >/dev/null 2>&1; then
+            echo "Tag ${GORTEX_TAG} already exists in ${{ env.PLUGIN_REPO }}; skipping"
+            exit 0
+          fi
+          git tag -a "${GORTEX_TAG}" -m "Plugin bundle from gortex ${GORTEX_TAG}"
+          git push origin "${GORTEX_TAG}"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Publish summary"
+            echo ""
+            echo "- Source ref: \`${{ steps.resolve.outputs.ref }}\`"
+            echo "- Target repo: \`${{ env.PLUGIN_REPO }}\`"
+            echo "- Content changed: \`${{ steps.diff.outputs.changed }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
