@@ -13,6 +13,7 @@ require (
 	github.com/gortexhq/tree-sitter-dart v0.1.0
 	github.com/gortexhq/tree-sitter-dockerfile v0.1.0
 	github.com/gortexhq/tree-sitter-markdown v0.1.0
+	github.com/gortexhq/tree-sitter-org-mode v0.1.0
 	github.com/gortexhq/tree-sitter-protobuf v0.1.0
 	github.com/gortexhq/tree-sitter-sql v0.1.0
 	github.com/gortexhq/tree-sitter-swift v0.1.1-0.20260424235305-8dde3a3327dd
@@ -23,6 +24,7 @@ require (
 	github.com/pkoukk/tiktoken-go v0.1.8
 	github.com/pkoukk/tiktoken-go-loader v0.0.2
 	github.com/sabhiram/go-gitignore v0.0.0-20210923224102-525f6e181f06
+	github.com/sgtdi/fswatcher v1.2.0
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
 	github.com/stretchr/testify v1.11.1
@@ -104,7 +106,6 @@ require (
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/sagikazarmark/locafero v0.12.0 // indirect
-	github.com/sgtdi/fswatcher v1.2.0 // indirect
 	github.com/spf13/afero v1.15.0 // indirect
 	github.com/spf13/cast v1.10.0 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect

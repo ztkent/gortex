@@ -29,6 +29,7 @@ func RegisterAll(reg *parser.Registry) {
 	reg.Register(NewDockerfileExtractor())
 	reg.Register(NewCSharpExtractor())
 	reg.Register(NewMarkdownExtractor())
+	reg.Register(NewOrgModeExtractor())
 	reg.Register(NewDartExtractor())
 	reg.Register(NewOCamlExtractor())
 	reg.Register(NewLuaExtractor())
