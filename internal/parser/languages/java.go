@@ -450,6 +450,13 @@ func (e *JavaExtractor) emitMethod(m parser.QueryResult, filePath, fileID string
 		if doc := ExtractDocAbove(src, def.StartLine, DocLangBlockStar); doc != "" {
 			node.Meta["doc"] = doc
 		}
+		if def.Node != nil {
+			if body := def.Node.ChildByFieldName("body"); body != nil {
+				if c := JavaComplexity(body); c > 1 {
+					node.Meta["complexity"] = c
+				}
+			}
+		}
 		result.Nodes = append(result.Nodes, node)
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: startLine1,

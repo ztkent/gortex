@@ -546,12 +546,36 @@ func (e *GoExtractor) emitFunction(m parser.QueryResult, filePath, fileID string
 		node.Meta["doc"] = doc
 	}
 	node.Meta["visibility"] = VisibilityByCase(name)
+	if body := goFuncBody(def.Node); body != nil {
+		if c := GoComplexity(body); c > 1 {
+			node.Meta["complexity"] = c
+		}
+	}
 	scanGoPragmas(src, def.StartLine, node)
 	result.Nodes = append(result.Nodes, node)
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
 	})
 	emitGoThrowsEdges(node, m.Captures["func.result"], filePath, result)
+}
+
+// goFuncBody returns the `block` body child of a function/method
+// declaration node, or nil for declarations without a body (interface
+// method shapes, abstract decls). Used by complexity counting.
+func goFuncBody(decl *sitter.Node) *sitter.Node {
+	if decl == nil {
+		return nil
+	}
+	if b := decl.ChildByFieldName("body"); b != nil {
+		return b
+	}
+	for i := 0; i < int(decl.ChildCount()); i++ {
+		c := decl.Child(i)
+		if c != nil && c.Type() == "block" {
+			return c
+		}
+	}
+	return nil
 }
 
 func (e *GoExtractor) emitMethod(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult) {
@@ -586,6 +610,11 @@ func (e *GoExtractor) emitMethod(m parser.QueryResult, filePath, fileID string, 
 		node.Meta["doc"] = doc
 	}
 	node.Meta["visibility"] = VisibilityByCase(name)
+	if body := goFuncBody(def.Node); body != nil {
+		if c := GoComplexity(body); c > 1 {
+			node.Meta["complexity"] = c
+		}
+	}
 	scanGoPragmas(src, def.StartLine, node)
 	result.Nodes = append(result.Nodes, node)
 	result.Edges = append(result.Edges, &graph.Edge{

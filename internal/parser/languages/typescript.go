@@ -329,6 +329,11 @@ func (e *TypeScriptExtractor) emitFunction(m parser.QueryResult, filePath, fileI
 	if tp := tsTypeParams(def.Node, src); len(tp) > 0 {
 		meta["type_params"] = tp
 	}
+	if body := tsFunctionBody(def.Node); body != nil {
+		if c := TSComplexity(body); c > 1 {
+			meta["complexity"] = c
+		}
+	}
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindFunction, Name: name,
 		FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
@@ -339,6 +344,24 @@ func (e *TypeScriptExtractor) emitFunction(m parser.QueryResult, filePath, fileI
 		From: fileID, To: id, Kind: graph.EdgeDefines,
 		FilePath: filePath, Line: def.StartLine + 1,
 	})
+}
+
+// tsFunctionBody returns the statement_block child of a function or
+// method declaration, or nil for abstract members.
+func tsFunctionBody(decl *sitter.Node) *sitter.Node {
+	if decl == nil {
+		return nil
+	}
+	if b := decl.ChildByFieldName("body"); b != nil {
+		return b
+	}
+	for i := 0; i < int(decl.ChildCount()); i++ {
+		c := decl.Child(i)
+		if c != nil && (c.Type() == "statement_block" || c.Type() == "block") {
+			return c
+		}
+	}
+	return nil
 }
 
 func (e *TypeScriptExtractor) emitArrow(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult) string {
@@ -622,6 +645,11 @@ func (e *TypeScriptExtractor) emitMethod(m parser.QueryResult, filePath string, 
 		node.Meta["doc"] = doc
 	}
 	node.Meta["visibility"] = tsMemberVisibility(def.Node, src)
+	if body := tsFunctionBody(def.Node); body != nil {
+		if c := TSComplexity(body); c > 1 {
+			node.Meta["complexity"] = c
+		}
+	}
 	result.Nodes = append(result.Nodes, node)
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: id, To: classID, Kind: graph.EdgeMemberOf,

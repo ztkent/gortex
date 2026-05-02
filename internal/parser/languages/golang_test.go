@@ -847,3 +847,49 @@ import (
 	}
 	assert.True(t, hasAlias, "aliased import 'g' should surface in Meta")
 }
+
+func TestGoExtractor_Complexity(t *testing.T) {
+	src := []byte(`package x
+
+func Simple() int { return 1 }
+
+func Branchy(x int) int {
+	if x > 0 {
+		return 1
+	}
+	for i := 0; i < x; i++ {
+		switch i {
+		case 0:
+			return 0
+		case 1:
+			return 1
+		}
+	}
+	return -1
+}
+`)
+	e := NewGoExtractor()
+	result, err := e.Extract("x.go", src)
+	require.NoError(t, err)
+
+	byID := map[string]*graph.Node{}
+	for _, n := range result.Nodes {
+		byID[n.ID] = n
+	}
+
+	// Simple has no branches → no complexity meta.
+	simple := byID["x.go::Simple"]
+	require.NotNil(t, simple)
+	if _, ok := simple.Meta["complexity"]; ok {
+		t.Fatalf("Simple should have no complexity meta, got %v", simple.Meta["complexity"])
+	}
+
+	// Branchy: 1 (base) + if + for + switch + 2 cases = 6.
+	branchy := byID["x.go::Branchy"]
+	require.NotNil(t, branchy)
+	c, ok := branchy.Meta["complexity"].(int)
+	require.True(t, ok, "Branchy should have integer complexity")
+	if c < 4 {
+		t.Fatalf("Branchy complexity = %d, expected >= 4", c)
+	}
+}

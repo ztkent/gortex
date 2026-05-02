@@ -65,19 +65,14 @@ func (e *MakefileExtractor) Extract(filePath string, src []byte) (*parser.Extrac
 	// Collect target lines to compute end = line before next top-level
 	// definition (targets have no explicit terminator; indented tab
 	// lines are the recipe).
-	type topHit struct {
-		name string
-		line int
-		kind graph.NodeKind
-	}
-	var tops []topHit
+	var tops []makeTopHit
 	for _, m := range makeTargetRe.FindAllSubmatchIndex(src, -1) {
 		name := string(src[m[2]:m[3]])
 		if isMakeDirective(name) {
 			continue
 		}
 		line := lineAt(src, m[0])
-		tops = append(tops, topHit{name: name, line: line, kind: graph.KindFunction})
+		tops = append(tops, makeTopHit{name: name, line: line, kind: graph.KindFunction})
 	}
 	for _, m := range makeVarRe.FindAllSubmatchIndex(src, -1) {
 		name := string(src[m[2]:m[3]])
@@ -85,7 +80,7 @@ func (e *MakefileExtractor) Extract(filePath string, src []byte) (*parser.Extrac
 			continue
 		}
 		line := lineAt(src, m[0])
-		tops = append(tops, topHit{name: name, line: line, kind: graph.KindVariable})
+		tops = append(tops, makeTopHit{name: name, line: line, kind: graph.KindVariable})
 	}
 	// Sort-by-line so end-of-range computation is monotonic.
 	for i := 0; i < len(tops); i++ {
@@ -124,7 +119,168 @@ func (e *MakefileExtractor) Extract(filePath string, src []byte) (*parser.Extrac
 		}
 	}
 
+	emitMakeRecipeCallEdges(filePath, lines, tops, result)
+
 	return result, nil
+}
+
+// emitMakeRecipeCallEdges walks each target's recipe lines and emits
+// EdgeCalls when a recipe invokes another target in the same file.
+// Recognised forms:
+//
+//   $(MAKE) <target>   →  emit edge to <target>
+//   ${MAKE} <target>   →  same
+//   make <target>      →  same
+//   <bare-cmd>         →  emit edge to <bare-cmd> when it matches
+//                          another target name
+//
+// Recipe-line modifiers (`@`, `-`, `+`) are stripped. Subshell
+// interpolations like `$(shell …)` are skipped — they're command
+// substitutions, not direct call edges. External commands (`grep`,
+// `git`, etc.) produce no edge unless they happen to match a target
+// name; that's a small false-positive risk we accept for the much
+// larger build-chain coverage win.
+// makeTopHit is the package-scope form of the local topHit struct,
+// shared between Extract and emitMakeRecipeCallEdges so the call-edge
+// pass can reuse the same target/variable inventory.
+type makeTopHit struct {
+	name string
+	line int
+	kind graph.NodeKind
+}
+
+func emitMakeRecipeCallEdges(filePath string, lines []string, tops []makeTopHit, result *parser.ExtractionResult) {
+	// Build target-name lookup so call resolution is O(1).
+	targets := map[string]int{} // name → start line
+	for _, t := range tops {
+		if t.kind == graph.KindFunction {
+			targets[t.name] = t.line
+		}
+	}
+	if len(targets) == 0 {
+		return
+	}
+	// Cache of recipe lines per target.
+	for i, t := range tops {
+		if t.kind != graph.KindFunction {
+			continue
+		}
+		end := len(lines)
+		if i+1 < len(tops) {
+			end = tops[i+1].line - 1
+			if end < t.line {
+				end = t.line
+			}
+		}
+		fromID := filePath + "::" + t.name
+		seenCallEdges := map[string]bool{}
+		// Recipe lines are indented (tab or space) — not the target
+		// header line itself.
+		for ln := t.line + 1; ln <= end && ln <= len(lines); ln++ {
+			if ln-1 < 0 || ln-1 >= len(lines) {
+				continue
+			}
+			raw := lines[ln-1]
+			if !startsWithIndent(raw) {
+				continue
+			}
+			cmd := stripRecipePrefix(raw)
+			callee := makeRecipeCallTarget(cmd, targets)
+			if callee == "" || callee == t.name {
+				continue
+			}
+			key := callee + "@" + lineToKey(ln)
+			if seenCallEdges[key] {
+				continue
+			}
+			seenCallEdges[key] = true
+			result.Edges = append(result.Edges, &graph.Edge{
+				From:     fromID,
+				To:       filePath + "::" + callee,
+				Kind:     graph.EdgeCalls,
+				FilePath: filePath,
+				Line:     ln,
+				Origin:   graph.OriginASTInferred,
+			})
+		}
+	}
+}
+
+// startsWithIndent reports whether a recipe line begins with a tab or
+// space indent. Plain Makefiles use tabs; some projects use leading
+// spaces with `.RECIPEPREFIX`. Either is acceptable.
+func startsWithIndent(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	return s[0] == '\t' || s[0] == ' '
+}
+
+// stripRecipePrefix removes leading indent and the optional recipe
+// modifiers (`@` silent, `-` keep-going, `+` always-execute).
+func stripRecipePrefix(s string) string {
+	s = strings.TrimLeft(s, " \t")
+	for {
+		if s == "" {
+			return s
+		}
+		switch s[0] {
+		case '@', '-', '+':
+			s = s[1:]
+		default:
+			return s
+		}
+	}
+}
+
+// makeRecipeCallTarget returns the same-file target name a recipe
+// command invokes, or "" when the command isn't a target call.
+func makeRecipeCallTarget(cmd string, targets map[string]int) string {
+	cmd = strings.TrimSpace(cmd)
+	if cmd == "" {
+		return ""
+	}
+	// `$(MAKE) <target>` / `${MAKE} <target>` / `make <target>`.
+	for _, prefix := range []string{"$(MAKE)", "${MAKE}", "make"} {
+		if strings.HasPrefix(cmd, prefix) {
+			rest := strings.TrimSpace(cmd[len(prefix):])
+			// First whitespace-delimited token after the prefix.
+			tok := firstWord(rest)
+			if tok != "" {
+				if _, ok := targets[tok]; ok {
+					return tok
+				}
+			}
+			return ""
+		}
+	}
+	// Bare command — emit edge only when it matches an existing
+	// target. This avoids `grep`, `git`, etc. producing unresolved
+	// edges. Strip any leading `$(...)` interpolation.
+	if strings.HasPrefix(cmd, "$(") || strings.HasPrefix(cmd, "${") {
+		return ""
+	}
+	tok := firstWord(cmd)
+	if tok == "" {
+		return ""
+	}
+	if _, ok := targets[tok]; ok {
+		return tok
+	}
+	return ""
+}
+
+func firstWord(s string) string {
+	for i, r := range s {
+		if r == ' ' || r == '\t' {
+			return s[:i]
+		}
+	}
+	return s
+}
+
+func lineToKey(ln int) string {
+	return strings.Repeat(" ", ln%8) + "."
 }
 
 // isMakeDirective filters out reserved-word collisions that the

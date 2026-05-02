@@ -102,7 +102,6 @@ func ExtractDocAbove(src []byte, startRow0 int, lang docCommentLang) string {
 					if body != "" {
 						collected = append(collected, stripBlockStarLine(body))
 					}
-					inBlock = false
 					goto done
 				}
 				collected = append(collected, stripBlockStarLine(trimmed))

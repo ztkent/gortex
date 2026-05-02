@@ -246,6 +246,12 @@ func (e *PythonExtractor) emitFunction(m parser.QueryResult, filePath, fileID st
 	doc := pyDocstringFromDef(def.Node, src)
 	visibility := VisibilityByUnderscore(name)
 	decorators := pyDecoratorNodes(def.Node)
+	complexity := 0
+	if def.Node != nil {
+		if body := def.Node.ChildByFieldName("body"); body != nil {
+			complexity = PyComplexity(body)
+		}
+	}
 
 	className := pyDirectClassParent(def.Node, src)
 	if className != "" {
@@ -265,6 +271,9 @@ func (e *PythonExtractor) emitFunction(m parser.QueryResult, filePath, fileID st
 		}
 		if doc != "" {
 			node.Meta["doc"] = doc
+		}
+		if complexity > 1 {
+			node.Meta["complexity"] = complexity
 		}
 		if def.Node != nil {
 			if rt := extractPyReturnType(def.Node, src); rt != "" {
@@ -296,6 +305,9 @@ func (e *PythonExtractor) emitFunction(m parser.QueryResult, filePath, fileID st
 	}
 	if doc != "" {
 		meta["doc"] = doc
+	}
+	if complexity > 1 {
+		meta["complexity"] = complexity
 	}
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindFunction, Name: name,

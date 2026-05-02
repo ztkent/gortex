@@ -286,6 +286,12 @@ func (e *RustExtractor) emitFunction(m parser.QueryResult, filePath, fileID stri
 	doc := ExtractDocAbove(src, def.StartLine, DocLangSlashSlash)
 	visibility := rustVisibility(def.Node, src)
 	typeParams := rustTypeParams(def.Node, src)
+	complexity := 0
+	if def.Node != nil {
+		if body := def.Node.ChildByFieldName("body"); body != nil {
+			complexity = RustComplexity(body)
+		}
+	}
 
 	implType := rustImplMethodReceiver(def.Node, src)
 	if implType != "" {
@@ -307,6 +313,9 @@ func (e *RustExtractor) emitFunction(m parser.QueryResult, filePath, fileID stri
 		}
 		if len(typeParams) > 0 {
 			meta["type_params"] = typeParams
+		}
+		if complexity > 1 {
+			meta["complexity"] = complexity
 		}
 		result.Nodes = append(result.Nodes, &graph.Node{
 			ID: id, Kind: graph.KindMethod, Name: name,
@@ -341,6 +350,9 @@ func (e *RustExtractor) emitFunction(m parser.QueryResult, filePath, fileID stri
 	}
 	if len(typeParams) > 0 {
 		meta["type_params"] = typeParams
+	}
+	if complexity > 1 {
+		meta["complexity"] = complexity
 	}
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindFunction, Name: name,

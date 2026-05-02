@@ -1,6 +1,7 @@
 package languages
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/zzet/gortex/internal/graph"
@@ -148,7 +149,6 @@ func (e *DockerfileExtractor) addVariable(varName, prefix string, node *sitter.N
 }
 
 func (e *DockerfileExtractor) extractInstruction(node *sitter.Node, src []byte, filePath, fileID string, result *parser.ExtractionResult, instrType string) {
-	// Extract instruction as a variable for visibility.
 	label := strings.TrimSuffix(instrType, "_instruction")
 	label = strings.ToUpper(label)
 	text := node.Content(src)
@@ -156,13 +156,38 @@ func (e *DockerfileExtractor) extractInstruction(node *sitter.Node, src []byte, 
 	if len(text) > 80 {
 		text = text[:77] + "..."
 	}
+	startLine := int(node.StartPoint().Row) + 1
+	endLine := int(node.EndPoint().Row) + 1
+	// RUN instructions are the action surface of a Dockerfile — they
+	// invoke shell commands that often shell out to scripts in the
+	// build context. Promote them to function-style nodes with a
+	// stable, line-anchored name so reverse-walks ("which RUN line
+	// invoked this script?") can land on a single node.
+	if instrType == "run_instruction" {
+		name := fmt.Sprintf("run-line-%d", startLine)
+		id := filePath + "::" + name
+		result.Nodes = append(result.Nodes, &graph.Node{
+			ID: id, Kind: graph.KindFunction, Name: name,
+			FilePath: filePath, StartLine: startLine, EndLine: endLine,
+			Language: "dockerfile",
+			Meta: map[string]any{
+				"instruction": label,
+				"command":     text,
+			},
+		})
+		result.Edges = append(result.Edges, &graph.Edge{
+			From: fileID, To: id, Kind: graph.EdgeDefines,
+			FilePath: filePath, Line: startLine,
+		})
+		return
+	}
 	id := filePath + "::" + label + "::" + strings.ReplaceAll(text, "\n", " ")
 	if len(id) > 200 {
 		id = id[:200]
 	}
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindVariable, Name: label,
-		FilePath: filePath, StartLine: int(node.StartPoint().Row) + 1, EndLine: int(node.EndPoint().Row) + 1,
+		FilePath: filePath, StartLine: startLine, EndLine: endLine,
 		Language: "dockerfile",
 		Meta: map[string]any{
 			"instruction": label,
@@ -170,7 +195,7 @@ func (e *DockerfileExtractor) extractInstruction(node *sitter.Node, src []byte, 
 	})
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines,
-		FilePath: filePath, Line: int(node.StartPoint().Row) + 1,
+		FilePath: filePath, Line: startLine,
 	})
 }
 
