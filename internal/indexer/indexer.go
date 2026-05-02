@@ -577,6 +577,37 @@ func (idx *Indexer) applyCoverageDomains(relPath, lang string, src []byte, resul
 	if !idx.config.Coverage.IsEnabled("observability") {
 		stripObservabilityArtifacts(result)
 	}
+	if !idx.config.Coverage.IsEnabled("flags") {
+		stripFlagArtifacts(result)
+	}
+}
+
+// stripFlagArtifacts drops KindFlag nodes and EdgeTogglesFlag
+// edges when the flags coverage domain is gated off. Mirrors the
+// observability strip — endpoint-aware so any leftover edges that
+// pointed to a removed flag node are also dropped.
+func stripFlagArtifacts(result *parser.ExtractionResult) {
+	stripped := make(map[string]struct{})
+	keptNodes := result.Nodes[:0]
+	for _, n := range result.Nodes {
+		if n.Kind == graph.KindFlag {
+			stripped[n.ID] = struct{}{}
+			continue
+		}
+		keptNodes = append(keptNodes, n)
+	}
+	result.Nodes = keptNodes
+	keptEdges := result.Edges[:0]
+	for _, e := range result.Edges {
+		if e.Kind == graph.EdgeTogglesFlag {
+			continue
+		}
+		if _, ok := stripped[e.To]; ok {
+			continue
+		}
+		keptEdges = append(keptEdges, e)
+	}
+	result.Edges = keptEdges
 }
 
 // stripObservabilityArtifacts drops KindEvent nodes and EdgeEmits
