@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+
+	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/daemon"
@@ -166,8 +169,8 @@ func paletteFor(s string) string {
 // splitOwner pulls "owner/repo" out of a repo prefix when one exists,
 // otherwise treats the whole prefix as the repo and leaves owner blank.
 func splitOwner(prefix string) (owner, name string) {
-	if i := strings.Index(prefix, "/"); i >= 0 {
-		return prefix[:i], prefix[i+1:]
+	if before, after, ok := strings.Cut(prefix, "/"); ok {
+		return before, after
 	}
 	return "", prefix
 }
@@ -461,7 +464,11 @@ func categorizeProcess(entry string) string {
 }
 
 func (h *Handler) handleProcesses(w http.ResponseWriter, r *http.Request) {
-	raw := h.CallTool(r.Context(), "get_processes", map[string]any{})
+	raw, err := h.CallToolStrict(r.Context(), "get_processes", map[string]any{})
+	if err != nil {
+		WriteJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	if raw == "" {
 		WriteJSON(w, http.StatusOK, map[string]any{"processes": []processEntry{}})
 		return
@@ -546,7 +553,11 @@ type contractLocation struct {
 }
 
 func (h *Handler) handleContracts(w http.ResponseWriter, r *http.Request) {
-	raw := h.CallTool(r.Context(), "contracts", map[string]any{"action": "list"})
+	raw, err := h.CallToolStrict(r.Context(), "contracts", map[string]any{"action": "list"})
+	if err != nil {
+		WriteJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	if raw == "" {
 		WriteJSON(w, http.StatusOK, map[string]any{"contracts": []contractEntry{}})
 		return
@@ -598,7 +609,7 @@ func (h *Handler) handleContracts(w http.ResponseWriter, r *http.Request) {
 				if c.Role == "provider" && e.Producer == "" {
 					e.Producer = c.RepoPrefix
 				}
-				if c.Role == "consumer" && c.RepoPrefix != "" && !contains(e.Consumers, c.RepoPrefix) {
+				if c.Role == "consumer" && c.RepoPrefix != "" && !slices.Contains(e.Consumers, c.RepoPrefix) {
 					e.Consumers = append(e.Consumers, c.RepoPrefix)
 				}
 				e.Locations = append(e.Locations, contractLocation{
@@ -651,7 +662,11 @@ func (h *Handler) handleContracts(w http.ResponseWriter, r *http.Request) {
 // counts and render a per-contract diff panel.
 
 func (h *Handler) handleContractsValidate(w http.ResponseWriter, r *http.Request) {
-	raw := h.CallTool(r.Context(), "contracts", map[string]any{"action": "validate"})
+	raw, err := h.CallToolStrict(r.Context(), "contracts", map[string]any{"action": "validate"})
+	if err != nil {
+		WriteJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	if raw == "" {
 		WriteJSON(w, http.StatusOK, map[string]any{
 			"issues":  []any{},
@@ -901,15 +916,6 @@ func canonicalContractKey(id string) string {
 	})
 }
 
-func contains(ss []string, x string) bool {
-	for _, s := range ss {
-		if s == x {
-			return true
-		}
-	}
-	return false
-}
-
 // --- /v1/communities ---
 //
 // Returns the community detection result reshaped for the dashboard
@@ -927,7 +933,11 @@ type communityEntry struct {
 }
 
 func (h *Handler) handleCommunities(w http.ResponseWriter, r *http.Request) {
-	raw := h.CallTool(r.Context(), "get_communities", map[string]any{})
+	raw, err := h.CallToolStrict(r.Context(), "get_communities", map[string]any{})
+	if err != nil {
+		WriteJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	if raw == "" {
 		WriteJSON(w, http.StatusOK, map[string]any{"communities": []communityEntry{}, "modularity": 0.0})
 		return
@@ -1071,14 +1081,24 @@ func (h *Handler) handleCaveats(w http.ResponseWriter, r *http.Request) {
 	// to surface persistent landmines, not what would fire if a
 	// specific commit ran. Boundary/ownership violations come from the
 	// /v1/guards endpoint instead.
-	if raw := h.CallTool(ctx, "analyze", map[string]any{"kind": "hotspots", "limit": 20}); raw != "" {
-		out = append(out, parseHotspots(raw)...)
-	}
-	if raw := h.CallTool(ctx, "analyze", map[string]any{"kind": "dead_code", "limit": 20}); raw != "" {
-		out = append(out, parseDeadCode(raw)...)
-	}
-	if raw := h.CallTool(ctx, "analyze", map[string]any{"kind": "cycles", "limit": 20}); raw != "" {
-		out = append(out, parseCycles(raw)...)
+	for _, kind := range []string{"hotspots", "dead_code", "cycles"} {
+		raw, err := h.CallToolStrict(ctx, "analyze", map[string]any{"kind": kind, "limit": 20})
+		if err != nil {
+			h.logger.Warn("caveats: analyze sub-call failed; section will be empty",
+				zap.String("kind", kind), zap.Error(err))
+			continue
+		}
+		if raw == "" {
+			continue
+		}
+		switch kind {
+		case "hotspots":
+			out = append(out, parseHotspots(raw)...)
+		case "dead_code":
+			out = append(out, parseDeadCode(raw)...)
+		case "cycles":
+			out = append(out, parseCycles(raw)...)
+		}
 	}
 
 	severityRank := map[string]int{
@@ -1345,21 +1365,34 @@ func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	// both come from the same data — no chance of the dashboard's
 	// number disagreeing with the Caveats page on first load.
 	cavs := make([]caveatEntry, 0, 32)
-	if raw := h.CallTool(ctx, "analyze", map[string]any{"kind": "hotspots", "limit": 20}); raw != "" {
-		cavs = append(cavs, parseHotspots(raw)...)
-	}
-	if raw := h.CallTool(ctx, "analyze", map[string]any{"kind": "dead_code", "limit": 20}); raw != "" {
-		cavs = append(cavs, parseDeadCode(raw)...)
-	}
-	if raw := h.CallTool(ctx, "analyze", map[string]any{"kind": "cycles", "limit": 20}); raw != "" {
-		cavs = append(cavs, parseCycles(raw)...)
+	for _, kind := range []string{"hotspots", "dead_code", "cycles"} {
+		raw, err := h.CallToolStrict(ctx, "analyze", map[string]any{"kind": kind, "limit": 20})
+		if err != nil {
+			h.logger.Warn("dashboard: analyze sub-call failed; caveats section will be partial",
+				zap.String("kind", kind), zap.Error(err))
+			continue
+		}
+		if raw == "" {
+			continue
+		}
+		switch kind {
+		case "hotspots":
+			cavs = append(cavs, parseHotspots(raw)...)
+		case "dead_code":
+			cavs = append(cavs, parseDeadCode(raw)...)
+		case "cycles":
+			cavs = append(cavs, parseCycles(raw)...)
+		}
 	}
 	snap.Caveats = cavs
 	snap.Stats.Caveats = len(cavs)
 
 	// Top processes for the inline preview. The full list is on the
 	// Processes page; here we cap at 6 so the dashboard stays compact.
-	if raw := h.CallTool(ctx, "get_processes", map[string]any{}); raw != "" {
+	if raw, err := h.CallToolStrict(ctx, "get_processes", map[string]any{}); err != nil {
+		h.logger.Warn("dashboard: get_processes failed; processes section will be empty",
+			zap.Error(err))
+	} else if raw != "" {
 		type wrap struct {
 			Processes []rawProcessSummary `json:"processes"`
 		}

@@ -305,7 +305,7 @@ type recordAction struct {
 
 // genSymbolID generates a random symbol ID like "pkg/file.go::FuncName".
 func genSymbolID() *rapid.Generator[string] {
-	return rapid.Custom[string](func(rt *rapid.T) string {
+	return rapid.Custom(func(rt *rapid.T) string {
 		pkg := rapid.StringMatching(`[a-z]{2,6}`).Draw(rt, "pkg")
 		file := rapid.StringMatching(`[a-z]{2,6}`).Draw(rt, "file")
 		name := rapid.StringMatching(`[A-Z][a-zA-Z]{1,8}`).Draw(rt, "name")
@@ -316,12 +316,12 @@ func genSymbolID() *rapid.Generator[string] {
 // genRecordActions generates a non-empty sequence of Record() calls using
 // a fixed pool of symbol IDs so that some symbols get recorded multiple times.
 func genRecordActions() *rapid.Generator[[]recordAction] {
-	return rapid.Custom[[]recordAction](func(rt *rapid.T) []recordAction {
+	return rapid.Custom(func(rt *rapid.T) []recordAction {
 		// Generate a pool of 1-5 distinct symbol IDs
 		poolSize := rapid.IntRange(1, 5).Draw(rt, "poolSize")
 		pool := make([]string, poolSize)
 		seen := make(map[string]bool)
-		for i := 0; i < poolSize; i++ {
+		for i := range poolSize {
 			for {
 				id := genSymbolID().Draw(rt, "symbolID")
 				if !seen[id] {
@@ -335,7 +335,7 @@ func genRecordActions() *rapid.Generator[[]recordAction] {
 		// Generate 1-20 record actions drawing from the pool
 		numActions := rapid.IntRange(1, 20).Draw(rt, "numActions")
 		actions := make([]recordAction, numActions)
-		for i := 0; i < numActions; i++ {
+		for i := range numActions {
 			idx := rapid.IntRange(0, poolSize-1).Draw(rt, "poolIdx")
 			actions[i] = recordAction{
 				SymbolID:         pool[idx],

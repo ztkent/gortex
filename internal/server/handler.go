@@ -421,11 +421,36 @@ func (h *Handler) handleStats(w http.ResponseWriter, _ *http.Request) {
 // --- Tool invocation helper ---
 
 // CallTool invokes an MCP tool by name and returns the concatenated text content.
-// Returns empty string on error or if the tool is not found.
+// Returns empty string on error, missing tool, or tool-level error result.
+//
+// This is the best-effort variant: callers cannot distinguish "tool returned
+// no content" from "tool returned an error result." Use CallToolStrict when
+// you need that distinction (e.g. an HTTP endpoint that should surface 5xx
+// instead of pretending the call succeeded with empty data).
 func (h *Handler) CallTool(ctx context.Context, toolName string, args map[string]any) string {
+	text, _ := h.CallToolStrict(ctx, toolName, args)
+	return text
+}
+
+// CallToolStrict invokes an MCP tool by name and returns the concatenated
+// text content together with a non-nil error when the call did not produce a
+// successful result. The four error cases are:
+//
+//   - tool name is not registered on this server (nil error from Go but
+//     callers want to distinguish "no such tool" from "no content")
+//   - tool handler returned a Go-level error
+//   - tool handler returned a result with IsError == true (the upstream MCP
+//     contract; the text content is the human-readable error message)
+//   - tool returned a successful result but no text content (degenerate;
+//     surfaced as an error so callers do not silently render an empty UI)
+//
+// The returned string carries the text content in every case, including the
+// error cases — callers that want to render the message verbatim can do so
+// regardless of whether they treat it as an error.
+func (h *Handler) CallToolStrict(ctx context.Context, toolName string, args map[string]any) (string, error) {
 	tool := h.mcpServer.GetTool(toolName)
 	if tool == nil {
-		return ""
+		return "", fmt.Errorf("tool %q is not registered", toolName)
 	}
 
 	req := mcp.CallToolRequest{
@@ -441,7 +466,7 @@ func (h *Handler) CallTool(ctx context.Context, toolName string, args map[string
 			zap.String("tool", toolName),
 			zap.Error(err),
 		)
-		return ""
+		return "", fmt.Errorf("tool %q invocation failed: %w", toolName, err)
 	}
 
 	var sb strings.Builder
@@ -453,7 +478,24 @@ func (h *Handler) CallTool(ctx context.Context, toolName string, args map[string
 			sb.WriteString(tc.Text)
 		}
 	}
-	return sb.String()
+	text := sb.String()
+
+	if result.IsError {
+		// MCP contract: IsError=true means the text content describes the
+		// error. Surface it as a Go error so callers can distinguish it
+		// from a real result. Keep the text in the returned string so the
+		// caller can include it in the response body if it wishes.
+		h.logger.Debug("internal tool call returned error result",
+			zap.String("tool", toolName),
+			zap.String("text", text),
+		)
+		if text == "" {
+			return "", fmt.Errorf("tool %q returned an error result", toolName)
+		}
+		return text, fmt.Errorf("tool %q error: %s", toolName, text)
+	}
+
+	return text, nil
 }
 
 // --- Helpers ---

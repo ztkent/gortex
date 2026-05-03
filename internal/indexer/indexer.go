@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1503,10 +1504,18 @@ func (idx *Indexer) buildSearchIndex() {
 	// missing the semantic boost. Chunk the EmbedBatch calls so any
 	// single API request stays small (matters for hosted embedders
 	// with per-request token limits).
+	//
+	// embedChunkTimeout is generous because ONNX inference (Hugot) has
+	// long tail latency: a 60s budget made one in ~30 chunks miss its
+	// deadline, which under the old fail-fast policy threw away every
+	// already-embedded chunk and silently degraded to BM25 with no
+	// signal to the user. 5 minutes covers observed worst-case spikes
+	// without changing steady-state behaviour. On a true hang the
+	// caller can still cancel the parent indexing call.
 	const (
 		embedMaxSymbols   = 100_000
 		embedChunkSize    = 500
-		embedChunkTimeout = 60 * time.Second
+		embedChunkTimeout = 5 * time.Minute
 	)
 
 	if len(texts) > embedMaxSymbols {
@@ -1517,15 +1526,45 @@ func (idx *Indexer) buildSearchIndex() {
 		return
 	}
 
+	// embedWithRetry runs one chunk with the standard deadline; on
+	// context-deadline failure it splits the chunk in half and retries
+	// each half once. A single slow batch shouldn't throw away every
+	// already-embedded chunk and silently demote the backend to BM25.
+	var embedWithRetry func(items []string) ([][]float32, error)
+	embedWithRetry = func(items []string) ([][]float32, error) {
+		chunkCtx, cancel := context.WithTimeout(context.Background(), embedChunkTimeout)
+		out, err := idx.embedder.EmbedBatch(chunkCtx, items)
+		cancel()
+		if err == nil {
+			return out, nil
+		}
+		// Only retry on deadline-style failures; auth/protocol errors
+		// won't get better with smaller batches.
+		if !errors.Is(err, context.DeadlineExceeded) || len(items) <= 1 {
+			return nil, err
+		}
+		idx.logger.Warn("embed chunk timed out, retrying with halved batch",
+			zap.Int("size", len(items)),
+			zap.Error(err))
+		mid := len(items) / 2
+		left, lerr := embedWithRetry(items[:mid])
+		if lerr != nil {
+			return nil, lerr
+		}
+		right, rerr := embedWithRetry(items[mid:])
+		if rerr != nil {
+			return nil, rerr
+		}
+		return append(left, right...), nil
+	}
+
 	vectors := make([][]float32, 0, len(texts))
 	for start := 0; start < len(texts); start += embedChunkSize {
 		end := start + embedChunkSize
 		if end > len(texts) {
 			end = len(texts)
 		}
-		chunkCtx, cancel := context.WithTimeout(context.Background(), embedChunkTimeout)
-		chunkVecs, err := idx.embedder.EmbedBatch(chunkCtx, texts[start:end])
-		cancel()
+		chunkVecs, err := embedWithRetry(texts[start:end])
 		if err != nil {
 			// A partial vector index would mis-score later queries
 			// (some symbols semantically findable, others not) — bail

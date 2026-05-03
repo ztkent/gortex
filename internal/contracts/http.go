@@ -89,7 +89,12 @@ var httpPatterns = []httpPattern{
 		languages:  []string{"go"},
 	},
 	{
-		re:         regexp.MustCompile(`\.(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\(\s*["` + "`" + `]([^"` + "`" + `]+)["` + "`" + `]\s*(?:,\s*(\w+))?`),
+		// Path must start with "/". Otherwise the bare `.VERB(` anchor
+		// matches verb names that appear inside string literals (e.g.
+		// the prefilter marker `[]byte(".GET(")` in this very file),
+		// and the path capture overshoots until the next quote — emitting
+		// contracts whose "path" is a chunk of source code.
+		re:         regexp.MustCompile(`\.(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\(\s*["` + "`" + `](/[^"` + "`" + `]*)["` + "`" + `]\s*(?:,\s*(\w+))?`),
 		role:       RoleProvider,
 		methodGrp:  1,
 		pathGrp:    2,

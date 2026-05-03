@@ -317,21 +317,44 @@ func (gc *GlobalConfig) RemoveRepo(path string) error {
 
 // ResolveRepos returns the effective repo list for a given project name.
 // If projectName is empty, it returns the top-level repos list.
-// If projectName is set, it returns the repos from that project definition.
+// Otherwise it tries two complementary resolution strategies in order:
+//
+//  1. Top-level Projects map: gc.Projects[projectName].Repos. This is the
+//     "explicit project definition" form.
+//  2. Per-repo annotations: every gc.Repos[i] whose Project field equals
+//     projectName. This is the "flat repos list with project: <slug> tags"
+//     form, which is what users get when they run `gortex track --project`.
+//
+// Strategy 1 wins when both are populated for the same name, preserving
+// the existing precedence so users who define a project explicitly are
+// not surprised by per-repo annotations bleeding in.
+//
+// Returns the "project not found" error only when both strategies yield
+// zero entries.
 func (gc *GlobalConfig) ResolveRepos(projectName string) ([]RepoEntry, error) {
 	if projectName == "" {
 		return gc.Repos, nil
 	}
 
-	proj, ok := gc.Projects[projectName]
-	if !ok {
-		available := make([]string, 0, len(gc.Projects))
-		for name := range gc.Projects {
-			available = append(available, name)
-		}
-		return nil, fmt.Errorf("project not found: %q (available: %s)",
-			projectName, strings.Join(available, ", "))
+	if proj, ok := gc.Projects[projectName]; ok {
+		return proj.Repos, nil
 	}
 
-	return proj.Repos, nil
+	// Fall back to per-repo Project annotations on the flat repos list.
+	var tagged []RepoEntry
+	for _, entry := range gc.Repos {
+		if entry.Project == projectName {
+			tagged = append(tagged, entry)
+		}
+	}
+	if len(tagged) > 0 {
+		return tagged, nil
+	}
+
+	available := make([]string, 0, len(gc.Projects))
+	for name := range gc.Projects {
+		available = append(available, name)
+	}
+	return nil, fmt.Errorf("project not found: %q (available: %s)",
+		projectName, strings.Join(available, ", "))
 }

@@ -310,6 +310,76 @@ func TestResolveRepos_ProjectNotFound(t *testing.T) {
 	assert.Contains(t, err.Error(), "existing")
 }
 
+// TestResolveRepos_PerRepoProjectTags verifies that ResolveRepos treats
+// per-repo `project: <slug>` annotations as a valid project membership
+// when the top-level Projects map has no matching entry. This is the
+// shape produced by `gortex track --project <slug>`.
+func TestResolveRepos_PerRepoProjectTags(t *testing.T) {
+	gc := &GlobalConfig{
+		Repos: []RepoEntry{
+			{Path: "/a", Name: "a", Project: "alpha"},
+			{Path: "/b", Name: "b", Project: "alpha"},
+			{Path: "/c", Name: "c", Project: "alpha"},
+			{Path: "/d", Name: "d", Project: "beta"},
+			{Path: "/e", Name: "e", Project: "beta"},
+		},
+	}
+
+	alpha, err := gc.ResolveRepos("alpha")
+	require.NoError(t, err)
+	assert.Len(t, alpha, 3)
+	assert.Equal(t, []string{"a", "b", "c"}, []string{alpha[0].Name, alpha[1].Name, alpha[2].Name})
+
+	beta, err := gc.ResolveRepos("beta")
+	require.NoError(t, err)
+	assert.Len(t, beta, 2)
+	assert.Equal(t, []string{"d", "e"}, []string{beta[0].Name, beta[1].Name})
+
+	_, err = gc.ResolveRepos("gamma")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "project not found")
+}
+
+// TestResolveRepos_ProjectsMapWinsOverPerRepoTags verifies that when a
+// project name is defined both via the top-level Projects map and via
+// per-repo annotations on different entries, the explicit Projects map
+// definition wins. Preserving this precedence keeps existing configs
+// behaving exactly as before.
+func TestResolveRepos_ProjectsMapWinsOverPerRepoTags(t *testing.T) {
+	gc := &GlobalConfig{
+		Projects: map[string]ProjectConfig{
+			"alpha": {
+				Repos: []RepoEntry{
+					{Path: "/from-projects", Name: "from-projects"},
+				},
+			},
+		},
+		Repos: []RepoEntry{
+			{Path: "/from-tags-1", Name: "from-tags-1", Project: "alpha"},
+			{Path: "/from-tags-2", Name: "from-tags-2", Project: "alpha"},
+		},
+	}
+
+	repos, err := gc.ResolveRepos("alpha")
+	require.NoError(t, err)
+	require.Len(t, repos, 1)
+	assert.Equal(t, "from-projects", repos[0].Name)
+}
+
+// TestResolveRepos_BothEmpty verifies the "project not found" error path
+// when neither the Projects map nor any per-repo annotation matches.
+func TestResolveRepos_BothEmpty(t *testing.T) {
+	gc := &GlobalConfig{
+		Repos: []RepoEntry{
+			{Path: "/a", Name: "a"}, // no Project annotation
+		},
+	}
+
+	_, err := gc.ResolveRepos("missing")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "project not found")
+}
+
 func TestConfigPath_Default(t *testing.T) {
 	gc := &GlobalConfig{}
 	path := gc.ConfigPath()

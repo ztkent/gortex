@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"gopkg.in/yaml.v3"
 
 	"github.com/zzet/gortex/internal/config"
@@ -107,10 +108,14 @@ func runEvalRecall(_ *cobra.Command, _ []string) error {
 	}
 
 	// Build indexer, optionally with an embedder so vector search has data.
+	// A real stderr logger surfaces embedding failures —
+	// silently swallowing them via zap.NewNop() let the recall harness
+	// fall back to BM25 with no visible signal that the hybrid backend
+	// failed to build.
 	g := graph.New()
 	reg := parser.NewRegistry()
 	languages.RegisterAll(reg)
-	idx := indexer.New(g, reg, cfg.Index, zap.NewNop())
+	idx := indexer.New(g, reg, cfg.Index, newRecallLogger())
 
 	embedder := chooseEmbedder()
 	if embedder != nil {
@@ -155,7 +160,16 @@ func runEvalRecall(_ *cobra.Command, _ []string) error {
 		textBackend = inner
 	}
 
+	fmt.Fprintf(os.Stderr, "[gortex eval recall] inner backend: %T\n", inner)
 	fmt.Fprintf(os.Stderr, "[gortex eval recall] text backend: %T count=%d\n", textBackend, textBackend.Count())
+	if hybrid != nil {
+		vec := hybrid.VectorIndex()
+		vecCount := 0
+		if vec != nil {
+			vecCount = vec.Count()
+		}
+		fmt.Fprintf(os.Stderr, "[gortex eval recall] vector index: count=%d\n", vecCount)
+	}
 
 	// Engine-backed BM25 mirrors the MCP search_symbols call path
 	// (BM25 + substring fallback for camelCase-only queries). This is
@@ -299,6 +313,23 @@ func runEvalRecall(_ *cobra.Command, _ []string) error {
 	}
 	fmt.Fprintf(os.Stderr, "[gortex eval recall] wrote %s\n", evalRecallOut)
 	return nil
+}
+
+// newRecallLogger returns a stderr-only zap logger gated at warn level
+// so the recall harness stays quiet on the success path but surfaces
+// embedding failures and other indexer warnings — silently swallowing
+// them via zap.NewNop() lets a missed embedding chunk demote the
+// backend to BM25 with no visible signal.
+func newRecallLogger() *zap.Logger {
+	cfg := zap.NewProductionConfig()
+	cfg.Level = zap.NewAtomicLevelAt(zapcore.WarnLevel)
+	cfg.OutputPaths = []string{"stderr"}
+	cfg.ErrorOutputPaths = []string{"stderr"}
+	logger, err := cfg.Build()
+	if err != nil {
+		return zap.NewNop()
+	}
+	return logger
 }
 
 // chooseEmbedder honours --embeddings-url > --embedder > --embeddings > off.

@@ -7,6 +7,8 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 	toon "github.com/toon-format/toon-go"
+	"go.uber.org/zap"
+
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/query"
@@ -148,15 +150,24 @@ func subGraphToTOON(sg *query.SubGraph) (*mcp.CallToolResult, error) {
 // resolveRepoFilter resolves the optional repo/project/ref params into a set
 // of allowed repo prefixes. Returns nil when no filtering is needed (all repos).
 // When an active project is set and no explicit filter is provided, the active
-// project scope is applied as the default.
+// project scope is applied as the default. If the active project cannot be
+// resolved (typically a stale name in config, no matching projects map), the
+// fallback degrades to "no filter" with a warning log instead of a hard error,
+// mirroring ConfigManager.ActiveRepos so tool calls stay usable.
 func (s *Server) resolveRepoFilter(req mcp.CallToolRequest) (map[string]bool, error) {
 	repo := req.GetString("repo", "")
 	project := req.GetString("project", "")
 	ref := req.GetString("ref", "")
 
-	// Apply active project as default scope when no explicit filter is provided.
+	// Track whether `project` was set by the caller (explicit) or by the
+	// active-project default. An explicit unknown project is still a hard
+	// error (the caller asked for X by name, deserves to know X is wrong);
+	// a stale active-project default falls back to "all repos" so a single
+	// misconfigured config line does not break every per-repo MCP call.
+	projectFromActive := false
 	if repo == "" && project == "" && ref == "" && s.activeProject != "" {
 		project = s.activeProject
+		projectFromActive = true
 	}
 
 	if repo == "" && project == "" && ref == "" {
@@ -179,6 +190,17 @@ func (s *Server) resolveRepoFilter(req mcp.CallToolRequest) (map[string]bool, er
 	if project != "" {
 		repos, err := gc.ResolveRepos(project)
 		if err != nil {
+			if projectFromActive {
+				// Stale active-project default. Log and degrade to no
+				// filter (all repos) so the call still succeeds. This
+				// mirrors ConfigManager.ActiveRepos behavior.
+				if s.logger != nil {
+					s.logger.Warn("active project not resolvable, falling back to all repos",
+						zap.String("active_project", project),
+						zap.Error(err))
+				}
+				return nil, nil
+			}
 			return nil, err
 		}
 		entries = repos

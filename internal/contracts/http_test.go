@@ -783,3 +783,50 @@ func TestHTTPExtractor_NoSymbol(t *testing.T) {
 		t.Errorf("expected empty symbol ID, got %s", contracts[0].SymbolID)
 	}
 }
+
+// Regression: the fiber pattern's `.VERB(` anchor used to match verb names
+// embedded in string literals — e.g. the prefilter marker `[]byte(".GET(")`
+// — and the `[^"`+"`"+`]+` path capture would overshoot the closing quote
+// and chew source code until the next quote on the next line, emitting
+// contracts whose "path" was a chunk of source. Requiring the captured path
+// to start with `/` rejects these false positives.
+func TestHTTPExtractor_Go_Fiber_NoMatchOnVerbInsideStringLiteral(t *testing.T) {
+	src := []byte("package contracts\n" +
+		"\n" +
+		"var markers = [][]byte{\n" +
+		"\t[]byte(\".GET(\"),\n" +
+		"\t[]byte(\".POST(\"),\n" +
+		"\t[]byte(\".PUT(\"),\n" +
+		"\t[]byte(\".DELETE(\"),\n" +
+		"\t[]byte(\".PATCH(\"),\n" +
+		"}\n")
+	contracts := (&HTTPExtractor{}).Extract("markers.go", src, nil, nil)
+	for _, c := range contracts {
+		if c.Meta["framework"] == "fiber" {
+			t.Errorf("fiber pattern matched a verb literal inside a string: id=%q path=%q", c.ID, c.Meta["path"])
+		}
+	}
+}
+
+// And the positive case: a real fiber registration still produces a contract.
+func TestHTTPExtractor_Go_Fiber_RealRoute(t *testing.T) {
+	src := []byte("package main\n" +
+		"\n" +
+		"import \"github.com/gofiber/fiber/v2\"\n" +
+		"\n" +
+		"func register(app *fiber.App) {\n" +
+		"\tapp.GET(\"/v1/users\", listUsers)\n" +
+		"\tapp.DELETE(\"/v1/users/:id\", deleteUser)\n" +
+		"}\n")
+	contracts := (&HTTPExtractor{}).Extract("main.go", src, nil, nil)
+	byID := map[string]Contract{}
+	for _, c := range contracts {
+		byID[c.ID] = c
+	}
+	if _, ok := byID["http::GET::/v1/users"]; !ok {
+		t.Errorf("expected http::GET::/v1/users; got %v", byID)
+	}
+	if _, ok := byID["http::DELETE::/v1/users/{p1}"]; !ok {
+		t.Errorf("expected http::DELETE::/v1/users/{p1}; got %v", byID)
+	}
+}

@@ -22,9 +22,11 @@ func TestWithSessionID_EmptyIsNoOp(t *testing.T) {
 	assert.Equal(t, "", SessionIDFromContext(withEmpty))
 }
 
-func TestSessionIDFromContext_NilCtx(t *testing.T) {
-	//nolint:staticcheck // intentionally passing nil context to verify defensiveness
-	assert.Equal(t, "", SessionIDFromContext(nil))
+func TestSessionIDFromContext_BareContext(t *testing.T) {
+	// A context with no session value attached should return "" rather
+	// than panic — callers rely on "" as the "no session, use default"
+	// signal, and the helper must be safe to call from any callsite.
+	assert.Equal(t, "", SessionIDFromContext(context.TODO()))
 }
 
 func TestSessionMap_GetCreatesLazily(t *testing.T) {
