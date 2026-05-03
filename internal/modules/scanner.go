@@ -14,8 +14,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/pelletier/go-toml/v2"
 
 	"github.com/zzet/gortex/internal/graph"
 )
@@ -185,6 +188,204 @@ func packageJSONBlock(deps map[string]string, kind string) []Spec {
 		return out[i].Path < out[j].Path
 	})
 	return out
+}
+
+// ParsePyProject walks a Python pyproject.toml file's dependency
+// declarations and returns one Spec per declared package. Both
+// PEP 621 (`[project] dependencies = ["pkg>=1.0", ...]`) and
+// Poetry (`[tool.poetry.dependencies] pkg = "^1.0"`) shapes are
+// recognised; optional-dependency groups (`[project.optional-
+// dependencies]`) are surfaced with the group name in Replace
+// (analogous to how npm dev/peer/optional reuse the field).
+//
+// Version constraints are kept verbatim — PEP 440 specifiers and
+// Poetry's caret/tilde ranges aren't normalised; resolved
+// versions live in the lockfile (poetry.lock / uv.lock /
+// requirements.txt) which a future extractor will supersede.
+func ParsePyProject(source []byte) []Spec {
+	if len(source) == 0 {
+		return nil
+	}
+	var manifest struct {
+		Project struct {
+			Dependencies         []string            `toml:"dependencies"`
+			OptionalDependencies map[string][]string `toml:"optional-dependencies"`
+		} `toml:"project"`
+		Tool struct {
+			Poetry struct {
+				Dependencies    map[string]any `toml:"dependencies"`
+				DevDependencies map[string]any `toml:"dev-dependencies"`
+			} `toml:"poetry"`
+		} `toml:"tool"`
+	}
+	if err := toml.Unmarshal(source, &manifest); err != nil {
+		return nil
+	}
+
+	var specs []Spec
+	// PEP 621 dependencies: list of `name<spec>` strings.
+	for _, dep := range manifest.Project.Dependencies {
+		name, version := splitPEP508(dep)
+		if name == "" {
+			continue
+		}
+		specs = append(specs, Spec{
+			Ecosystem: "pypi",
+			Path:      name,
+			Version:   version,
+		})
+	}
+	// PEP 621 optional groups: each group name lands on Replace so
+	// agents can scope by group later. Sorted within each group for
+	// determinism.
+	groupNames := make([]string, 0, len(manifest.Project.OptionalDependencies))
+	for g := range manifest.Project.OptionalDependencies {
+		groupNames = append(groupNames, g)
+	}
+	sort.Strings(groupNames)
+	for _, group := range groupNames {
+		entries := manifest.Project.OptionalDependencies[group]
+		groupSpecs := make([]Spec, 0, len(entries))
+		for _, dep := range entries {
+			name, version := splitPEP508(dep)
+			if name == "" {
+				continue
+			}
+			groupSpecs = append(groupSpecs, Spec{
+				Ecosystem: "pypi",
+				Path:      name,
+				Version:   version,
+				Indirect:  true,
+				Replace:   group,
+			})
+		}
+		sort.Slice(groupSpecs, func(i, j int) bool {
+			return groupSpecs[i].Path < groupSpecs[j].Path
+		})
+		specs = append(specs, groupSpecs...)
+	}
+	// Poetry shape: name → spec (string or table). When a table is
+	// given we take its `version` field, when a bare string we keep
+	// it verbatim.
+	specs = append(specs, poetryBlock(manifest.Tool.Poetry.Dependencies, "")...)
+	specs = append(specs, poetryBlock(manifest.Tool.Poetry.DevDependencies, "dev")...)
+	return specs
+}
+
+// poetryBlock converts a Poetry `[tool.poetry.*-dependencies]`
+// table into Spec entries. Values can be either bare version
+// strings or tables containing a `version` key (for
+// extras-bearing entries like `requests = { version = "^2.0",
+// extras = ["socks"] }`).
+func poetryBlock(deps map[string]any, kind string) []Spec {
+	if len(deps) == 0 {
+		return nil
+	}
+	out := make([]Spec, 0, len(deps))
+	for name, raw := range deps {
+		if name == "python" {
+			// `python = "^3.10"` is a Python interpreter
+			// constraint, not a dependency. Skip.
+			continue
+		}
+		var version string
+		switch v := raw.(type) {
+		case string:
+			version = v
+		case map[string]any:
+			if s, ok := v["version"].(string); ok {
+				version = s
+			}
+		}
+		out = append(out, Spec{
+			Ecosystem: "pypi",
+			Path:      name,
+			Version:   version,
+			Indirect:  kind != "",
+			Replace:   kind,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Path < out[j].Path
+	})
+	return out
+}
+
+// pep508Re strips a PEP 508 dependency string into name + version
+// constraint. Examples: `requests>=2.0` → ("requests", ">=2.0"),
+// `flask[async]==2.0.0` → ("flask", "==2.0.0"), `numpy` → ("numpy", "").
+// Environment markers (`pkg; python_version<'3.9'`) and URL
+// installs (`pkg @ https://...`) are dropped — they encode
+// install-context, not the dependency identity our graph cares
+// about.
+var pep508Re = regexp.MustCompile(`^([A-Za-z0-9_.\-]+)`)
+
+func splitPEP508(dep string) (name, version string) {
+	dep = strings.TrimSpace(dep)
+	// Drop environment markers and URL specs at the first ';' / ' @ '.
+	if idx := strings.Index(dep, ";"); idx >= 0 {
+		dep = strings.TrimSpace(dep[:idx])
+	}
+	if idx := strings.Index(dep, " @ "); idx >= 0 {
+		dep = strings.TrimSpace(dep[:idx])
+	}
+	// Drop extras (the `[group]` suffix).
+	if idx := strings.Index(dep, "["); idx >= 0 {
+		end := strings.Index(dep, "]")
+		if end < 0 {
+			return "", ""
+		}
+		dep = strings.TrimSpace(dep[:idx]) + strings.TrimSpace(dep[end+1:])
+	}
+	m := pep508Re.FindString(dep)
+	if m == "" {
+		return "", ""
+	}
+	name = m
+	version = strings.TrimSpace(dep[len(m):])
+	return name, version
+}
+
+// ParseRequirementsTxt walks a pip requirements file and returns
+// one Spec per non-comment, non-blank entry. Each line is parsed
+// like a PEP 508 dependency; `-r other.txt` and `-e .` lines are
+// ignored — they're install-mode directives, not dependency
+// declarations.
+//
+// A future enhancement could chase `-r` includes recursively, but
+// the first-order coverage from a single file is the
+// 90th-percentile use case.
+func ParseRequirementsTxt(source []byte) []Spec {
+	if len(source) == 0 {
+		return nil
+	}
+	var specs []Spec
+	scanner := bufio.NewScanner(bytes.NewReader(source))
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		// Drop trailing inline comment.
+		if i := strings.Index(line, "#"); i > 0 {
+			line = strings.TrimSpace(line[:i])
+		}
+		if strings.HasPrefix(line, "-") {
+			// `-r`, `-e`, `--index-url`, etc. — skip.
+			continue
+		}
+		name, version := splitPEP508(line)
+		if name == "" {
+			continue
+		}
+		specs = append(specs, Spec{
+			Ecosystem: "pypi",
+			Path:      name,
+			Version:   version,
+		})
+	}
+	return specs
 }
 
 // parseReplace extracts the from/to module paths from a replace

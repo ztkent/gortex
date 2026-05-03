@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/pelletier/go-toml/v2"
 	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/codegen"
@@ -2507,6 +2508,16 @@ func (idx *Indexer) extractExternalModules() {
 			parse:          modules.ParsePackageJSON,
 			ownPathFromSrc: readPackageJSONOwnName,
 		},
+		{
+			path:           "pyproject.toml",
+			parse:          modules.ParsePyProject,
+			ownPathFromSrc: readPyProjectOwnName,
+		},
+		{
+			path:           "requirements.txt",
+			parse:          modules.ParseRequirementsTxt,
+			ownPathFromSrc: nil, // requirements.txt has no own-name notion
+		},
 	}
 
 	for _, m := range manifests {
@@ -2573,8 +2584,29 @@ func manifestLanguage(relPath string) string {
 		return "go"
 	case "package.json":
 		return "json"
+	case "pyproject.toml":
+		return "toml"
+	case "requirements.txt":
+		return "text"
 	}
 	return ""
+}
+
+// readPyProjectOwnName returns the package's own name from the
+// pyproject.toml `[project] name` field. Used by LinkImports's
+// own-module filter so a workspace package's internal imports
+// don't accidentally collide with external pypi names. Returns ""
+// on parse error or when the field is absent.
+func readPyProjectOwnName(src []byte) string {
+	var manifest struct {
+		Project struct {
+			Name string `toml:"name"`
+		} `toml:"project"`
+	}
+	if err := toml.Unmarshal(src, &manifest); err != nil {
+		return ""
+	}
+	return manifest.Project.Name
 }
 
 // readPackageJSONOwnName extracts the manifest's `name` field — the
