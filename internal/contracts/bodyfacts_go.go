@@ -29,10 +29,11 @@ type goBodyFacts struct {
 	handler  *graph.Node
 	body     *sitter.Node // function_declaration / method_declaration body block
 
-	bindings      map[string]Binding
-	responseCalls []ResponseCall
-	statusWrites  []int
-	queryReads    []string
+	bindings        map[string]Binding
+	responseCalls   []ResponseCall
+	statusWrites    []int
+	queryReads      []string
+	requestBindings []RequestBinding
 }
 
 // newGoBodyFacts is the factory registered for language "go".
@@ -55,16 +56,27 @@ func newGoBodyFacts(tree *parser.ParseTree, handler *graph.Node) BodyFacts {
 }
 
 // findHandlerBody locates the function_declaration or method_declaration
-// node whose start row matches the handler's StartLine, then returns
-// its body block. Tree-sitter rows are 0-based; handler.StartLine is
-// 1-based.
+// node corresponding to the handler graph node, then returns its
+// body block. Two-pronged lookup:
+//   1. Exact line match — handler.StartLine - 1 == node start row
+//      (works when the handler node was produced by the language
+//      extractor in the same indexing pass).
+//   2. Name match — node's name field matches handler.Name (works
+//      when the handler graph node was hand-built with a slightly
+//      off StartLine, e.g. test fixtures).
 func (bf *goBodyFacts) findHandlerBody() *sitter.Node {
 	root := bf.tree.Tree().RootNode()
 	if root == nil {
 		return nil
 	}
 	target := bf.handler.StartLine - 1
-	return findGoFuncBodyAt(root, target)
+	if body := findGoFuncBodyAt(root, target); body != nil {
+		return body
+	}
+	if bf.handler.Name == "" {
+		return nil
+	}
+	return findGoFuncBodyByName(root, bf.handler.Name, bf.src)
 }
 
 func findGoFuncBodyAt(node *sitter.Node, targetRow int) *sitter.Node {
@@ -92,6 +104,32 @@ func findGoFuncBodyAt(node *sitter.Node, targetRow int) *sitter.Node {
 			continue
 		}
 		if found := findGoFuncBodyAt(ch, targetRow); found != nil {
+			return found
+		}
+	}
+	return nil
+}
+
+func findGoFuncBodyByName(node *sitter.Node, name string, src []byte) *sitter.Node {
+	if node == nil {
+		return nil
+	}
+	kind := node.Type()
+	if kind == "function_declaration" || kind == "method_declaration" {
+		nameNode := node.ChildByFieldName("name")
+		if nameNode != nil && nameNode.Content(src) == name {
+			body := node.ChildByFieldName("body")
+			if body != nil {
+				return body
+			}
+		}
+	}
+	for i := 0; i < int(node.NamedChildCount()); i++ {
+		ch := node.NamedChild(i)
+		if ch == nil {
+			continue
+		}
+		if found := findGoFuncBodyByName(ch, name, src); found != nil {
 			return found
 		}
 	}
@@ -264,11 +302,14 @@ func (bf *goBodyFacts) set(name string, b Binding) {
 }
 
 // bindingFromRHS classifies an RHS expression node. Strips leading
-// `&`/`*` and falls through to the underlying expression.
+// `&`/`*` and falls through to the underlying expression. Stamps
+// the source line so the BindingResolver upgrade tier can ask
+// go/types for the resolved type at the same position.
 func (bf *goBodyFacts) bindingFromRHS(node *sitter.Node) Binding {
 	if node == nil {
 		return Binding{}
 	}
+	line := int(node.StartPoint().Row) + 1
 	raw := strings.TrimSpace(node.Content(bf.src))
 	pointer := false
 
@@ -302,26 +343,28 @@ func (bf *goBodyFacts) bindingFromRHS(node *sitter.Node) Binding {
 		b := bf.bindingFromComposite(cur)
 		b.Pointer = b.Pointer || pointer
 		b.RawExpr = raw
+		b.Line = line
 		return b
 	case "call_expression":
 		b := bf.bindingFromCallExpr(cur)
 		b.Pointer = b.Pointer || pointer
 		b.RawExpr = raw
+		b.Line = line
 		return b
 	case "interpreted_string_literal", "raw_string_literal":
-		return Binding{Kind: BindingStringLit, TypeID: "string", Origin: OriginASTInferred, RawExpr: raw}
+		return Binding{Kind: BindingStringLit, TypeID: "string", Origin: OriginASTInferred, RawExpr: raw, Line: line}
 	case "int_literal":
-		return Binding{Kind: BindingIntLit, TypeID: "int", Origin: OriginASTInferred, RawExpr: raw}
+		return Binding{Kind: BindingIntLit, TypeID: "int", Origin: OriginASTInferred, RawExpr: raw, Line: line}
 	case "float_literal":
-		return Binding{Kind: BindingFloatLit, TypeID: "float64", Origin: OriginASTInferred, RawExpr: raw}
+		return Binding{Kind: BindingFloatLit, TypeID: "float64", Origin: OriginASTInferred, RawExpr: raw, Line: line}
 	case "true", "false":
-		return Binding{Kind: BindingBoolLit, TypeID: "bool", Origin: OriginASTInferred, RawExpr: raw}
+		return Binding{Kind: BindingBoolLit, TypeID: "bool", Origin: OriginASTInferred, RawExpr: raw, Line: line}
 	case "identifier":
 		// `x := y` — pass-through; no new fact, but record the raw
 		// text so callers can chase y separately.
-		return Binding{Kind: BindingUnknown, RawExpr: raw}
+		return Binding{Kind: BindingUnknown, RawExpr: raw, Line: line}
 	}
-	return Binding{Kind: BindingUnknown, RawExpr: raw, Origin: OriginASTInferred}
+	return Binding{Kind: BindingUnknown, RawExpr: raw, Origin: OriginASTInferred, Line: line}
 }
 
 // bindingFromTypeNode handles `var x Foo` style: the type slot
@@ -544,6 +587,8 @@ func (bf *goBodyFacts) recordCall(node *sitter.Node) {
 	// We treat any "Encode" call whose receiver name contains
 	// NewEncoder as a response helper.
 	switch {
+	case isRequestBindingHelper(helper, fn, bf.src):
+		bf.recordRequestBinding(node, helper, args)
 	case isJSONResponseHelper(helper):
 		// First-arg sniff: status helper signatures are (w, code,
 		// value) or (w, value); the current contract of
@@ -557,6 +602,89 @@ func (bf *goBodyFacts) recordCall(node *sitter.Node) {
 			bf.queryReads = append(bf.queryReads, k)
 		}
 	}
+}
+
+// recordRequestBinding extracts the bound variable from a request
+// binding call. Recognises the two common shapes:
+//
+//	Decode(&req)          → VarName = "req"
+//	BodyParser(&req)      → VarName = "req"
+//	ShouldBindJSON(&req)  → VarName = "req"
+//	Bind(&req)            → VarName = "req"
+//	Unmarshal(body, &req) → VarName = "req"  (var is the LAST arg)
+//	Decode(&Foo{})        → CompositeType = "Foo" (anonymous bind)
+func (bf *goBodyFacts) recordRequestBinding(call *sitter.Node, helper string, args *sitter.Node) {
+	if args == nil {
+		return
+	}
+	argList := namedChildren(args)
+	if len(argList) == 0 {
+		return
+	}
+	// The variable / composite is the LAST argument for Unmarshal,
+	// FIRST for everything else.
+	target := argList[0]
+	if helper == "Unmarshal" && len(argList) >= 2 {
+		target = argList[len(argList)-1]
+	}
+	rb := RequestBinding{Helper: helper, Line: int(call.StartPoint().Row) + 1}
+
+	cur := target
+	if cur.Type() == "unary_expression" {
+		// Strip leading & or *.
+		op := cur.ChildByFieldName("operand")
+		if op != nil {
+			cur = op
+		}
+	}
+	switch cur.Type() {
+	case "identifier":
+		rb.VarName = cur.Content(bf.src)
+	case "composite_literal":
+		typ := compositeTypeNode(cur)
+		if typ != nil {
+			rb.CompositeType = unqualify(strings.TrimSpace(typ.Content(bf.src)))
+		}
+	}
+	if rb.VarName == "" && rb.CompositeType == "" {
+		return
+	}
+	bf.requestBindings = append(bf.requestBindings, rb)
+}
+
+// isRequestBindingHelper reports whether a call helper is one of the
+// known request-binding methods. fn is the call's function expression
+// (used to disambiguate Bind: c.Bind is binding, but generic fn.Bind
+// might be something else).
+//
+// Includes Marshal/MarshalIndent (consumer-side: the value being
+// serialized to a request body) — the AST overlay distinguishes
+// server vs consumer semantics by Contract.Role, then routes the
+// helper to request_type or response_type accordingly.
+func isRequestBindingHelper(name string, fn *sitter.Node, src []byte) bool {
+	switch name {
+	case "Decode", "BodyParser", "ShouldBindJSON", "ShouldBindXML",
+		"ShouldBindYAML", "ShouldBind", "BindJSON", "BindXML", "BindYAML",
+		"Unmarshal", "Marshal", "MarshalIndent":
+		return true
+	case "Bind":
+		// echo's c.Bind(&req) is a binding helper. Rule out generic
+		// fn.Bind(args) by checking the receiver looks like a request
+		// context: identifier "c" or "ctx".
+		if fn == nil || fn.Type() != "selector_expression" {
+			return false
+		}
+		recv := fn.ChildByFieldName("operand")
+		if recv == nil || recv.Type() != "identifier" {
+			return false
+		}
+		switch recv.Content(src) {
+		case "c", "ctx":
+			return true
+		}
+		return false
+	}
+	return false
 }
 
 // recordResponseCall stamps a ResponseCall entry, recognising the
@@ -731,6 +859,13 @@ func (bf *goBodyFacts) StatusWrites() []int {
 func (bf *goBodyFacts) QueryReads() []string {
 	out := make([]string, len(bf.queryReads))
 	copy(out, bf.queryReads)
+	return out
+}
+
+// RequestBindings returns recorded request-body binding calls.
+func (bf *goBodyFacts) RequestBindings() []RequestBinding {
+	out := make([]RequestBinding, len(bf.requestBindings))
+	copy(out, bf.requestBindings)
 	return out
 }
 

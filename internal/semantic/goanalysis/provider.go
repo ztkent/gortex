@@ -7,6 +7,7 @@ import (
 	"go/types"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -35,6 +36,14 @@ type Provider struct {
 	mode        LoadMode
 	includeTest bool
 	logger      *zap.Logger
+
+	// Cached state from the last Enrich() — used by LookupTypeAtLine
+	// to answer per-binding type queries from the contract pipeline
+	// without re-loading packages. Guarded by stateMu.
+	stateMu sync.RWMutex
+	pkgs    []*packages.Package
+	fset    *token.FileSet
+	absRoot string
 }
 
 // NewProvider creates a go/types provider.
@@ -69,6 +78,16 @@ func (p *Provider) Enrich(g *graph.Graph, repoRoot string) (*semantic.EnrichResu
 	if err != nil {
 		return nil, fmt.Errorf("load packages: %w", err)
 	}
+
+	// Stash the loaded state so LookupTypeAtLine can serve per-binding
+	// type queries from the contract pipeline without paying the
+	// 5-10s loadPackages cost again. The state survives until the
+	// next Enrich call (which replaces it).
+	p.stateMu.Lock()
+	p.pkgs = pkgs
+	p.fset = fset
+	p.absRoot = absRoot
+	p.stateMu.Unlock()
 
 	result := &semantic.EnrichResult{
 		Provider: p.Name(),
@@ -220,6 +239,196 @@ func (p *Provider) EnrichFile(g *graph.Graph, repoRoot, filePath string) (*seman
 	// go/types can do incremental loading per package, but for simplicity
 	// we re-enrich the whole graph. The manager's debounce prevents thrashing.
 	return nil, nil
+}
+
+// LookupTypeAtLine returns the resolved type name of the first
+// short_var_declaration / var_spec / typed declaration whose start
+// line matches `line` in the file at `filePath`. Returns ("", false)
+// when:
+//   - Enrich hasn't been called (no cached state)
+//   - filePath isn't in any loaded package
+//   - no typed declaration is found at `line`
+//   - the type can't be resolved via go/types
+//
+// This is the lsp_resolved upgrade tier referenced in
+// spec-contract-extraction.md §4.5: when the goanalysis provider
+// has run, the contract pipeline can ask for compiler-grade type
+// resolution at any line in the indexed source.
+func (p *Provider) LookupTypeAtLine(filePath string, line int) (string, bool) {
+	p.stateMu.RLock()
+	pkgs := p.pkgs
+	fset := p.fset
+	absRoot := p.absRoot
+	p.stateMu.RUnlock()
+	if len(pkgs) == 0 || fset == nil || absRoot == "" {
+		return "", false
+	}
+	target := normalizeRelPath(filePath)
+	for _, pkg := range pkgs {
+		if pkg.TypesInfo == nil {
+			continue
+		}
+		for _, syntax := range pkg.Syntax {
+			if syntax == nil {
+				continue
+			}
+			pos := fset.Position(syntax.Pos())
+			if normalizeRelPath(relativePath(pos.Filename, absRoot)) != target {
+				continue
+			}
+			if t, ok := lookupTypeAtLineInFile(syntax, pkg.TypesInfo, fset, line); ok {
+				return t, true
+			}
+		}
+	}
+	return "", false
+}
+
+// lookupTypeAtLineInFile walks the file's AST and returns the type
+// name of the first declaration at `line` whose LHS the type info
+// table has a type for.
+func lookupTypeAtLineInFile(file *ast.File, info *types.Info, fset *token.FileSet, line int) (string, bool) {
+	var found string
+	ast.Inspect(file, func(n ast.Node) bool {
+		if n == nil || found != "" {
+			return false
+		}
+		startLine := fset.Position(n.Pos()).Line
+		if startLine != line {
+			// Keep descending if this node spans the target.
+			endLine := fset.Position(n.End()).Line
+			return startLine <= line && endLine >= line
+		}
+		// We're at the target line. Try to extract a type from the
+		// most common declaration shapes.
+		switch d := n.(type) {
+		case *ast.AssignStmt:
+			if name := typeNameFromAssign(d, info); name != "" {
+				found = name
+			}
+		case *ast.GenDecl:
+			if name := typeNameFromGenDecl(d, info); name != "" {
+				found = name
+			}
+		case *ast.DeclStmt:
+			if gd, ok := d.Decl.(*ast.GenDecl); ok {
+				if name := typeNameFromGenDecl(gd, info); name != "" {
+					found = name
+				}
+			}
+		}
+		return found == ""
+	})
+	return found, found != ""
+}
+
+// typeNameFromAssign reads the LHS type from a short var declaration
+// (`x := f()` or `x := Foo{...}`). Returns the underlying named
+// type's name.
+func typeNameFromAssign(stmt *ast.AssignStmt, info *types.Info) string {
+	if len(stmt.Lhs) == 0 || len(stmt.Rhs) == 0 {
+		return ""
+	}
+	for i, lhs := range stmt.Lhs {
+		ident, ok := lhs.(*ast.Ident)
+		if !ok || ident.Name == "_" {
+			continue
+		}
+		obj := info.Defs[ident]
+		if obj == nil {
+			obj = info.Uses[ident]
+		}
+		if obj != nil {
+			if name := unwrapTypeName(obj.Type()); name != "" {
+				return name
+			}
+		}
+		// Fall back to the RHS expression's type.
+		var rhs ast.Expr
+		if i < len(stmt.Rhs) {
+			rhs = stmt.Rhs[i]
+		} else if len(stmt.Rhs) == 1 {
+			rhs = stmt.Rhs[0]
+		}
+		if rhs != nil {
+			if t, ok := info.Types[rhs]; ok && t.Type != nil {
+				if name := unwrapTypeName(t.Type); name != "" {
+					return name
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// typeNameFromGenDecl handles `var x Foo` / `var x = Foo{...}`.
+func typeNameFromGenDecl(decl *ast.GenDecl, info *types.Info) string {
+	for _, spec := range decl.Specs {
+		vs, ok := spec.(*ast.ValueSpec)
+		if !ok {
+			continue
+		}
+		for i, name := range vs.Names {
+			if name.Name == "_" {
+				continue
+			}
+			obj := info.Defs[name]
+			if obj != nil {
+				if t := unwrapTypeName(obj.Type()); t != "" {
+					return t
+				}
+			}
+			if vs.Type != nil {
+				if t, ok := info.Types[vs.Type]; ok && t.Type != nil {
+					if u := unwrapTypeName(t.Type); u != "" {
+						return u
+					}
+				}
+			}
+			if i < len(vs.Values) {
+				if t, ok := info.Types[vs.Values[i]]; ok && t.Type != nil {
+					if u := unwrapTypeName(t.Type); u != "" {
+						return u
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// unwrapTypeName strips slice/pointer/array wrappers and returns the
+// underlying named type's bare name. Returns "" for primitives,
+// interfaces, and untyped expressions.
+func unwrapTypeName(t types.Type) string {
+	if t == nil {
+		return ""
+	}
+	for {
+		switch x := t.(type) {
+		case *types.Pointer:
+			t = x.Elem()
+		case *types.Slice:
+			t = x.Elem()
+		case *types.Array:
+			t = x.Elem()
+		default:
+			named, ok := t.(*types.Named)
+			if !ok {
+				return ""
+			}
+			return named.Obj().Name()
+		}
+	}
+}
+
+// normalizeRelPath collapses a/./b → a/b and uses forward slashes,
+// so OS-dependent path separators don't trip the comparison.
+func normalizeRelPath(p string) string {
+	if p == "" {
+		return ""
+	}
+	return filepath.ToSlash(filepath.Clean(p))
 }
 
 // loadPackages loads all Go packages in the given directory with type information.

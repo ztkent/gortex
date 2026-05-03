@@ -2536,6 +2536,15 @@ func (idx *Indexer) lookupVarTypeForContract(
 		return "", false
 	}
 	b := bf.VarBinding(varName)
+	// Highest tier: BindingResolver (go/types via goanalysis.Provider)
+	// returns compiler-resolved types. When --semantic is enabled and
+	// the provider has run, this is authoritative for any binding
+	// whose source line we tracked.
+	if br := contracts.CurrentBindingResolver(); br != nil && b.Line > 0 {
+		if typeName, ok := br.LookupTypeAtLine(c.FilePath, b.Line); ok && typeName != "" {
+			return idx.upgradeBareTypeName(typeName, c.RepoPrefix), b.Repeated
+		}
+	}
 	switch b.Kind {
 	case contracts.BindingMethodCall, contracts.BindingFuncCall:
 		if b.CallExpr != "" {

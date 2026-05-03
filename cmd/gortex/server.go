@@ -21,6 +21,7 @@ import (
 	"github.com/zzet/gortex/internal/indexer"
 	gortexmcp "github.com/zzet/gortex/internal/mcp"
 	"github.com/zzet/gortex/internal/parser"
+	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/parser/languages"
 	"github.com/zzet/gortex/internal/persistence"
 	"github.com/zzet/gortex/internal/query"
@@ -208,7 +209,13 @@ func runServer(_ *cobra.Command, _ []string) error {
 		if serverSemanticMode == "callgraph" {
 			mode = goanalysis.ModeCallGraph
 		}
-		semMgr.RegisterProvider(goanalysis.NewProvider(mode, false, logger))
+		goProvider := goanalysis.NewProvider(mode, false, logger)
+		semMgr.RegisterProvider(goProvider)
+		// Wire the goanalysis provider as the contract pipeline's
+		// BindingResolver — once Enrich runs, contract enrichment can
+		// upgrade Origin from ast_inferred to lsp_resolved using
+		// compiler-grade type info. See spec-contract-extraction.md §4.5.
+		contracts.SetBindingResolver(goProvider)
 
 		for _, pc := range semCfg.Providers {
 			if !pc.Enabled {

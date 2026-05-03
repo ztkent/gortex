@@ -279,6 +279,90 @@ func H() {
 	}
 }
 
+func TestGoBodyFacts_RequestBindings(t *testing.T) {
+	src := `package h
+func H(w, r) {
+	var req CreateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil { return }
+}
+`
+	bf, cleanup := makeGoBodyFacts(t, src, "H", 2)
+	defer cleanup()
+	rbs := bf.RequestBindings()
+	if len(rbs) != 1 {
+		t.Fatalf("request bindings: want 1, got %d (%+v)", len(rbs), rbs)
+	}
+	if rbs[0].Helper != "Decode" || rbs[0].VarName != "req" {
+		t.Errorf("first binding: want Decode/req, got %+v", rbs[0])
+	}
+
+	// chase var binding for "req" — should have the declared type.
+	b := bf.VarBinding("req")
+	if b.TypeID != "CreateRequest" {
+		t.Errorf("VarBinding(req): want CreateRequest, got %q", b.TypeID)
+	}
+}
+
+func TestGoBodyFacts_RequestBindings_FrameworkVariants(t *testing.T) {
+	src := `package h
+func F(c *fiber.Ctx) {
+	var f FiberReq
+	c.BodyParser(&f)
+}
+func G(c *gin.Context) {
+	var g GinReq
+	c.ShouldBindJSON(&g)
+}
+func E(c echo.Context) {
+	var e EchoReq
+	c.Bind(&e)
+}
+func U() {
+	var u UnmarshalReq
+	json.Unmarshal(body, &u)
+}
+func A() {
+	var anon AnonReq
+	_ = anon
+	json.NewDecoder(r.Body).Decode(&AnonReq{})
+}
+`
+	cases := []struct {
+		fn    string
+		line  int
+		want  string
+		varN  string
+	}{
+		{"F", 2, "BodyParser", "f"},
+		{"G", 6, "ShouldBindJSON", "g"},
+		{"E", 10, "Bind", "e"},
+		{"U", 14, "Unmarshal", "u"},
+	}
+	for _, tc := range cases {
+		bf, cleanup := makeGoBodyFacts(t, src, tc.fn, tc.line)
+		defer cleanup()
+		rbs := bf.RequestBindings()
+		if len(rbs) != 1 {
+			t.Errorf("%s: want 1 binding, got %d", tc.fn, len(rbs))
+			continue
+		}
+		if rbs[0].Helper != tc.want || rbs[0].VarName != tc.varN {
+			t.Errorf("%s: want %s/%s, got %+v", tc.fn, tc.want, tc.varN, rbs[0])
+		}
+	}
+
+	// Anonymous composite: Decode(&AnonReq{})
+	bfA, cleanup := makeGoBodyFacts(t, src, "A", 18)
+	defer cleanup()
+	rbs := bfA.RequestBindings()
+	if len(rbs) != 1 {
+		t.Fatalf("A: want 1 binding, got %d", len(rbs))
+	}
+	if rbs[0].CompositeType != "AnonReq" {
+		t.Errorf("A: want CompositeType=AnonReq, got %+v", rbs[0])
+	}
+}
+
 func findCall(calls []ResponseCall, helper string) *ResponseCall {
 	for i := range calls {
 		if calls[i].Helper == helper {

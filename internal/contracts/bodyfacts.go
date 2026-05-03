@@ -55,6 +55,7 @@ type Binding struct {
 	Pointer  bool   // pointer-typed binding
 	CallExpr string // "h.svc.GetRepos" for method_call/func_call; empty otherwise
 	RawExpr  string // exact source span of the RHS, for fallback display
+	Line     int    // 1-based line where the binding's RHS appears
 	Origin   Origin
 }
 
@@ -72,6 +73,21 @@ type ResponseCall struct {
 	ValueArg     *Node   // value argument (the body)
 	ValueExpr    string  // trimmed source span of the value argument
 	Line         int     // 1-based line of the call
+}
+
+// RequestBinding describes one call that binds the request body to a
+// typed variable: json.NewDecoder(r.Body).Decode(&req), c.BodyParser(&req),
+// c.ShouldBindJSON(&req), json.Unmarshal(body, &req).
+//
+// VarName is the bound variable name (without the leading & or *).
+// CompositeType, if non-empty, is the literal type used at the call
+// site (e.g. `Decode(&Request{})` → "Request"); the caller can use
+// this directly without going through VarBinding.
+type RequestBinding struct {
+	Helper        string // "Decode" | "BodyParser" | "ShouldBindJSON" | "Bind" | "Unmarshal"
+	VarName       string // bound variable name (no &/*)
+	CompositeType string // type literal at the binding call, if any
+	Line          int
 }
 
 // KeyValue is one parsed entry from a Go map composite literal —
@@ -157,6 +173,12 @@ type BodyFacts interface {
 	// QueryReads returns the names of every URL/form/header query
 	// accessor key in the body.
 	QueryReads() []string
+
+	// RequestBindings returns every call that binds the request body
+	// to a typed variable: Decode/BodyParser/ShouldBind*/Bind/Unmarshal.
+	// Used by the AST overlay to set request_type without going
+	// through findVarType.
+	RequestBindings() []RequestBinding
 }
 
 // BodyFactsFactory builds a BodyFacts view for one handler.
@@ -192,6 +214,37 @@ func MakeBodyFacts(tree *parser.ParseTree, handler *graph.Node) BodyFacts {
 	return factory(tree, handler)
 }
 
+// BindingResolver is the optional upgrade hook the AST overlay
+// consults when present (set via SetBindingResolver below). When
+// the resolver returns (typeName, true), the overlay stamps the
+// binding with Origin = OriginLSPResolved instead of OriginASTInferred.
+//
+// goanalysis.Provider implements this via LookupTypeAtLine. The
+// indexer wires it in when --semantic is enabled and the provider
+// has run for the repo.
+type BindingResolver interface {
+	// LookupTypeAtLine returns the resolved type name at the given
+	// 1-based line in the file. Returns ("", false) when the line
+	// has no resolvable typed declaration.
+	LookupTypeAtLine(filePath string, line int) (string, bool)
+}
+
+// activeBindingResolver is the optional upgrade resolver. nil when
+// no provider has been wired in; the overlay falls back to the
+// tree-sitter-only path in that case.
+var activeBindingResolver BindingResolver
+
+// SetBindingResolver registers the LookupTypeAtLine implementation
+// the AST overlay should consult. Called by the indexer once the
+// goanalysis (or other semantic) provider has loaded type info.
+// Pass nil to clear.
+func SetBindingResolver(r BindingResolver) {
+	activeBindingResolver = r
+}
+
+// CurrentBindingResolver returns the wired-in resolver or nil.
+func CurrentBindingResolver() BindingResolver { return activeBindingResolver }
+
 // nopBodyFacts is the no-op implementation used for languages without
 // a real BodyFacts factory. Returns "unbound" / empty for everything,
 // which causes the legacy regex enricher to run in fallback mode.
@@ -206,3 +259,4 @@ func (nopBodyFacts) ResponseCalls() []ResponseCall          { return nil }
 func (nopBodyFacts) MapLiteralEntries(*Node) []KeyValue     { return nil }
 func (nopBodyFacts) StatusWrites() []int                    { return nil }
 func (nopBodyFacts) QueryReads() []string                   { return nil }
+func (nopBodyFacts) RequestBindings() []RequestBinding      { return nil }

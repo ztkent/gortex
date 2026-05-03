@@ -258,17 +258,17 @@ func goConsumerDetect(body string, fileNodes []*graph.Node) schemaHints {
 // Shared helpers for Go detectors
 // -----------------------------------------------------------------------------
 
-// setRequestType resolves an argument identifier to a type name and
-// records it on hints. If the identifier doesn't resolve, we store the
-// source expression (the matched substring) so the UI at least points
-// at the binding call.
+// setRequestType records a request-type hint when the regex pattern
+// captured an identifier that's directly a type name (e.g.
+// `Decode(&Request{})` → "Request"). Variable-to-type resolution and
+// envelope walking moved to the BodyFacts AST overlay (Phase 1 of
+// spec-contract-extraction.md), which runs after this function and
+// overrides the hint with structurally-correct facts.
+//
+// The body parameter is retained for signature symmetry with the
+// callers (the regex detectors take body as their primary input).
 func setRequestType(h *schemaHints, ident, body string, fileNodes []*graph.Node, matchText string) {
-	if t := findVarType(body, ident); t != "" {
-		h.RequestType = resolveTypeInFile(t, fileNodes)
-		return
-	}
-	// Identifier itself might be a type — happens with anonymous
-	// zero-value literals like `Decode(&Request{})`.
+	_ = body
 	if looksLikeType(ident) {
 		h.RequestType = resolveTypeInFile(ident, fileNodes)
 		return
@@ -278,55 +278,31 @@ func setRequestType(h *schemaHints, ident, body string, fileNodes []*graph.Node,
 	}
 }
 
+// setResponseType records a response-type hint. Type resolution and
+// envelope walking moved to the BodyFacts AST overlay (Phase 1 of
+// spec-contract-extraction.md). This function only handles the cases
+// the AST overlay can't override safely:
+//
+//	1. ident is itself a type name (e.g. `JSON(http.StatusOK, ErrResp{...})`)
+//	2. ident is a compound literal expression — record as ResponseExpr
+//	   for the post-pass to chase
+//	3. ident is a bare identifier — record as ResponseExpr; the AST
+//	   overlay will replace it if it can resolve the var binding
+//
+// The body parameter is retained for signature symmetry; it's no
+// longer consulted (the AST overlay reads from the parse tree).
 func setResponseType(h *schemaHints, ident, body string, fileNodes []*graph.Node, matchText string) {
-	// Envelope unwrap: `map[string]any{"data": workspaces, ...}` —
-	// surface every key as a structured envelope field so the
-	// dashboard can render the actual response shape instead of a
-	// chunk of source. A common idiom in handwritten Go servers; the
-	// outer HasPrefix guard avoids misfiring on struct literals that
-	// happen to include a quoted tag.
+	_ = body
 	trimmed := strings.TrimSpace(ident)
-	if strings.HasPrefix(trimmed, "map[") {
-		if fields := parseMapEnvelopeFields(trimmed, body, fileNodes); len(fields) > 0 {
-			h.ResponseEnvelope = fields
-			// Don't surface the raw `map[string]any{...}` literal —
-			// the envelope is the JSON shape, the Go construction
-			// helper is implementation detail and only confuses the
-			// UI ("why is my JSON response a map[string]any?"). The
-			// envelope rows carry every field separately.
-			//
-			// Promote a single-field envelope's resolved type so
-			// downstream "is the response type known" checks light up
-			// just like a bare struct return would.
-			if len(fields) == 1 && fields[0].Type != "" {
-				h.ResponseType = fields[0].Type
-			}
-			return
-		}
-	}
-	if t := findVarType(body, ident); t != "" {
-		h.ResponseType = resolveTypeInFile(t, fileNodes)
+	if looksLikeType(trimmed) {
+		h.ResponseType = resolveTypeInFile(trimmed, fileNodes)
 		return
 	}
-	if looksLikeType(ident) {
-		h.ResponseType = resolveTypeInFile(ident, fileNodes)
-		return
-	}
-	// No syntactic type on the variable's binding line. Fall back to
-	// recording the value expression — the indexer's
-	// resolveCallReturnTypes post-pass (graph-aware) picks the bare
-	// identifier back out and traces it to the method/builtin that
-	// bound it, reading the real return type from the method's
-	// signature or the literal shape. Prefer the response value
-	// (`ident`) over the wider matchText: an identifier (`result`)
-	// or compound literal (`Foo{...}`) carries the meaningful info,
-	// while matchText is the surrounding helper-call boilerplate the
-	// user already saw on the Source tab.
 	if h.ResponseExpr == "" {
 		switch {
 		case isCompoundExpr(trimmed):
 			h.ResponseExpr = trimmed
-		case isBareIdent(trimmed):
+		case isPlainIdent(trimmed):
 			h.ResponseExpr = trimmed
 		default:
 			h.ResponseExpr = strings.TrimSpace(matchText)
@@ -334,281 +310,8 @@ func setResponseType(h *schemaHints, ident, body string, fileNodes []*graph.Node
 	}
 }
 
-// parseMapEnvelopeFields walks every "key": value pair inside a
-// `map[string]any{...}` (or `map[string]interface{}{...}`) literal.
-// For each value it tries to resolve a concrete type via findVarType
-// and falls back to the trimmed source expression. Returns nil when
-// the literal can't be brace-balanced or has no keys.
-func parseMapEnvelopeFields(literal, body string, fileNodes []*graph.Node) []envelopeField {
-	// The body's opening `{` is the LAST `{` before the first quoted
-	// key. Anchoring on the first quote skips over the type-side
-	// `{}` pair in `map[string]interface{}{...}`, which a plain
-	// brace-balance from index 0 would otherwise treat as the body.
-	// Empty envelopes (`map[string]any{}`) have no key and return nil.
-	firstQuote := strings.Index(literal, `"`)
-	if firstQuote < 0 {
-		return nil
-	}
-	open := strings.LastIndex(literal[:firstQuote], "{")
-	if open < 0 {
-		return nil
-	}
-	closeIdx := strings.LastIndex(literal, "}")
-	if closeIdx <= open {
-		return nil
-	}
-	inner := literal[open+1 : closeIdx]
-
-	var out []envelopeField
-	for _, kv := range splitMapLiteralBody(inner) {
-		f := envelopeField{Name: kv.key, Expr: kv.value}
-		// Three resolution paths in priority order:
-		//   1. Inline composite literal: `[]Foo{...}` / `Foo{...}` /
-		//      `&Foo{...}` / `make([]Foo, ...)` — the type is in the
-		//      expression itself, no body lookup needed.
-		//   2. Bare identifier with a typed declaration in the body
-		//      (`var x Foo` / `x := Foo{}`) — findVarType sees it.
-		//   3. Bare identifier whose value is a method call —
-		//      handled by the indexer's graph-aware post-pass.
-		if t, repeated := typeOfInlineExpr(kv.value); t != "" {
-			f.Type = resolveTypeInFile(t, fileNodes)
-			f.Repeated = repeated
-			out = append(out, f)
-			continue
-		}
-		bare := strings.TrimPrefix(strings.TrimPrefix(kv.value, "&"), "*")
-		if isBareIdent(bare) {
-			if t := findVarType(body, bare); t != "" {
-				f.Type = resolveTypeInFile(t, fileNodes)
-			}
-		} else if looksLikeType(bare) {
-			f.Type = resolveTypeInFile(bare, fileNodes)
-		}
-		out = append(out, f)
-	}
-	return out
-}
-
-// envelopeKV is one parsed "key": value entry from a Go map literal.
-// key is the unquoted JSON name; value is the trimmed source
-// expression with all nested braces/brackets intact.
-type envelopeKV struct{ key, value string }
-
-// splitMapLiteralBody walks the body of a map literal — the text
-// between the outer `{` and `}` — and returns one envelopeKV per
-// top-level "key": value entry. Tracks `{` `[` `(` nesting and
-// string/rune literals so nested composite literals don't trick the
-// walker into closing the entry early. Replaces the previous regex
-// approach that truncated `[]any{a, b}` at the first `}` it saw.
-func splitMapLiteralBody(inner string) []envelopeKV {
-	var out []envelopeKV
-	parts := splitTopLevel(inner, ',')
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		// Find the colon separating "key" from value. A key is a
-		// double-quoted string; everything after it (up to the colon)
-		// is whitespace, then the colon. Skip non-string-keyed
-		// elements (Go map[K]V allows non-string keys, but JSON
-		// envelopes always use strings).
-		if part[0] != '"' {
-			continue
-		}
-		end := indexUnescapedQuote(part[1:])
-		if end < 0 {
-			continue
-		}
-		key := part[1 : 1+end]
-		rest := strings.TrimSpace(part[1+end+1:])
-		if rest == "" || rest[0] != ':' {
-			continue
-		}
-		value := strings.TrimSpace(rest[1:])
-		// Strip a single trailing comma if present (the splitter only
-		// strips top-level separators; whitespace-padded entries are
-		// safe but defensive cleanup keeps round-trips clean).
-		value = strings.TrimRight(value, " \t,")
-		if value == "" {
-			continue
-		}
-		out = append(out, envelopeKV{key: key, value: value})
-	}
-	return out
-}
-
-// splitTopLevel splits s on `sep` runes that appear at nesting depth
-// zero — i.e. not inside `{}` / `[]` / `()` and not inside string or
-// rune literals. Used by splitMapLiteralBody.
-func splitTopLevel(s string, sep byte) []string {
-	var out []string
-	depth := 0
-	inStr := false
-	inRune := false
-	start := 0
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch {
-		case inStr:
-			if c == '"' && (i == 0 || s[i-1] != '\\') {
-				inStr = false
-			}
-		case inRune:
-			if c == '\'' && (i == 0 || s[i-1] != '\\') {
-				inRune = false
-			}
-		case c == '"':
-			inStr = true
-		case c == '\'':
-			inRune = true
-		case c == '{', c == '[', c == '(':
-			depth++
-		case c == '}', c == ']', c == ')':
-			if depth > 0 {
-				depth--
-			}
-		case c == sep && depth == 0:
-			out = append(out, s[start:i])
-			start = i + 1
-		}
-	}
-	if start <= len(s) {
-		out = append(out, s[start:])
-	}
-	return out
-}
-
-func indexUnescapedQuote(s string) int {
-	for i := 0; i < len(s); i++ {
-		if s[i] == '"' && (i == 0 || s[i-1] != '\\') {
-			return i
-		}
-	}
-	return -1
-}
-
-// typeOfInlineExpr recognises composite literals and builtin
-// constructors and reports the bare type plus whether it's a slice.
-// Examples:
-//
-//	"[]Foo{a, b}"      → ("Foo",   true)
-//	"Foo{ID: 1}"       → ("Foo",   false)
-//	"&Foo{}"           → ("Foo",   false)
-//	"make([]Foo, 0)"   → ("Foo",   true)
-//	"42" / "id" / ""   → ("",      false)
-//
-// Returns ("", false) when the expression isn't a syntactically
-// recognisable typed literal — the caller falls back to
-// findVarType on the surrounding body.
-func typeOfInlineExpr(expr string) (string, bool) {
-	expr = strings.TrimSpace(expr)
-	if expr == "" {
-		return "", false
-	}
-	// Pointer prefix.
-	if strings.HasPrefix(expr, "&") {
-		expr = strings.TrimSpace(expr[1:])
-	}
-	// `make([]T, …)` / `make([]T)`.
-	if strings.HasPrefix(expr, "make([]") {
-		rest := expr[len("make([]"):]
-		t := readTypeIdent(rest)
-		if t != "" {
-			return t, true
-		}
-	}
-	// `make(map[K]V, …)` — return the whole map type so the
-	// dashboard renders it verbatim.
-	if strings.HasPrefix(expr, "make(map[") {
-		rest := expr[len("make("):]
-		// Walk until we hit the matching `]` then the value type.
-		if i := strings.Index(rest, "]"); i >= 0 && i+1 < len(rest) {
-			vt := readTypeIdent(rest[i+1:])
-			if vt != "" {
-				return "map[" + readUntil(rest[len("map["):], ']') + "]" + vt, false
-			}
-		}
-	}
-	// `[]Foo{…}` — slice composite literal.
-	if strings.HasPrefix(expr, "[]") {
-		t := readTypeIdent(expr[2:])
-		if t != "" && hasComposite(expr) {
-			return t, true
-		}
-	}
-	// `Foo{…}` — struct composite literal. Must start with an upper-
-	// case letter to avoid eating `for x := range m {` and similar.
-	if hasComposite(expr) {
-		t := readTypeIdent(expr)
-		if t != "" && t[0] >= 'A' && t[0] <= 'Z' {
-			return t, false
-		}
-	}
-	return "", false
-}
-
-// readTypeIdent reads a Go type identifier (with optional package
-// qualifier and generic arguments) from the start of s, stopping at
-// the first character that can't be part of an ident.
-func readTypeIdent(s string) string {
-	end := 0
-	for end < len(s) {
-		c := s[end]
-		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_' || c == '.' {
-			end++
-			continue
-		}
-		if end > 0 && c >= '0' && c <= '9' {
-			end++
-			continue
-		}
-		break
-	}
-	return s[:end]
-}
-
-func readUntil(s string, c byte) string {
-	if i := strings.IndexByte(s, c); i >= 0 {
-		return s[:i]
-	}
-	return s
-}
-
-func hasComposite(s string) bool {
-	// A composite literal has an `{` somewhere after the type prefix
-	// and before any `(` (which would suggest a call). Cheap check.
-	if i := strings.Index(s, "{"); i >= 0 {
-		if j := strings.Index(s, "("); j >= 0 && j < i {
-			return false
-		}
-		return true
-	}
-	return false
-}
-
 func isCompoundExpr(s string) bool {
 	return strings.ContainsAny(s, "{[(")
-}
-
-func isBareIdent(s string) bool {
-	if s == "" {
-		return false
-	}
-	for i, r := range s {
-		if r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
-			continue
-		}
-		if i > 0 && r >= '0' && r <= '9' {
-			continue
-		}
-		// Allow dotted paths (pkg.Foo) but no other punctuation.
-		if r == '.' && i > 0 {
-			continue
-		}
-		return false
-	}
-	return true
 }
 
 // looksLikeType is a quick heuristic: starts with an uppercase letter,

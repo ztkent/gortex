@@ -16,8 +16,16 @@ import (
 // Meta value to a strictly less informative one — i.e. if the
 // regex pass set response_type but the AST can't, leave the regex
 // value alone. The AST only writes when it has a confident answer.
+//
+// Both provider and consumer contracts are handled. The semantics
+// differ by Role:
+//   - Provider: WriteJSON/Encode → response_type; Decode/BodyParser/
+//     ShouldBind*/Unmarshal → request_type
+//   - Consumer: Marshal/MarshalIndent → request_type;
+//     Decode/Unmarshal → response_type (response from server is
+//     decoded into a typed variable)
 func applyBodyFactsToHTTPContract(c *Contract, fileNodes []*graph.Node, tree *parser.ParseTree) {
-	if c == nil || c.Role != RoleProvider || tree == nil {
+	if c == nil || tree == nil {
 		return
 	}
 	handler := findContractHandlerNode(c, fileNodes)
@@ -29,29 +37,93 @@ func applyBodyFactsToHTTPContract(c *Contract, fileNodes []*graph.Node, tree *pa
 		return
 	}
 
-	// Status codes: merge AST-derived WriteHeader codes into the
-	// existing list (the regex pass may have caught some via
-	// framework-specific patterns; AST catches the standard
-	// w.WriteHeader form).
+	switch c.Role {
+	case RoleProvider:
+		applyProviderFacts(c, fileNodes, bf)
+	case RoleConsumer:
+		applyConsumerFacts(c, fileNodes, bf)
+	}
+}
+
+// applyProviderFacts handles the server-side enrichment.
+func applyProviderFacts(c *Contract, fileNodes []*graph.Node, bf BodyFacts) {
 	if writes := bf.StatusWrites(); len(writes) > 0 {
 		mergeIntStrings(c.Meta, "status_codes", writes)
 	}
-
-	// Query params: same merge semantics.
 	if reads := bf.QueryReads(); len(reads) > 0 {
 		mergeStringList(c.Meta, "query_params", reads)
 	}
-
-	// Response shape: prefer the LAST response call in the body —
-	// typical pattern is early WriteJSON for errors, final one for
-	// the success path. The AST gives us source order so the last
-	// one is the success-path response.
+	// Request type: take the first non-Marshal request binding
+	// (Marshal is consumer-side, see applyConsumerFacts).
+	for _, rb := range bf.RequestBindings() {
+		if rb.Helper == "Marshal" || rb.Helper == "MarshalIndent" {
+			continue
+		}
+		applyRequestBindingToContract(c, fileNodes, bf, rb)
+		break
+	}
 	calls := bf.ResponseCalls()
 	if len(calls) == 0 {
 		return
 	}
 	rc := lastSuccessResponseCall(calls)
 	applyResponseCallToContract(c, fileNodes, bf, rc)
+}
+
+// applyConsumerFacts handles the client-side enrichment.
+//   - Marshal(req)   → request_type from VarBinding(req).TypeID
+//   - Decode(&out)   → response_type from VarBinding(out).TypeID
+//   - Unmarshal(b,&out) → response_type from VarBinding(out).TypeID
+//   - var anonymous composite (Marshal(&Req{}))
+//     → request_type from CompositeType
+func applyConsumerFacts(c *Contract, fileNodes []*graph.Node, bf BodyFacts) {
+	for _, rb := range bf.RequestBindings() {
+		switch rb.Helper {
+		case "Marshal", "MarshalIndent":
+			applyConsumerBinding(c, fileNodes, bf, rb, "request")
+		case "Decode", "Unmarshal":
+			applyConsumerBinding(c, fileNodes, bf, rb, "response")
+		}
+	}
+}
+
+// applyConsumerBinding stamps either request_type or response_type
+// (per kind) from a binding's variable lookup.
+func applyConsumerBinding(c *Contract, fileNodes []*graph.Node, bf BodyFacts, rb RequestBinding, kind string) {
+	typeKey := "request_type"
+	exprKey := "request_expr"
+	if kind == "response" {
+		typeKey = "response_type"
+		exprKey = "response_expr"
+	}
+	if existing, _ := c.Meta[typeKey].(string); existing != "" {
+		return
+	}
+	resolved := ""
+	repeated := false
+	switch {
+	case rb.CompositeType != "":
+		resolved = resolveTypeInFile(rb.CompositeType, fileNodes)
+	case rb.VarName != "":
+		b := bf.VarBinding(rb.VarName)
+		if b.TypeID != "" {
+			resolved = resolveTypeInFile(b.TypeID, fileNodes)
+			repeated = b.Repeated
+		}
+	}
+	if resolved == "" {
+		return
+	}
+	c.Meta[typeKey] = resolved
+	if repeated {
+		repeatedKey := "request_repeated"
+		if kind == "response" {
+			repeatedKey = "response_repeated"
+		}
+		c.Meta[repeatedKey] = true
+	}
+	c.Meta["schema_source"] = "extracted"
+	delete(c.Meta, exprKey)
 }
 
 // lastSuccessResponseCall picks the response call that most likely
@@ -111,6 +183,32 @@ func applyLiteralResponse(c *Contract, typeName string) {
 	c.Meta["response_type"] = typeName
 	c.Meta["schema_source"] = "extracted"
 	delete(c.Meta, "response_expr")
+}
+
+// applyRequestBindingToContract stamps request_type from one request
+// binding. Resolution order:
+//  1. CompositeType (Decode(&Foo{})) — direct, no var lookup needed
+//  2. VarBinding(VarName).TypeID — chase the variable to its declared
+//     type (e.g. `var req CreateRequest; Decode(&req)` → CreateRequest)
+//  3. Leave c.Meta alone (regex pass might have set it, or it stays
+//     unset)
+func applyRequestBindingToContract(c *Contract, fileNodes []*graph.Node, bf BodyFacts, rb RequestBinding) {
+	if rb.CompositeType != "" {
+		c.Meta["request_type"] = resolveTypeInFile(rb.CompositeType, fileNodes)
+		c.Meta["schema_source"] = "extracted"
+		delete(c.Meta, "request_expr")
+		return
+	}
+	if rb.VarName == "" {
+		return
+	}
+	b := bf.VarBinding(rb.VarName)
+	if b.TypeID == "" {
+		return
+	}
+	c.Meta["request_type"] = resolveTypeInFile(b.TypeID, fileNodes)
+	c.Meta["schema_source"] = "extracted"
+	delete(c.Meta, "request_expr")
 }
 
 // applyCompositeResponse handles `WriteJSON(w, code, Foo{...})` and

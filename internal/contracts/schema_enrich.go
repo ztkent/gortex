@@ -430,44 +430,6 @@ func resolveTypeInFile(name string, fileNodes []*graph.Node) string {
 	return name // bare name; upgraded later
 }
 
-// findVarType scans the handler body for the first declaration that
-// binds `varName` to a type and returns the type name. Supports the
-// common Go forms:
-//
-//	var req    LoginRequest
-//	var req   *LoginRequest
-//	req    := LoginRequest{}
-//	req    := &LoginRequest{}
-//	req    := new(LoginRequest)
-//	func(... req LoginRequest ...)        // handler parameter
-//	func(... req *LoginRequest ...)
-//
-// and a handful of the same idioms rewritten for Dart / Java / TS in
-// the framework-specific detectors.
-func findVarType(body, varName string) string {
-	if varName == "" {
-		return ""
-	}
-	v := regexp.QuoteMeta(varName)
-	// var foo Type  |  var foo *Type
-	if m := regexp.MustCompile(`\bvar\s+` + v + `\s+\*?([A-Za-z_][\w\.]*)`).FindStringSubmatch(body); len(m) > 1 {
-		return m[1]
-	}
-	// foo := Type{  |  foo := &Type{  |  foo := new(Type)
-	if m := regexp.MustCompile(v + `\s*:=\s*&?([A-Za-z_][\w\.]*)\s*\{`).FindStringSubmatch(body); len(m) > 1 {
-		return m[1]
-	}
-	if m := regexp.MustCompile(v + `\s*:=\s*new\(\s*([A-Za-z_][\w\.]*)\s*\)`).FindStringSubmatch(body); len(m) > 1 {
-		return m[1]
-	}
-	// Handler signature param: req *Type  |  req Type — allow a
-	// trailing comma / paren to terminate.
-	if m := regexp.MustCompile(`\b` + v + `\s+\*?([A-Za-z_][\w\.]*)(?:\s*[,)])`).FindStringSubmatch(body); len(m) > 1 {
-		return m[1]
-	}
-	return ""
-}
-
 func uniqStrings(in []string) []string {
 	if len(in) == 0 {
 		return nil

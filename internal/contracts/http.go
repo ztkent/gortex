@@ -465,18 +465,13 @@ var httpPatterns = []httpPattern{
 // reject non-HTTP files would also reject legitimate HTTP files,
 // so the regex scan carries the whole cost.
 var httpPrefilterMarkers = map[string][][]byte{
-	"go": {
-		[]byte("Handle"),  // HandleFunc, .Handle(
-		[]byte("http."),   // http.Get/Post/NewRequest
-		[]byte("router."), // gin/echo/chi router var
-		[]byte("app."),    // fiber/gin app var
-		[]byte("mux."),    // net/http mux
-		[]byte(".GET("),   // fiber uppercase verbs
-		[]byte(".POST("),
-		[]byte(".PUT("),
-		[]byte(".DELETE("),
-		[]byte(".PATCH("),
-	},
+	// Phase 2 of spec-contract-extraction.md removed the "go" entry.
+	// The AST detector for Go routes (detectGoRoutesAST) doesn't
+	// self-match its own marker source, so the workaround that
+	// motivated those markers — and the Fiber `[]byte(".GET(")`
+	// bug it was paired with — is structurally impossible. Keeping
+	// the prefilter for non-Go languages where the regex still
+	// runs.
 	"typescript": httpTsJsMarkers,
 	"javascript": httpTsJsMarkers,
 	"java":       httpJvmMarkers,
@@ -542,8 +537,15 @@ var httpJvmMarkers = [][]byte{
 }
 
 // Extract scans src for HTTP route patterns and returns contracts.
+// For Go files this lazily parses the source to get the same AST
+// enrichment ExtractWithTree provides — keeps Extract() callers
+// (notably legacy tests) on parity with the indexer's tree-aware
+// path. Other languages skip the parse since BodyFacts only ships
+// for Go in phase 1.
 func (h *HTTPExtractor) Extract(filePath string, src []byte, nodes []*graph.Node, edges []*graph.Edge) []Contract {
-	return h.extract(filePath, src, nodes, edges, nil)
+	tree := ParseTreeForLang(detectLanguage(filePath), src)
+	defer tree.Release()
+	return h.extract(filePath, src, nodes, edges, tree)
 }
 
 // ExtractWithTree is the tree-aware variant: enrichment uses BodyFacts
@@ -583,8 +585,32 @@ func (h *HTTPExtractor) extract(
 
 	var out []Contract
 
+	// Go AST-based route detection (Phase 2 of spec-contract-extraction.md).
+	// When a parse tree is available, walk it for route registrations
+	// instead of running the Go entries in httpPatterns. Structurally
+	// distinguishes `[]byte(".GET(")` from `.GET("/users", h)` —
+	// eliminates the Fiber self-reflexive bug.
+	if lang == "go" && tree != nil && tree.Tree() != nil {
+		root := tree.Tree().RootNode()
+		matches := detectGoRoutesAST(root, src)
+		for _, rm := range matches {
+			c := buildGoRouteContract(rm, filePath, fileNodes, lines, lang, tree, text, src)
+			out = append(out, c)
+		}
+	}
+
 	for _, pat := range httpPatterns {
 		if !patternMatchesLang(pat, lang) {
+			continue
+		}
+		// Phase 2: skip the Go PROVIDER regex entries when a tree is
+		// available — the AST loop above already handled them. The
+		// Go consumer regexes (http.Get / http.Post) still run since
+		// the AST detector only covers route registrations, not
+		// HTTP client calls. The Go entries stay in httpPatterns
+		// for the no-tree code path (the indexer's incremental
+		// re-walk can't always get a tree).
+		if lang == "go" && tree != nil && tree.Tree() != nil && pat.role == RoleProvider {
 			continue
 		}
 		for _, m := range pat.re.FindAllStringSubmatchIndex(text, -1) {
