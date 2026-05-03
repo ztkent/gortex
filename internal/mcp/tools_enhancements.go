@@ -16,6 +16,7 @@ import (
 	"github.com/zzet/gortex/internal/audit"
 	"github.com/zzet/gortex/internal/blame"
 	"github.com/zzet/gortex/internal/coverage"
+	"github.com/zzet/gortex/internal/releases"
 	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/excludes"
 	"github.com/zzet/gortex/internal/graph"
@@ -109,7 +110,7 @@ func (s *Server) registerEnhancementTools() {
 	s.mcpServer.AddTool(
 		mcp.NewTool("analyze",
 			mcp.WithDescription("Unified graph analysis. kind=dead_code: symbols with zero incoming edges. kind=hotspots: high-complexity symbols by fan-in/out. kind=cycles: circular dependency chains. kind=would_create_cycle: check if a new edge would form a cycle (requires from_id, to_id). kind=todos: list KindTodo nodes with optional tag/assignee/ticket/has_assignee filters. kind=blame: run `git blame` against the indexed repo and stamp meta.last_authored on every symbol-level node. kind=coverage: parse a Go cover.out profile (path via `profile` arg) and stamp meta.coverage_pct on every executable symbol. kind=stale_code: list symbols whose meta.last_authored is older than the threshold (requires blame-enriched graph). kind=ownership: group blame metadata by author email — symbol count, files touched, oldest/newest timestamps; supports path_prefix scoping (requires blame-enriched graph). kind=coverage_gaps: list symbols whose meta.coverage_pct falls in [min_pct, max_pct) — sorted ascending so the most undertested code surfaces first (requires coverage-enriched graph)."),
-			mcp.WithString("kind", mcp.Required(), mcp.Description("Analysis kind: dead_code | hotspots | cycles | would_create_cycle | todos | blame | coverage | stale_code | ownership | coverage_gaps")),
+			mcp.WithString("kind", mcp.Required(), mcp.Description("Analysis kind: dead_code | hotspots | cycles | would_create_cycle | todos | blame | coverage | stale_code | ownership | coverage_gaps | stale_flags | releases")),
 			mcp.WithBoolean("compact", mcp.Description("One-line-per-result text output")),
 			mcp.WithString("format", mcp.Description("Output format: json (default) or gcx (GCX1 compact wire format, per-kind hand-tuned encoder)")),
 			mcp.WithBoolean("include_variables", mcp.Description("(dead_code) Include variable nodes (default false — usually false positives without data-flow analysis)")),
@@ -125,6 +126,7 @@ func (s *Server) registerEnhancementTools() {
 			mcp.WithString("path_prefix", mcp.Description("(ownership, coverage_gaps) Scope to nodes under this file-path prefix — e.g. 'internal/auth/'")),
 			mcp.WithNumber("min_pct", mcp.Description("(coverage_gaps) Lower-inclusive coverage threshold — default 0")),
 			mcp.WithNumber("max_pct", mcp.Description("(coverage_gaps) Upper-exclusive coverage threshold — default 100, i.e. anything not fully covered")),
+			mcp.WithString("provider", mcp.Description("(stale_flags) Filter to a single provider — launchdarkly, growthbook, unleash, internal")),
 			mcp.WithString("tag", mcp.Description("(todos) Filter by tag — TODO / FIXME / HACK / XXX / NOTE — case-insensitive")),
 			mcp.WithString("assignee", mcp.Description("(todos) Filter by exact assignee — case-sensitive")),
 			mcp.WithString("ticket", mcp.Description("(todos) Filter by exact ticket reference — e.g. PROJ-42")),
@@ -622,8 +624,12 @@ func (s *Server) handleAnalyze(ctx context.Context, req mcp.CallToolRequest) (*m
 		return s.handleAnalyzeOwnership(ctx, req)
 	case "coverage_gaps":
 		return s.handleAnalyzeCoverageGaps(ctx, req)
+	case "stale_flags":
+		return s.handleAnalyzeStaleFlags(ctx, req)
+	case "releases":
+		return s.handleAnalyzeReleases(ctx, req)
 	default:
-		return mcp.NewToolResultError("unknown analyze kind: " + kind + " (expected: dead_code, hotspots, cycles, would_create_cycle, todos, blame, coverage, stale_code, ownership, coverage_gaps)"), nil
+		return mcp.NewToolResultError("unknown analyze kind: " + kind + " (expected: dead_code, hotspots, cycles, would_create_cycle, todos, blame, coverage, stale_code, ownership, coverage_gaps, stale_flags, releases)"), nil
 	}
 }
 
@@ -1164,6 +1170,184 @@ func (s *Server) handleAnalyzeCoverageGaps(_ context.Context, req mcp.CallToolRe
 		"total":   len(rows),
 		"min_pct": minPct,
 		"max_pct": maxPct,
+	})
+}
+
+// handleAnalyzeStaleFlags lists feature flags whose every toggling
+// call site was last touched more than `older_than` days ago. The
+// staleness signal is derived: for each KindFlag node we walk its
+// incoming EdgeTogglesFlag edges, look up each caller's
+// meta.last_authored.timestamp, and take the maximum. If even the
+// most-recently-touched check site is older than the cutoff, the
+// flag is stale — every check is in code nobody's edited in a
+// while, which is the operational signal that the rollout is
+// done.
+//
+// Requires both flag detection (analyze kind=blame is enough to
+// populate KindFlag nodes if the repo enables index.coverage.flags)
+// AND blame enrichment (analyze kind=blame). Flags whose callers
+// don't have blame metadata are silently skipped — without
+// authorship data we can't compute the staleness — and reported
+// in the response's `unscored` count so the agent can tell the
+// difference between "no flags found" and "flags found but
+// unscored."
+//
+// Filters:
+//
+//   - older_than: days, default 365.
+//   - provider: filter to a single provider (launchdarkly,
+//     growthbook, unleash, internal).
+//
+// Sorted oldest-first so cleanup priorities surface at the top.
+func (s *Server) handleAnalyzeStaleFlags(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := req.GetArguments()
+	olderThanDays := 365.0
+	if v, ok := args["older_than"].(float64); ok && v > 0 {
+		olderThanDays = v
+	}
+	providerFilter := strings.TrimSpace(stringArg(args, "provider"))
+	cutoffSec := time.Now().Add(-time.Duration(olderThanDays*24) * time.Hour).Unix()
+
+	type staleFlag struct {
+		ID            string `json:"id"`
+		Name          string `json:"name"`
+		Provider      string `json:"provider"`
+		Callers       int    `json:"callers"`
+		NewestCallTS  int64  `json:"newest_call_timestamp"`
+		AgeDays       int    `json:"age_days"`
+	}
+	var rows []staleFlag
+	unscored := 0
+
+	for _, n := range s.graph.AllNodes() {
+		if n.Kind != graph.KindFlag {
+			continue
+		}
+		provider, _ := n.Meta["provider"].(string)
+		if providerFilter != "" && provider != providerFilter {
+			continue
+		}
+		// Walk incoming EdgeTogglesFlag edges to collect callers.
+		var callerIDs []string
+		for _, e := range s.graph.GetInEdges(n.ID) {
+			if e.Kind != graph.EdgeTogglesFlag {
+				continue
+			}
+			callerIDs = append(callerIDs, e.From)
+		}
+		if len(callerIDs) == 0 {
+			// Orphan flag — declared but never checked. Treat as
+			// stale: a flag with zero call sites is tautologically
+			// safe to delete.
+			rows = append(rows, staleFlag{
+				ID:       n.ID,
+				Name:     stringFromMeta(n.Meta, "name"),
+				Provider: provider,
+				Callers:  0,
+				AgeDays:  -1,
+			})
+			continue
+		}
+		var newestTS int64
+		hasBlame := false
+		for _, callerID := range callerIDs {
+			caller := s.graph.GetNode(callerID)
+			if caller == nil {
+				continue
+			}
+			la, ok := caller.Meta["last_authored"].(map[string]any)
+			if !ok {
+				continue
+			}
+			ts := tsFromMeta(la["timestamp"])
+			if ts == 0 {
+				continue
+			}
+			hasBlame = true
+			if ts > newestTS {
+				newestTS = ts
+			}
+		}
+		if !hasBlame {
+			unscored++
+			continue
+		}
+		if newestTS > cutoffSec {
+			continue // some caller is fresh
+		}
+		ageSec := time.Now().Unix() - newestTS
+		rows = append(rows, staleFlag{
+			ID:           n.ID,
+			Name:         stringFromMeta(n.Meta, "name"),
+			Provider:     provider,
+			Callers:      len(callerIDs),
+			NewestCallTS: newestTS,
+			AgeDays:      int(ageSec / (24 * 3600)),
+		})
+	}
+
+	sort.Slice(rows, func(i, j int) bool {
+		// Orphans (AgeDays = -1) first, then oldest by timestamp.
+		if rows[i].AgeDays < 0 && rows[j].AgeDays >= 0 {
+			return true
+		}
+		if rows[j].AgeDays < 0 && rows[i].AgeDays >= 0 {
+			return false
+		}
+		return rows[i].NewestCallTS < rows[j].NewestCallTS
+	})
+
+	if isCompact(req) {
+		var b strings.Builder
+		for _, r := range rows {
+			if r.AgeDays < 0 {
+				fmt.Fprintf(&b, "ORPHAN  %s (%s)\n", r.Name, r.Provider)
+				continue
+			}
+			fmt.Fprintf(&b, "%4dd  %s (%s) — %d callers\n", r.AgeDays, r.Name, r.Provider, r.Callers)
+		}
+		if len(rows) == 0 {
+			b.WriteString("no stale flags matched\n")
+		}
+		return mcp.NewToolResultText(b.String()), nil
+	}
+	return mcp.NewToolResultJSON(map[string]any{
+		"flags":          rows,
+		"total":          len(rows),
+		"unscored":       unscored,
+		"older_than_day": olderThanDays,
+	})
+}
+
+// stringFromMeta is a tiny helper for safe meta string extraction.
+func stringFromMeta(meta map[string]any, key string) string {
+	if v, ok := meta[key].(string); ok {
+		return v
+	}
+	return ""
+}
+
+// handleAnalyzeReleases walks git tags chronologically and stamps
+// meta.added_in on every file node with the earliest tag whose
+// tree contained that file. Symbols inherit indirectly via their
+// owning file — answers "added in v1.4?" with one graph hop from
+// any symbol to its file. Re-runnable: each call re-walks tags
+// and overwrites existing meta.
+func (s *Server) handleAnalyzeReleases(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if s.indexer == nil {
+		return mcp.NewToolResultError("releases enrichment requires an active indexer"), nil
+	}
+	root := s.indexer.RootPath()
+	if root == "" {
+		return mcp.NewToolResultError("indexer has no root path — was the repo indexed?"), nil
+	}
+	count, err := releases.EnrichGraph(s.graph, root)
+	if err != nil {
+		return mcp.NewToolResultError("releases enrichment failed: " + err.Error()), nil
+	}
+	return mcp.NewToolResultJSON(map[string]any{
+		"enriched": count,
+		"root":     root,
 	})
 }
 

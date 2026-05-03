@@ -14,6 +14,7 @@ import (
 	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/parser/languages"
+	"github.com/zzet/gortex/internal/releases"
 )
 
 var enrichCmd = &cobra.Command{
@@ -30,6 +31,7 @@ index.`,
 var (
 	enrichBlameSnapshot    string
 	enrichCoverageSnapshot string
+	enrichReleasesSnapshot string
 )
 
 var enrichBlameCmd = &cobra.Command{
@@ -46,14 +48,65 @@ var enrichCoverageCmd = &cobra.Command{
 	RunE:  runEnrichCoverage,
 }
 
+var enrichReleasesCmd = &cobra.Command{
+	Use:   "releases [path]",
+	Short: "Stamp meta.added_in on every file from git tag history",
+	Args:  cobra.MaximumNArgs(1),
+	RunE:  runEnrichReleases,
+}
+
 func init() {
 	enrichBlameCmd.Flags().StringVar(&enrichBlameSnapshot, "snapshot", "",
 		"write the enriched graph as a gob.gz snapshot to this path")
 	enrichCoverageCmd.Flags().StringVar(&enrichCoverageSnapshot, "snapshot", "",
 		"write the enriched graph as a gob.gz snapshot to this path")
+	enrichReleasesCmd.Flags().StringVar(&enrichReleasesSnapshot, "snapshot", "",
+		"write the enriched graph as a gob.gz snapshot to this path")
 	enrichCmd.AddCommand(enrichBlameCmd)
 	enrichCmd.AddCommand(enrichCoverageCmd)
+	enrichCmd.AddCommand(enrichReleasesCmd)
 	rootCmd.AddCommand(enrichCmd)
+}
+
+func runEnrichReleases(_ *cobra.Command, args []string) error {
+	logger := newLogger()
+	defer func() { _ = logger.Sync() }()
+
+	path := "."
+	if len(args) >= 1 {
+		path = args[0]
+	}
+
+	cfg, err := config.Load(cfgFile)
+	if err != nil {
+		return err
+	}
+
+	g := graph.New()
+	reg := parser.NewRegistry()
+	languages.RegisterAll(reg)
+	idx := indexer.New(g, reg, cfg.Index, logger)
+
+	if _, err := idx.IndexCtx(context.Background(), path); err != nil {
+		return fmt.Errorf("index %s: %w", path, err)
+	}
+
+	count, err := releases.EnrichGraph(g, idx.RootPath())
+	if err != nil {
+		return fmt.Errorf("releases: %w", err)
+	}
+
+	result := map[string]any{
+		"enriched": count,
+		"root":     idx.RootPath(),
+	}
+	if enrichReleasesSnapshot != "" {
+		if err := saveSnapshotTo(g, nil, nil, "gortex-enrich-releases", enrichReleasesSnapshot, logger); err != nil {
+			return fmt.Errorf("write snapshot %s: %w", enrichReleasesSnapshot, err)
+		}
+		result["snapshot"] = enrichReleasesSnapshot
+	}
+	return printEnrichResult(result)
 }
 
 func runEnrichBlame(_ *cobra.Command, args []string) error {
