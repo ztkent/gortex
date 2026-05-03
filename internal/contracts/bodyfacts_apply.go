@@ -1,0 +1,355 @@
+package contracts
+
+import (
+	"strings"
+
+	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/parser"
+)
+
+// applyBodyFactsToHTTPContract overrides Meta keys with AST-derived
+// facts when they're more authoritative than the regex enricher's
+// output. Called after enrichHTTPContract has run; AST output wins
+// on the keys it can confidently produce.
+//
+// Phase 1 invariant: this function may not regress an existing
+// Meta value to a strictly less informative one — i.e. if the
+// regex pass set response_type but the AST can't, leave the regex
+// value alone. The AST only writes when it has a confident answer.
+func applyBodyFactsToHTTPContract(c *Contract, fileNodes []*graph.Node, tree *parser.ParseTree) {
+	if c == nil || c.Role != RoleProvider || tree == nil {
+		return
+	}
+	handler := findContractHandlerNode(c, fileNodes)
+	if handler == nil {
+		return
+	}
+	bf := MakeBodyFacts(tree, handler)
+	if _, isNop := bf.(nopBodyFacts); isNop {
+		return
+	}
+
+	// Status codes: merge AST-derived WriteHeader codes into the
+	// existing list (the regex pass may have caught some via
+	// framework-specific patterns; AST catches the standard
+	// w.WriteHeader form).
+	if writes := bf.StatusWrites(); len(writes) > 0 {
+		mergeIntStrings(c.Meta, "status_codes", writes)
+	}
+
+	// Query params: same merge semantics.
+	if reads := bf.QueryReads(); len(reads) > 0 {
+		mergeStringList(c.Meta, "query_params", reads)
+	}
+
+	// Response shape: prefer the LAST response call in the body —
+	// typical pattern is early WriteJSON for errors, final one for
+	// the success path. The AST gives us source order so the last
+	// one is the success-path response.
+	calls := bf.ResponseCalls()
+	if len(calls) == 0 {
+		return
+	}
+	rc := lastSuccessResponseCall(calls)
+	applyResponseCallToContract(c, fileNodes, bf, rc)
+}
+
+// lastSuccessResponseCall picks the response call that most likely
+// represents the success path. Heuristic: the last call whose status
+// is 2xx or unknown; falls back to the last call.
+func lastSuccessResponseCall(calls []ResponseCall) ResponseCall {
+	for i := len(calls) - 1; i >= 0; i-- {
+		c := calls[i]
+		if !c.StatusKnown {
+			return c
+		}
+		if c.StatusCode >= 200 && c.StatusCode < 300 {
+			return c
+		}
+	}
+	return calls[len(calls)-1]
+}
+
+// applyResponseCallToContract turns one ResponseCall's value
+// argument into Meta updates: response_type, response_envelope,
+// response_repeated, schema_source.
+func applyResponseCallToContract(c *Contract, fileNodes []*graph.Node, bf BodyFacts, rc ResponseCall) {
+	if rc.ValueArg == nil {
+		return
+	}
+	switch rc.ValueArg.Kind() {
+	case "composite_literal":
+		applyCompositeResponse(c, fileNodes, bf, rc.ValueArg)
+	case "identifier":
+		applyIdentResponse(c, fileNodes, bf, rc.ValueExpr)
+	case "interpreted_string_literal", "raw_string_literal":
+		applyLiteralResponse(c, "string")
+	case "int_literal":
+		applyLiteralResponse(c, "int")
+	case "float_literal":
+		applyLiteralResponse(c, "float64")
+	case "true", "false":
+		applyLiteralResponse(c, "bool")
+	case "unary_expression":
+		// `&Foo{...}` or `&value` — unwrap.
+		inner := unaryOperand(rc.ValueArg)
+		if inner == nil {
+			return
+		}
+		switch inner.Kind() {
+		case "composite_literal":
+			applyCompositeResponse(c, fileNodes, bf, inner)
+		case "identifier":
+			applyIdentResponse(c, fileNodes, bf, inner.Text())
+		}
+	}
+}
+
+// applyLiteralResponse stamps a primitive response_type when the
+// helper's value argument is a string / int / float / bool literal.
+func applyLiteralResponse(c *Contract, typeName string) {
+	c.Meta["response_type"] = typeName
+	c.Meta["schema_source"] = "extracted"
+	delete(c.Meta, "response_expr")
+}
+
+// applyCompositeResponse handles `WriteJSON(w, code, Foo{...})` and
+// `WriteJSON(w, code, map[string]any{...})`. For map composites we
+// walk the entries into an envelope.
+func applyCompositeResponse(c *Contract, fileNodes []*graph.Node, bf BodyFacts, valueNode *Node) {
+	if valueNode == nil || valueNode.Inner() == nil {
+		return
+	}
+	typ := compositeTypeNode(valueNode.Inner())
+	if typ == nil {
+		return
+	}
+	switch typ.Type() {
+	case "map_type":
+		entries := bf.MapLiteralEntries(valueNode)
+		if len(entries) == 0 {
+			return
+		}
+		env := buildEnvelopeFromEntries(bf, fileNodes, entries)
+		if len(env) == 0 {
+			return
+		}
+		c.Meta["response_envelope"] = env
+		if len(env) == 1 {
+			if t, _ := env[0]["type"].(string); t != "" {
+				c.Meta["response_type"] = t
+			}
+			if r, _ := env[0]["repeated"].(bool); r {
+				c.Meta["response_repeated"] = true
+			}
+		}
+		c.Meta["schema_source"] = "extracted"
+		delete(c.Meta, "response_expr")
+	case "slice_type", "array_type":
+		// `[]Foo{...}` — record the element type as response, marked
+		// repeated. Walk the slice element via bindingFromComposite.
+		if goBF, ok := bf.(*goBodyFacts); ok {
+			b := goBF.bindingFromComposite(valueNode.Inner())
+			if b.TypeID != "" {
+				c.Meta["response_type"] = resolveTypeInFile(b.TypeID, fileNodes)
+				if b.Repeated {
+					c.Meta["response_repeated"] = true
+				}
+				c.Meta["schema_source"] = "extracted"
+				delete(c.Meta, "response_expr")
+			}
+		}
+	default:
+		// Named type: `WriteJSON(w, code, Foo{...})` → response = Foo.
+		if goBF, ok := bf.(*goBodyFacts); ok {
+			b := goBF.bindingFromComposite(valueNode.Inner())
+			if b.TypeID != "" {
+				c.Meta["response_type"] = resolveTypeInFile(b.TypeID, fileNodes)
+				c.Meta["schema_source"] = "extracted"
+				delete(c.Meta, "response_expr")
+			}
+		}
+	}
+}
+
+// applyIdentResponse handles `WriteJSON(w, code, repos)`. Looks up
+// repos's binding; if it resolves to a known type or a method call,
+// stamps the response_type or leaves a clean response_expr for the
+// post-pass to trace.
+func applyIdentResponse(c *Contract, fileNodes []*graph.Node, bf BodyFacts, ident string) {
+	ident = strings.TrimSpace(ident)
+	if ident == "" {
+		return
+	}
+	b := bf.VarBinding(ident)
+	switch b.Kind {
+	case BindingComposite, BindingSliceLit, BindingMakeSlice, BindingMakeMap:
+		if b.TypeID != "" {
+			c.Meta["response_type"] = resolveTypeInFile(b.TypeID, fileNodes)
+			if b.Repeated {
+				c.Meta["response_repeated"] = true
+			}
+			c.Meta["schema_source"] = "extracted"
+			delete(c.Meta, "response_expr")
+			return
+		}
+	case BindingStringLit, BindingIntLit, BindingFloatLit, BindingBoolLit,
+		BindingPathValue, BindingFormValue, BindingHeaderValue, BindingQueryGet:
+		c.Meta["response_type"] = b.TypeID
+		c.Meta["schema_source"] = "extracted"
+		delete(c.Meta, "response_expr")
+		return
+	case BindingMethodCall, BindingFuncCall:
+		// Defer to the post-pass (resolveCallReturnTypes) which will
+		// walk the graph from b.CallExpr to the method's return
+		// type. We just clean up response_expr to be the bare ident
+		// so the post-pass's `isLikelyIdentifier` branch matches.
+		if rt, _ := c.Meta["response_type"].(string); rt == "" {
+			c.Meta["response_expr"] = ident
+		}
+	}
+}
+
+// buildEnvelopeFromEntries converts AST map-literal entries into the
+// `[]map[string]any` shape the dashboard renders. Each entry's value
+// expression is matched against the body's bindings to resolve a
+// type; when no fact is available the row stays with just an `expr`
+// field for the post-pass to chase.
+func buildEnvelopeFromEntries(bf BodyFacts, fileNodes []*graph.Node, entries []KeyValue) []map[string]any {
+	out := make([]map[string]any, 0, len(entries))
+	for _, e := range entries {
+		row := map[string]any{"name": e.Key, "expr": e.ValueExpr}
+		// Direct composite literals carry their type inline.
+		if e.ValueNode != nil && e.ValueNode.Kind() == "composite_literal" {
+			if goBF, ok := bf.(*goBodyFacts); ok {
+				b := goBF.bindingFromComposite(e.ValueNode.Inner())
+				if b.TypeID != "" {
+					row["type"] = resolveTypeInFile(b.TypeID, fileNodes)
+					if b.Repeated {
+						row["repeated"] = true
+					}
+				}
+			}
+		} else {
+			// Bare identifier: chase its binding.
+			ident := strings.TrimLeft(e.ValueExpr, "&*")
+			if isPlainIdent(ident) {
+				b := bf.VarBinding(ident)
+				if b.TypeID != "" {
+					row["type"] = resolveTypeInFile(b.TypeID, fileNodes)
+				}
+				if b.Repeated {
+					row["repeated"] = true
+				}
+			}
+		}
+		out = append(out, row)
+	}
+	return out
+}
+
+// findContractHandlerNode locates the handler graph node referenced
+// by a contract's SymbolID.
+func findContractHandlerNode(c *Contract, fileNodes []*graph.Node) *graph.Node {
+	for _, n := range fileNodes {
+		if n.ID == c.SymbolID {
+			return n
+		}
+	}
+	return nil
+}
+
+// unaryOperand returns the operand of a unary_expression Node.
+func unaryOperand(n *Node) *Node {
+	if n == nil || n.Inner() == nil {
+		return nil
+	}
+	op := n.Inner().ChildByFieldName("operand")
+	if op == nil {
+		return nil
+	}
+	return NewNode(op, sourceOf(n))
+}
+
+// sourceOf retrieves the source bytes a Node was built with. Internal
+// helper that reaches into the Node struct.
+func sourceOf(n *Node) []byte {
+	if n == nil {
+		return nil
+	}
+	return n.src
+}
+
+// mergeIntStrings adds new ints into an existing []int meta field
+// (or creates it) without duplicates. Preserves source order.
+func mergeIntStrings(meta map[string]any, key string, additions []int) {
+	if meta == nil {
+		return
+	}
+	seen := map[int]bool{}
+	out := []int{}
+	if existing, ok := meta[key].([]int); ok {
+		for _, v := range existing {
+			if !seen[v] {
+				seen[v] = true
+				out = append(out, v)
+			}
+		}
+	}
+	for _, v := range additions {
+		if !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	if len(out) > 0 {
+		meta[key] = out
+	}
+}
+
+// mergeStringList adds strings to a []string Meta field, dedup,
+// preserving source order.
+func mergeStringList(meta map[string]any, key string, additions []string) {
+	if meta == nil {
+		return
+	}
+	seen := map[string]bool{}
+	out := []string{}
+	if existing, ok := meta[key].([]string); ok {
+		for _, v := range existing {
+			if !seen[v] {
+				seen[v] = true
+				out = append(out, v)
+			}
+		}
+	}
+	for _, v := range additions {
+		if v == "" || seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	if len(out) > 0 {
+		meta[key] = out
+	}
+}
+
+// isPlainIdent reports whether s is a simple Go identifier (no dots,
+// brackets, parens). Used to gate the var-binding lookup so a value
+// expression like `len(repos)` isn't sent to BodyFacts.VarBinding.
+func isPlainIdent(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		if r == '_' ||
+			(r >= 'a' && r <= 'z') ||
+			(r >= 'A' && r <= 'Z') ||
+			(i > 0 && r >= '0' && r <= '9') {
+			continue
+		}
+		return false
+	}
+	return true
+}

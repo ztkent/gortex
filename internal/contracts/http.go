@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/zzet/gortex/internal/parser"
+
 	"github.com/zzet/gortex/internal/graph"
 )
 
@@ -541,6 +543,30 @@ var httpJvmMarkers = [][]byte{
 
 // Extract scans src for HTTP route patterns and returns contracts.
 func (h *HTTPExtractor) Extract(filePath string, src []byte, nodes []*graph.Node, edges []*graph.Edge) []Contract {
+	return h.extract(filePath, src, nodes, edges, nil)
+}
+
+// ExtractWithTree is the tree-aware variant: enrichment uses BodyFacts
+// (AST-based) when tree is non-nil and the language has a registered
+// factory, falling back to the regex enricher otherwise. Implements
+// TreeAwareExtractor.
+func (h *HTTPExtractor) ExtractWithTree(
+	filePath string,
+	src []byte,
+	nodes []*graph.Node,
+	edges []*graph.Edge,
+	tree *parser.ParseTree,
+) []Contract {
+	return h.extract(filePath, src, nodes, edges, tree)
+}
+
+func (h *HTTPExtractor) extract(
+	filePath string,
+	src []byte,
+	nodes []*graph.Node,
+	edges []*graph.Edge,
+	tree *parser.ParseTree,
+) []Contract {
 	lang := detectLanguage(filePath)
 	if markers, ok := httpPrefilterMarkers[lang]; ok && !srcHasAnyMarker(src, markers) {
 		return nil
@@ -679,8 +705,10 @@ func (h *HTTPExtractor) Extract(filePath string, src []byte, nodes []*graph.Node
 			// Second pass: pull request/response types, query params,
 			// and status codes out of the handler body (provider) or
 			// the call-site window (consumer). The enricher mutates
-			// c.Meta in place and sets "schema_source".
-			enrichHTTPContract(&c, lines, fileNodes, lang)
+			// c.Meta in place and sets "schema_source". When a parse
+			// tree is available the AST overlay runs after the regex
+			// pass and overrides Meta keys it can confidently produce.
+			EnrichHTTPContractWithTree(&c, lines, fileNodes, lang, tree)
 
 			out = append(out, c)
 		}

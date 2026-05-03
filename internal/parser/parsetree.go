@@ -1,0 +1,92 @@
+package parser
+
+import (
+	"sync/atomic"
+
+	sitter "github.com/zzet/gortex/internal/parser/tsitter"
+)
+
+// ParseTree is a ref-counted handle to a tree-sitter parse tree plus
+// the source bytes the tree was parsed from. The language extractor
+// produces it; the indexer hands it to contract extractors and the
+// post-pass resolvers and closes it (decrementing refs) when each
+// consumer is done.
+//
+// Lifetime: a ParseTree starts with refs=1. Every consumer that
+// retains the handle (e.g. caches it across calls) must call Acquire
+// to bump the count and Release to drop it. Single-shot consumers
+// that read and return don't need to touch the count — the producer's
+// close balances the producer's create.
+//
+// ParseTree is safe for concurrent reads (tree-sitter trees are
+// immutable after parse) but not for concurrent close. Acquire/Release
+// are atomic; closing happens at most once when refs reach 0.
+type ParseTree struct {
+	tree *sitter.Tree
+	src  []byte
+	lang string
+	refs atomic.Int32
+}
+
+// NewParseTree wraps an already-parsed *sitter.Tree with the source
+// bytes and language code. The returned handle starts with refs=1;
+// the producer must Close (or Release) it once.
+func NewParseTree(tree *sitter.Tree, src []byte, lang string) *ParseTree {
+	pt := &ParseTree{tree: tree, src: src, lang: lang}
+	pt.refs.Store(1)
+	return pt
+}
+
+// Tree returns the underlying tree. Returns nil if the ParseTree has
+// been closed.
+func (pt *ParseTree) Tree() *sitter.Tree {
+	if pt == nil {
+		return nil
+	}
+	return pt.tree
+}
+
+// Source returns the source bytes the tree was parsed from. Same
+// slice the extractor was handed; do not mutate.
+func (pt *ParseTree) Source() []byte {
+	if pt == nil {
+		return nil
+	}
+	return pt.src
+}
+
+// Lang returns the language code ("go", "typescript", …).
+func (pt *ParseTree) Lang() string {
+	if pt == nil {
+		return ""
+	}
+	return pt.lang
+}
+
+// Acquire bumps the ref count. Pair every Acquire with a Release.
+func (pt *ParseTree) Acquire() {
+	if pt == nil {
+		return
+	}
+	pt.refs.Add(1)
+}
+
+// Release decrements the ref count and closes the underlying tree
+// when it reaches zero. Safe to call on nil.
+func (pt *ParseTree) Release() {
+	if pt == nil {
+		return
+	}
+	if pt.refs.Add(-1) <= 0 {
+		if pt.tree != nil {
+			pt.tree.Close()
+			pt.tree = nil
+		}
+	}
+}
+
+// Close is an alias for Release that lets ParseTree satisfy a
+// generic io.Closer-style contract for defer convenience.
+func (pt *ParseTree) Close() {
+	pt.Release()
+}

@@ -178,10 +178,15 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 	if err != nil {
 		return nil, err
 	}
-	defer tree.Close()
+	// Wrap in a ref-counted handle and stamp it on the result so the
+	// indexer can hand it to contract enrichers. The wrapper owns
+	// the tree from here; callers Release() once they're done. We
+	// don't defer Close — closing happens in the indexer after the
+	// contract pass releases its ref.
+	pt := parser.NewParseTree(tree, src, "go")
+	result := &parser.ExtractionResult{Tree: pt}
 
 	root := tree.RootNode()
-	result := &parser.ExtractionResult{}
 
 	fileNode := &graph.Node{
 		ID:        filePath,

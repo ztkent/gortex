@@ -3,6 +3,8 @@ package contracts
 import (
 	"regexp"
 	"sort"
+
+	"github.com/zzet/gortex/internal/parser"
 	"strconv"
 	"strings"
 
@@ -112,7 +114,26 @@ var schemaEnrichers []schemaEnricher
 // calls it again when the first attempt ran against the wrong
 // function body (router vs. actual handler).
 func EnrichHTTPContract(c *Contract, lines []string, fileNodes []*graph.Node, lang string) {
+	EnrichHTTPContractWithTree(c, lines, fileNodes, lang, nil)
+}
+
+// EnrichHTTPContractWithTree is the tree-aware variant: it runs the
+// regex-based enricher first (so non-Go languages and patterns the
+// AST doesn't recognise still produce meta), then overlays AST-derived
+// facts when tree is non-nil and the language has a registered
+// BodyFactsFactory. AST output wins on the keys it can confidently
+// produce; regex output stays for the rest.
+func EnrichHTTPContractWithTree(
+	c *Contract,
+	lines []string,
+	fileNodes []*graph.Node,
+	lang string,
+	tree *parser.ParseTree,
+) {
 	enrichHTTPContract(c, lines, fileNodes, lang)
+	if tree != nil {
+		applyBodyFactsToHTTPContract(c, fileNodes, tree)
+	}
 }
 
 // enrichHTTPContract extracts schema-shape hints from the handler body
