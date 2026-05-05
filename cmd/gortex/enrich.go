@@ -1,9 +1,9 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
 
@@ -14,6 +14,7 @@ import (
 	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/parser/languages"
+	"github.com/zzet/gortex/internal/progress"
 	"github.com/zzet/gortex/internal/releases"
 )
 
@@ -98,7 +99,7 @@ func init() {
 	rootCmd.AddCommand(enrichCmd)
 }
 
-func runEnrichAll(_ *cobra.Command, args []string) error {
+func runEnrichAll(cmd *cobra.Command, args []string) error {
 	logger := newLogger()
 	defer func() { _ = logger.Sync() }()
 
@@ -115,10 +116,10 @@ func runEnrichAll(_ *cobra.Command, args []string) error {
 	g := graph.New()
 	reg := parser.NewRegistry()
 	languages.RegisterAll(reg)
-	idx := indexer.New(g, reg, cfg.Index, logger)
+	idx := indexer.New(g, reg, cfg.Index, loggerForSpinner(cmd, logger))
 
-	if _, err := idx.IndexCtx(context.Background(), path); err != nil {
-		return fmt.Errorf("index %s: %w", path, err)
+	if err := indexWithSpinner(cmd, idx, path); err != nil {
+		return err
 	}
 
 	result := map[string]any{
@@ -126,26 +127,39 @@ func runEnrichAll(_ *cobra.Command, args []string) error {
 	}
 
 	if enrichAllBlame {
+		sp := newCLISpinner(cmd, "Stamping blame")
 		count, err := blame.EnrichGraph(g, idx.RootPath())
 		if err != nil {
+			sp.Fail(err)
 			return fmt.Errorf("blame: %w", err)
 		}
+		sp.Set("", fmt.Sprintf("%d nodes stamped", count))
+		sp.Done()
 		result["blame_enriched"] = count
 	}
 	if enrichAllReleases {
+		sp := newCLISpinner(cmd, "Stamping releases")
 		count, err := releases.EnrichGraph(g, idx.RootPath())
 		if err != nil {
+			sp.Fail(err)
 			return fmt.Errorf("releases: %w", err)
 		}
+		sp.Set("", fmt.Sprintf("%d files stamped", count))
+		sp.Done()
 		result["releases_enriched"] = count
 	}
 	if enrichAllProfile != "" {
+		sp := newCLISpinner(cmd, "Stamping coverage")
+		sp.Set("", enrichAllProfile)
 		segments, err := coverage.ParseFile(enrichAllProfile)
 		if err != nil {
+			sp.Fail(err)
 			return fmt.Errorf("read profile: %w", err)
 		}
 		modulePath := coverage.ReadModulePath(idx.RootPath())
 		count := coverage.EnrichGraph(g, segments, modulePath)
+		sp.Set("", fmt.Sprintf("%d symbols · %d segments", count, len(segments)))
+		sp.Done()
 		result["coverage_enriched"] = count
 		result["coverage_segments"] = len(segments)
 	}
@@ -159,7 +173,7 @@ func runEnrichAll(_ *cobra.Command, args []string) error {
 	return printEnrichResult(result)
 }
 
-func runEnrichReleases(_ *cobra.Command, args []string) error {
+func runEnrichReleases(cmd *cobra.Command, args []string) error {
 	logger := newLogger()
 	defer func() { _ = logger.Sync() }()
 
@@ -176,16 +190,20 @@ func runEnrichReleases(_ *cobra.Command, args []string) error {
 	g := graph.New()
 	reg := parser.NewRegistry()
 	languages.RegisterAll(reg)
-	idx := indexer.New(g, reg, cfg.Index, logger)
+	idx := indexer.New(g, reg, cfg.Index, loggerForSpinner(cmd, logger))
 
-	if _, err := idx.IndexCtx(context.Background(), path); err != nil {
-		return fmt.Errorf("index %s: %w", path, err)
+	if err := indexWithSpinner(cmd, idx, path); err != nil {
+		return err
 	}
 
+	sp := newCLISpinner(cmd, "Stamping releases")
 	count, err := releases.EnrichGraph(g, idx.RootPath())
 	if err != nil {
+		sp.Fail(err)
 		return fmt.Errorf("releases: %w", err)
 	}
+	sp.Set("", fmt.Sprintf("%d files stamped", count))
+	sp.Done()
 
 	result := map[string]any{
 		"enriched": count,
@@ -200,7 +218,7 @@ func runEnrichReleases(_ *cobra.Command, args []string) error {
 	return printEnrichResult(result)
 }
 
-func runEnrichBlame(_ *cobra.Command, args []string) error {
+func runEnrichBlame(cmd *cobra.Command, args []string) error {
 	logger := newLogger()
 	defer func() { _ = logger.Sync() }()
 
@@ -217,16 +235,20 @@ func runEnrichBlame(_ *cobra.Command, args []string) error {
 	g := graph.New()
 	reg := parser.NewRegistry()
 	languages.RegisterAll(reg)
-	idx := indexer.New(g, reg, cfg.Index, logger)
+	idx := indexer.New(g, reg, cfg.Index, loggerForSpinner(cmd, logger))
 
-	if _, err := idx.IndexCtx(context.Background(), path); err != nil {
-		return fmt.Errorf("index %s: %w", path, err)
+	if err := indexWithSpinner(cmd, idx, path); err != nil {
+		return err
 	}
 
+	sp := newCLISpinner(cmd, "Stamping blame")
 	count, err := blame.EnrichGraph(g, idx.RootPath())
 	if err != nil {
+		sp.Fail(err)
 		return fmt.Errorf("blame: %w", err)
 	}
+	sp.Set("", fmt.Sprintf("%d nodes stamped", count))
+	sp.Done()
 
 	result := map[string]any{
 		"enriched": count,
@@ -241,7 +263,7 @@ func runEnrichBlame(_ *cobra.Command, args []string) error {
 	return printEnrichResult(result)
 }
 
-func runEnrichCoverage(_ *cobra.Command, args []string) error {
+func runEnrichCoverage(cmd *cobra.Command, args []string) error {
 	logger := newLogger()
 	defer func() { _ = logger.Sync() }()
 
@@ -259,18 +281,23 @@ func runEnrichCoverage(_ *cobra.Command, args []string) error {
 	g := graph.New()
 	reg := parser.NewRegistry()
 	languages.RegisterAll(reg)
-	idx := indexer.New(g, reg, cfg.Index, logger)
+	idx := indexer.New(g, reg, cfg.Index, loggerForSpinner(cmd, logger))
 
-	if _, err := idx.IndexCtx(context.Background(), path); err != nil {
-		return fmt.Errorf("index %s: %w", path, err)
+	if err := indexWithSpinner(cmd, idx, path); err != nil {
+		return err
 	}
 
+	sp := newCLISpinner(cmd, "Stamping coverage")
+	sp.Set("", profilePath)
 	segments, err := coverage.ParseFile(profilePath)
 	if err != nil {
+		sp.Fail(err)
 		return fmt.Errorf("read profile: %w", err)
 	}
 	modulePath := coverage.ReadModulePath(idx.RootPath())
 	count := coverage.EnrichGraph(g, segments, modulePath)
+	sp.Set("", fmt.Sprintf("%d symbols · %d segments", count, len(segments)))
+	sp.Done()
 
 	result := map[string]any{
 		"enriched":    count,
@@ -290,10 +317,22 @@ func runEnrichCoverage(_ *cobra.Command, args []string) error {
 
 // printEnrichResult emits the enrichment summary as JSON when stdout
 // is captured by a script and as a one-line human-readable text
-// when invoked interactively. Today we always emit JSON — keeps
-// the parse path simple and matches the format the matching MCP
-// analyze tools return.
+// when invoked interactively. On a terminal we keep stdout quiet — the
+// spinner already showed the per-pass count — and just caption the root /
+// snapshot path. On a pipe / redirect we still emit JSON for scripts.
 func printEnrichResult(payload map[string]any) error {
+	if progress.IsTTY(os.Stdout) {
+		if v, ok := payload["root"]; ok {
+			_, _ = fmt.Fprintln(os.Stdout, "  "+progress.Caption("root: "+fmt.Sprint(v)))
+		}
+		if v, ok := payload["snapshot"]; ok {
+			_, _ = fmt.Fprintln(os.Stdout, "  "+progress.Caption("snapshot: "+fmt.Sprint(v)))
+		}
+		if v, ok := payload["profile"]; ok {
+			_, _ = fmt.Fprintln(os.Stdout, "  "+progress.Caption("profile: "+fmt.Sprint(v)))
+		}
+		return nil
+	}
 	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		return err

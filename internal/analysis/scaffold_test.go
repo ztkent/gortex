@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -148,10 +149,15 @@ func %s(x int) int {
 			rt.Errorf("no edit contains the new name %q; edits: %v", newName, result.Edits)
 		}
 
-		// The new_symbol edit should NOT contain the old example name
+		// The new_symbol edit should NOT contain the old example name as a
+		// standalone identifier. A simple strings.Contains would mis-flag
+		// the new name when it's a superstring (e.g. example="Bbb",
+		// new="Bbba" — "Bbba" trivially contains "Bbb"). Use a word-
+		// boundary match so "Bbb" only counts when it stands alone.
+		oldRE := regexp.MustCompile(`\b` + regexp.QuoteMeta(exampleName) + `\b`)
 		for _, edit := range result.Edits {
 			if edit.Reason == "new_symbol" {
-				if strings.Contains(edit.Code, exampleName) {
+				if oldRE.MatchString(edit.Code) {
 					rt.Errorf("new_symbol edit still contains old name %q", exampleName)
 				}
 			}

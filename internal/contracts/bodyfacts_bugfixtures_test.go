@@ -190,11 +190,9 @@ func ListRepos(w, r) {
 	if expr != "" && !isPlainIdent(expr) {
 		t.Errorf("response_expr leaked helper text: %q (want bare ident or empty)", expr)
 	}
-	if expr == "" {
-		// The AST might have already resolved the type from a binding
-		// (composite/literal); that's fine. We just need to assert
-		// nothing leaked.
-	}
+	// An empty expr is also fine: the AST may have already resolved the
+	// response type from a binding (composite/literal). We only assert
+	// that nothing leaked.
 }
 
 // Bug 4b — bare struct response from variable binding.

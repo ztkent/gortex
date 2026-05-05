@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -11,6 +13,7 @@ import (
 	"github.com/zzet/gortex/internal/agents"
 	"github.com/zzet/gortex/internal/agents/claudecode"
 	"github.com/zzet/gortex/internal/daemon"
+	"github.com/zzet/gortex/internal/progress"
 )
 
 // Install-only flags. Repo-local `gortex init` has its own set —
@@ -62,7 +65,7 @@ func init() {
 	rootCmd.AddCommand(installCmd)
 }
 
-func runInstall(cmd *cobra.Command, _ []string) error {
+func runInstall(cmd *cobra.Command, _ []string) (err error) {
 	if installNoHooks {
 		installHooks = false
 	}
@@ -78,11 +81,45 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("gortex install needs a home directory; $HOME is empty")
 	}
 
-	if installClaudeMd && !installDryRun {
-		_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
-			"[gortex install] will merge a Gortex rule block into %s — use --no-claude-md to skip\n",
-			filepath.Join(home, ".claude", "CLAUDE.md"))
+	realStderr := cmd.ErrOrStderr()
+	sp := progress.NewSpinner(realStderr)
+	if noProgress {
+		sp.Disable()
 	}
+	sp.Start("Installing gortex")
+	if installClaudeMd && !installDryRun {
+		sp.Set("", fmt.Sprintf("merging %s (use --no-claude-md to skip)",
+			filepath.Join(home, ".claude", "CLAUDE.md")))
+	}
+
+	// Buffer chatty adapter logs while the animation is running. On success
+	// we drop them entirely — the summary already conveys outcome. On
+	// failure we replay them so the user can debug.
+	var (
+		chatter bytes.Buffer
+		results []*agents.Result
+		opts    agents.ApplyOpts
+	)
+	captured := sp.Enabled()
+	if captured {
+		cmd.SetErr(&chatter)
+	}
+	defer func() {
+		if err != nil {
+			sp.Fail(err)
+		} else {
+			sp.Done()
+		}
+		if captured {
+			cmd.SetErr(realStderr)
+			if err != nil {
+				_, _ = io.Copy(realStderr, &chatter)
+			}
+		}
+		if err == nil {
+			emitInstallHuman(realStderr, results, opts)
+		}
+	}()
 
 	env := agents.Env{
 		// Root is still set so adapters that write to the daemon
@@ -103,22 +140,25 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	opts := agents.ApplyOpts{DryRun: installDryRun, Force: installForce}
-	results := make([]*agents.Result, 0, len(selected))
+	opts = agents.ApplyOpts{DryRun: installDryRun, Force: installForce}
+	results = make([]*agents.Result, 0, len(selected))
+	sp.Set("", fmt.Sprintf("%d adapter(s)", len(selected)))
 	for _, a := range selected {
-		r, err := a.Apply(env, opts)
-		if err != nil {
+		sp.Set("", a.Name())
+		r, applyErr := a.Apply(env, opts)
+		if applyErr != nil {
 			// Claude Code is load-bearing — propagate. Other
 			// adapters warn so one broken editor doesn't abort.
 			if a.Name() == claudecode.Name {
-				return fmt.Errorf("%s: %w", a.Name(), err)
+				return fmt.Errorf("%s: %w", a.Name(), applyErr)
 			}
-			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "[gortex install] warning: %s setup failed: %v\n", a.Name(), err)
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "[gortex install] warning: %s setup failed: %v\n", a.Name(), applyErr)
 		}
 		if r != nil {
 			results = append(results, r)
 		}
 	}
+	sp.Set("", fmt.Sprintf("%d adapter(s) configured", len(results)))
 
 	// Ensure the daemon config file exists so --track doesn't
 	// fail with "no config" on first use.
@@ -136,7 +176,6 @@ func runInstall(cmd *cobra.Command, _ []string) error {
 			return err
 		}
 	}
-	emitInstallHuman(cmd.ErrOrStderr(), results, opts)
 	return nil
 }
 
@@ -192,23 +231,10 @@ func emitInstallJSON(w interface{ Write([]byte) (int, error) }, results []*agent
 	return enc.Encode(payload)
 }
 
-func emitInstallHuman(w interface{ Write([]byte) (int, error) }, results []*agents.Result, opts agents.ApplyOpts) {
-	_, _ = fmt.Fprintf(w, "\n[gortex install] done")
-	if opts.DryRun {
-		_, _ = fmt.Fprintf(w, " (dry-run — no files written)")
-	}
-	_, _ = fmt.Fprintf(w, ":\n")
-	for _, r := range results {
-		if r == nil {
-			continue
-		}
-		detected := "detected"
-		if !r.Detected {
-			detected = "not detected"
-		}
-		_, _ = fmt.Fprintf(w, "  • %s — %s, %d file(s) [%s]\n", r.Name, detected, len(r.Files), countByAction(r.Files))
-	}
-	_, _ = fmt.Fprintln(w, "\nNext: cd into any repo and run `gortex init` to wire repo-local config.")
+func emitInstallHuman(w io.Writer, results []*agents.Result, opts agents.ApplyOpts) {
+	emitAgentSummary(w, results, opts, []string{
+		"cd into any repo and run `gortex init` to wire repo-local config",
+	})
 }
 
 func mustAbs(p string) string {

@@ -23,9 +23,11 @@ import (
 )
 
 var (
-	daemonDetach     bool
-	daemonTail       int
-	daemonEmbeddings bool
+	daemonDetach         bool
+	daemonTail           int
+	daemonEmbeddings     bool
+	daemonStatusWatch    bool
+	daemonStatusInterval time.Duration
 )
 
 var daemonCmd = &cobra.Command{
@@ -82,6 +84,10 @@ func init() {
 		"load a semantic embedding provider (opt-in — adds ~87 MB model download on first use and ~60 ms/symbol warmup)")
 	daemonLogsCmd.Flags().IntVarP(&daemonTail, "tail", "n", 50,
 		"show only the last N log lines")
+	daemonStatusCmd.Flags().BoolVarP(&daemonStatusWatch, "watch", "w", false,
+		"continuously refresh the status until interrupted (alt-screen buffer)")
+	daemonStatusCmd.Flags().DurationVar(&daemonStatusInterval, "interval", 2*time.Second,
+		"refresh interval in --watch mode (clamped to >=200ms)")
 
 	daemonCmd.AddCommand(daemonStartCmd)
 	daemonCmd.AddCommand(daemonStopCmd)
@@ -409,21 +415,12 @@ func runDaemonReload(_ *cobra.Command, _ []string) error {
 }
 
 func runDaemonStatus(cmd *cobra.Command, _ []string) error {
-	c, err := daemonControlClient()
+	if daemonStatusWatch {
+		return runDaemonStatusWatch(cmd)
+	}
+	st, err := fetchDaemonStatusForCLI()
 	if err != nil {
 		return err
-	}
-	defer func() { _ = c.Close() }()
-	resp, err := c.Control(daemon.ControlStatus, nil)
-	if err != nil {
-		return err
-	}
-	if !resp.OK {
-		return fmt.Errorf("status rejected: %s %s", resp.ErrorCode, resp.ErrorMsg)
-	}
-	var st daemon.StatusResponse
-	if err := json.Unmarshal(resp.Result, &st); err != nil {
-		return fmt.Errorf("parse status: %w", err)
 	}
 	w := cmd.OutOrStdout()
 	renderDaemonHeader(w, st)
@@ -432,6 +429,28 @@ func runDaemonStatus(cmd *cobra.Command, _ []string) error {
 	renderDaemonSessions(w, st)
 	renderDaemonServers(w, st)
 	return nil
+}
+
+// fetchDaemonStatusForCLI dials the control socket once and returns a parsed
+// StatusResponse. Shared by the one-shot and watch paths.
+func fetchDaemonStatusForCLI() (daemon.StatusResponse, error) {
+	var st daemon.StatusResponse
+	c, err := daemonControlClient()
+	if err != nil {
+		return st, err
+	}
+	defer func() { _ = c.Close() }()
+	resp, err := c.Control(daemon.ControlStatus, nil)
+	if err != nil {
+		return st, err
+	}
+	if !resp.OK {
+		return st, fmt.Errorf("status rejected: %s %s", resp.ErrorCode, resp.ErrorMsg)
+	}
+	if err := json.Unmarshal(resp.Result, &st); err != nil {
+		return st, fmt.Errorf("parse status: %w", err)
+	}
+	return st, nil
 }
 
 // renderDaemonHeader writes the fixed-schema key/value facts about the

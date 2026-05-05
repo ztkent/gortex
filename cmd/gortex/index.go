@@ -15,6 +15,8 @@ import (
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/parser/languages"
 	"github.com/zzet/gortex/internal/progress"
+
+	"go.uber.org/zap"
 )
 
 var (
@@ -71,11 +73,22 @@ func runIndex(cmd *cobra.Command, args []string) error {
 
 	// Index each path as a separate repository.
 	for _, path := range paths {
+		// Construct the spinner first so we know whether to silence the
+		// indexer's zap logger. When the cozy view is live, structured
+		// info logs would interleave with the mesh frame.
+		sp := progress.NewSpinner(cmd.ErrOrStderr())
+		if noProgress {
+			sp.Disable()
+		}
+		idxLogger := logger
+		if sp.Enabled() {
+			idxLogger = zap.NewNop()
+		}
+
 		g := graph.New()
 		reg := parser.NewRegistry()
 		languages.RegisterAll(reg)
-
-		idx := indexer.New(g, reg, cfg.Index, logger)
+		idx := indexer.New(g, reg, cfg.Index, idxLogger)
 
 		// --profile attaches a timing reporter via the progress API.
 		// The indexer emits stage markers for walking files, parsing,
@@ -86,15 +99,26 @@ func runIndex(cmd *cobra.Command, args []string) error {
 		var memBefore runtime.MemStats
 		if indexProfile {
 			timer = progress.NewTimingReporter()
-			ctx = progress.WithReporter(ctx, timer)
 			runtime.GC()
 			runtime.ReadMemStats(&memBefore)
 		}
 
+		sp.Start("Indexing repository")
+		sp.Set("", path)
+		var reporter progress.Reporter = sp
+		if timer != nil {
+			reporter = progress.Multi(sp, timer)
+		}
+		ctx = progress.WithReporter(ctx, reporter)
+
 		result, err := idx.IndexCtx(ctx, path)
 		if err != nil {
+			sp.Fail(err)
 			return fmt.Errorf("indexing %s: %w", path, err)
 		}
+		sp.Set("", fmt.Sprintf("%s files · %s nodes · %s edges · %dms",
+			humanizeInt(result.FileCount), humanizeInt(result.NodeCount), humanizeInt(result.EdgeCount), result.DurationMs))
+		sp.Done()
 
 		switch indexOutput {
 		case "json":
@@ -104,14 +128,11 @@ func runIndex(cmd *cobra.Command, args []string) error {
 				return err
 			}
 		default:
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Indexed %s: %d files in %dms\n", path, result.FileCount, result.DurationMs)
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  Nodes: %d\n", result.NodeCount)
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  Edges: %d\n", result.EdgeCount)
-			if len(result.Errors) > 0 {
-				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  Errors: %d\n", len(result.Errors))
-				for _, e := range result.Errors {
-					_, _ = fmt.Fprintf(cmd.OutOrStdout(), "    %s: %s\n", e.FilePath, e.Error)
-				}
+			// On a TTY the spinner's ✓ line already conveyed the same
+			// stats — suppress the stdout duplicate. Pipes still get the
+			// canonical machine-readable line.
+			if !progress.IsTTY(cmd.OutOrStdout()) {
+				writeIndexTextSummary(cmd.OutOrStdout(), path, result)
 			}
 		}
 

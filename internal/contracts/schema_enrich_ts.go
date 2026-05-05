@@ -513,11 +513,10 @@ func splitTSObjectField(entry string) (string, string, bool) {
 	// — the regex captured `compute(x` as the key, which isn't a JSON
 	// key. A simple identifier-only check filters these out.
 	for _, r := range key {
-		if !(r == '_' || r == '-' ||
-			(r >= 'a' && r <= 'z') ||
-			(r >= 'A' && r <= 'Z') ||
-			(r >= '0' && r <= '9') ||
-			r == '$') {
+		if r != '_' && r != '-' && r != '$' &&
+			(r < 'a' || r > 'z') &&
+			(r < 'A' || r > 'Z') &&
+			(r < '0' || r > '9') {
 			return "", "", false
 		}
 	}

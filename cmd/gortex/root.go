@@ -9,8 +9,9 @@ import (
 )
 
 var (
-	cfgFile  string
-	logLevel string
+	cfgFile    string
+	logLevel   string
+	noProgress bool
 )
 
 var rootCmd = &cobra.Command{
@@ -21,6 +22,7 @@ var rootCmd = &cobra.Command{
 func init() {
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default .gortex.yaml)")
 	rootCmd.PersistentFlags().StringVar(&logLevel, "log-level", "info", "log level: debug|info|warn|error")
+	rootCmd.PersistentFlags().BoolVar(&noProgress, "no-progress", false, "disable the animated progress spinner (also honored: NO_COLOR, TERM=dumb, non-TTY stderr)")
 }
 
 func newLogger() *zap.Logger {

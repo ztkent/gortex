@@ -1,14 +1,16 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/spf13/cobra"
+	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/agents"
 	"github.com/zzet/gortex/internal/agents/aider"
@@ -33,6 +35,7 @@ import (
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/parser/languages"
 	"github.com/zzet/gortex/internal/query"
+	"github.com/zzet/gortex/internal/progress"
 	genskills "github.com/zzet/gortex/internal/skills"
 	"github.com/zzet/gortex/internal/workspace"
 )
@@ -117,7 +120,7 @@ func buildRegistry() *agents.Registry {
 	return r
 }
 
-func runInit(cmd *cobra.Command, args []string) error {
+func runInit(cmd *cobra.Command, args []string) (err error) {
 	root := "."
 	if len(args) > 0 {
 		root = args[0]
@@ -172,6 +175,27 @@ func runInit(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	realStderr := cmd.ErrOrStderr()
+	sp := progress.NewSpinner(realStderr)
+	if noProgress {
+		sp.Disable()
+	}
+	sp.Start("Initializing gortex")
+
+	// Buffer chatty adapter logs while the animation is running. On success
+	// drop them — the summary already conveys outcome. On failure replay
+	// them so the user can debug. env.Stderr is captured AFTER the swap so
+	// adapters write into the buffer too.
+	var (
+		chatter bytes.Buffer
+		results []*agents.Result
+		opts    agents.ApplyOpts
+	)
+	captured := sp.Enabled()
+	if captured {
+		cmd.SetErr(&chatter)
+	}
+
 	home, _ := os.UserHomeDir()
 	env := agents.Env{
 		Root:         absRoot,
@@ -182,21 +206,47 @@ func runInit(cmd *cobra.Command, args []string) error {
 		AnalyzeRepo:  initAnalyze,
 		Stderr:       cmd.ErrOrStderr(),
 	}
+	defer func() {
+		if err != nil {
+			sp.Fail(err)
+		} else {
+			sp.Done()
+		}
+		if captured {
+			cmd.SetErr(realStderr)
+			if err != nil {
+				_, _ = io.Copy(realStderr, &chatter)
+			}
+		}
+		if err == nil {
+			emitHumanSummary(realStderr, results, opts)
+		}
+	}()
 
 	// Indexing powers both --analyze (codebase overview in
 	// CLAUDE.md) and --skills (community routing in every per-repo
 	// instructions surface). Index once, feed both.
 	needIndex := initAnalyze || initSkills
 	if needIndex {
-		g, idxErr := indexRepoForInit(absRoot, cmd.ErrOrStderr())
+		sp.Set("Indexing repository", absRoot)
+		ctx := progress.WithReporter(context.Background(), sp)
+		// Silence zap info logs from the indexer when the spinner is live;
+		// the spinner's sub-status already shows the same stage transitions.
+		var idxLogger *zap.Logger
+		if sp.Enabled() {
+			idxLogger = zap.NewNop()
+		}
+		g, idxErr := indexRepoForInit(ctx, absRoot, idxLogger)
 		if idxErr != nil {
 			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "[gortex init] indexing failed: %v — proceeding without analysis/skills\n", idxErr)
 		} else {
 			if initAnalyze {
+				sp.Set("Analyzing codebase", "")
 				eng := query.NewEngine(g)
 				env.AnalyzedOverview = claudemd.Generate(eng, 180)
 			}
 			if initSkills {
+				sp.Set("Generating skills", "")
 				generated, routing := genskills.Build(g, genskills.BuildOpts{
 					MinSize:   initSkillsMinSize,
 					MaxSkills: initSkillsMaxSkills,
@@ -204,34 +254,37 @@ func runInit(cmd *cobra.Command, args []string) error {
 				if len(generated) > 0 {
 					env.GeneratedSkills = toEnvSkills(generated)
 					env.SkillsRouting = routing
-					_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "[gortex init] generated %d community skill(s)\n", len(generated))
+					sp.Set("", fmt.Sprintf("%d community skill(s)", len(generated)))
 				} else {
-					_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "[gortex init] no communities large enough (min-size: %d) — skipping skills\n", initSkillsMinSize)
+					sp.Set("", fmt.Sprintf("no communities large enough (min-size: %d)", initSkillsMinSize))
 				}
 			}
 		}
 	}
 
+	sp.Set("Configuring editors", "")
 	registry := buildRegistry()
 	selected, err := registry.Filter(initAgents, initAgentsSkip)
 	if err != nil {
 		return err
 	}
 
-	opts := agents.ApplyOpts{DryRun: initDryRun, Force: initForce}
-	results := make([]*agents.Result, 0, len(selected))
+	opts = agents.ApplyOpts{DryRun: initDryRun, Force: initForce}
+	results = make([]*agents.Result, 0, len(selected))
 	for _, a := range selected {
-		r, err := a.Apply(env, opts)
-		if err != nil {
+		sp.Set("", a.Name())
+		r, applyErr := a.Apply(env, opts)
+		if applyErr != nil {
 			if a.Name() == claudecode.Name {
-				return fmt.Errorf("%s: %w", a.Name(), err)
+				return fmt.Errorf("%s: %w", a.Name(), applyErr)
 			}
-			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "[gortex init] warning: %s setup failed: %v\n", a.Name(), err)
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "[gortex init] warning: %s setup failed: %v\n", a.Name(), applyErr)
 		}
 		if r != nil {
 			results = append(results, r)
 		}
 	}
+	sp.Set("", fmt.Sprintf("%d adapter(s) configured", len(results)))
 
 	// Always update Gortex's own global config so the daemon picks
 	// up this repo next time it starts (harmless when no daemon).
@@ -246,7 +299,6 @@ func runInit(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	}
-	emitHumanSummary(cmd.ErrOrStderr(), results, opts)
 	return nil
 }
 
@@ -270,8 +322,14 @@ func toEnvSkills(src []genskills.GeneratedSkill) []agents.GeneratedSkill {
 // indexRepoForInit runs a one-shot index of the repo. Kept inside
 // cmd/gortex (not an adapter) because the indexer pulls in many
 // gortex-internal packages we'd rather not leak into internal/agents.
-func indexRepoForInit(root string, w io.Writer) (*graph.Graph, error) {
-	logger := newLogger()
+// The ctx carries a progress.Reporter so the caller's spinner picks up
+// stage transitions ("walking files", "parsing", …) as sub-status.
+// Pass a Nop logger when running under an animated spinner so structured
+// info logs don't duplicate the mesh frame.
+func indexRepoForInit(ctx context.Context, root string, logger *zap.Logger) (*graph.Graph, error) {
+	if logger == nil {
+		logger = newLogger()
+	}
 	defer func() { _ = logger.Sync() }()
 
 	cfg, err := config.Load("")
@@ -284,13 +342,9 @@ func indexRepoForInit(root string, w io.Writer) (*graph.Graph, error) {
 	languages.RegisterAll(reg)
 
 	idx := indexer.New(g, reg, cfg.Index, logger)
-	_, _ = fmt.Fprintf(w, "[gortex init] indexing %s...\n", root)
-	result, err := idx.Index(root)
-	if err != nil {
+	if _, err := idx.IndexCtx(ctx, root); err != nil {
 		return nil, err
 	}
-	_, _ = fmt.Fprintf(w, "[gortex init] indexed %d files (%d nodes, %d edges) in %dms\n",
-		result.FileCount, result.NodeCount, result.EdgeCount, result.DurationMs)
 	return g, nil
 }
 
@@ -312,59 +366,10 @@ func emitJSONReport(w io.Writer, results []*agents.Result, opts agents.ApplyOpts
 
 // emitHumanSummary prints the per-agent file counts to stderr.
 func emitHumanSummary(w io.Writer, results []*agents.Result, opts agents.ApplyOpts) {
-	_, _ = fmt.Fprintf(w, "\n[gortex init] done")
-	if opts.DryRun {
-		_, _ = fmt.Fprintf(w, " (dry-run — no files written)")
-	}
-	_, _ = fmt.Fprintf(w, ":\n")
-	for _, r := range results {
-		if r == nil {
-			continue
-		}
-		detected := "detected"
-		if !r.Detected {
-			detected = "not detected"
-		}
-		_, _ = fmt.Fprintf(w, "  • %s — %s, %d file(s) [%s]\n", r.Name, detected, len(r.Files), countByAction(r.Files))
-	}
-	_, _ = fmt.Fprintln(w, "\nCommit .mcp.json, .claude/commands/, .claude/settings.json, CLAUDE.md, and any detected agent configs so your team gets Gortex automatically.")
-	_, _ = fmt.Fprintln(w, "If you haven't already, run `gortex install` once per machine to set up user-level integration.")
-}
-
-// countByAction renders "create=3 merge=1 skip=2" style line.
-func countByAction(files []agents.FileAction) string {
-	var c, m, s, wc, wm int
-	for _, f := range files {
-		switch f.Action {
-		case agents.ActionCreate:
-			c++
-		case agents.ActionMerge:
-			m++
-		case agents.ActionSkip:
-			s++
-		case agents.ActionWouldCreate:
-			wc++
-		case agents.ActionWouldMerge:
-			wm++
-		}
-	}
-	parts := []string{}
-	if c > 0 {
-		parts = append(parts, fmt.Sprintf("create=%d", c))
-	}
-	if m > 0 {
-		parts = append(parts, fmt.Sprintf("merge=%d", m))
-	}
-	if s > 0 {
-		parts = append(parts, fmt.Sprintf("skip=%d", s))
-	}
-	if wc > 0 {
-		parts = append(parts, fmt.Sprintf("would-create=%d", wc))
-	}
-	if wm > 0 {
-		parts = append(parts, fmt.Sprintf("would-merge=%d", wm))
-	}
-	return strings.Join(parts, " ")
+	emitAgentSummary(w, results, opts, []string{
+		"commit .mcp.json, .claude/commands/, .claude/settings.json, CLAUDE.md, and any detected agent configs",
+		"run `gortex install` once per machine to wire user-level integration",
+	})
 }
 
 // ensureProjectMarker creates `.gortex/` at the repo root so that
