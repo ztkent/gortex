@@ -143,9 +143,76 @@ func TestMultiIndexer_IndexAll_MultiRepo(t *testing.T) {
 	assert.Len(t, mi.AllMetadata(), 2)
 }
 
+func TestMultiIndexer_IndexAll_SingleRepoLoadsWorkspaceExclude(t *testing.T) {
+	dir := setupRepoDir(t, "myrepo")
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "ignored"), 0o755))
+	writeFile(t, filepath.Join(dir, "ignored", "ignored.go"), "package main\nfunc Ignored() {}\n")
+	writeFile(t, filepath.Join(dir, ".gortex.yaml"), "workspace: shared\nproject: app\nexclude:\n  - ignored/**\n")
+
+	tmpCfg := filepath.Join(t.TempDir(), "config.yaml")
+	gc := &config.GlobalConfig{Repos: []config.RepoEntry{{Path: dir, Name: "myrepo"}}}
+	gc.SetConfigPath(tmpCfg)
+	require.NoError(t, gc.Save())
+
+	cm, err := config.NewConfigManager(tmpCfg)
+	require.NoError(t, err)
+
+	g := graph.New()
+	mi := NewMultiIndexer(g, newTestRegistry(), search.NewBM25(), cm, zap.NewNop())
+
+	_, err = mi.IndexAll()
+	require.NoError(t, err)
+
+	for _, n := range g.AllNodes() {
+		assert.NotContains(t, n.FilePath, "ignored/ignored.go")
+		assert.NotContains(t, n.ID, "Ignored")
+		if n.Kind != graph.KindFile && n.Kind != graph.KindImport {
+			assert.Equal(t, "shared", n.WorkspaceID)
+			assert.Equal(t, "app", n.ProjectID)
+		}
+	}
+}
+
+func TestMultiIndexer_IndexAll_MultiRepoLoadsWorkspaceExclude(t *testing.T) {
+	repoA := setupRepoDir(t, "repo-a")
+	repoB := setupRepoDir(t, "repo-b")
+	require.NoError(t, os.MkdirAll(filepath.Join(repoA, "ignored"), 0o755))
+	writeFile(t, filepath.Join(repoA, "ignored", "ignored.go"), "package main\nfunc Ignored() {}\n")
+	writeFile(t, filepath.Join(repoA, ".gortex.yaml"), "workspace: shared\nproject: api\nexclude:\n  - ignored/**\n")
+
+	tmpCfg := filepath.Join(t.TempDir(), "config.yaml")
+	gc := &config.GlobalConfig{
+		Repos: []config.RepoEntry{
+			{Path: repoA, Name: "repo-a"},
+			{Path: repoB, Name: "repo-b"},
+		},
+	}
+	gc.SetConfigPath(tmpCfg)
+	require.NoError(t, gc.Save())
+
+	cm, err := config.NewConfigManager(tmpCfg)
+	require.NoError(t, err)
+
+	g := graph.New()
+	mi := NewMultiIndexer(g, newTestRegistry(), search.NewBM25(), cm, zap.NewNop())
+
+	_, err = mi.IndexAll()
+	require.NoError(t, err)
+
+	for _, n := range g.AllNodes() {
+		assert.NotContains(t, n.FilePath, "ignored/ignored.go")
+		assert.NotContains(t, n.ID, "Ignored")
+		if n.RepoPrefix == "repo-a" && n.Kind != graph.KindFile && n.Kind != graph.KindImport {
+			assert.Equal(t, "shared", n.WorkspaceID)
+			assert.Equal(t, "api", n.ProjectID)
+		}
+	}
+}
+
 func TestMultiIndexer_IndexRepo(t *testing.T) {
 	repoA := setupRepoDir(t, "repo-a")
 	repoB := setupRepoDir(t, "repo-b")
+	writeFile(t, filepath.Join(repoA, ".gortex.yaml"), "workspace: shared\nproject: api\n")
 
 	tmpCfg := filepath.Join(t.TempDir(), "config.yaml")
 	gc := &config.GlobalConfig{
@@ -178,6 +245,12 @@ func TestMultiIndexer_IndexRepo(t *testing.T) {
 	assert.Equal(t, repoBNodes, len(g.GetRepoNodes("repo-b")))
 	// Total should be roughly the same (re-indexed, not duplicated).
 	assert.InDelta(t, nodesBefore, g.NodeCount(), 2)
+	for _, n := range g.GetRepoNodes("repo-a") {
+		if n.Kind != graph.KindFile && n.Kind != graph.KindImport {
+			assert.Equal(t, "shared", n.WorkspaceID)
+			assert.Equal(t, "api", n.ProjectID)
+		}
+	}
 }
 
 func TestMultiIndexer_IndexRepo_NotFound(t *testing.T) {

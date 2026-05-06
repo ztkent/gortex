@@ -163,6 +163,7 @@ func (mi *MultiIndexer) indexSingleRepo(entry config.RepoEntry) (map[string]*Ind
 	}
 
 	prefix := config.ResolvePrefix(entry)
+	mi.configMgr.LoadWorkspaceConfig(prefix, absPath)
 	cfg := mi.configMgr.GetRepoConfig(prefix)
 
 	idx := New(mi.graph, mi.registry, cfg.Index, mi.logger)
@@ -170,6 +171,9 @@ func (mi *MultiIndexer) indexSingleRepo(entry config.RepoEntry) (map[string]*Ind
 	if mi.embedder != nil {
 		idx.SetEmbedder(mi.embedder)
 	}
+	entryCopy := entry
+	idx.SetWorkspaceID(resolveWorkspaceID(&entryCopy, cfg, prefix))
+	idx.SetProjectID(resolveProjectID(&entryCopy, cfg, prefix))
 	// No repo prefix in single-repo mode.
 
 	result, err := idx.Index(absPath)
@@ -249,6 +253,7 @@ func (mi *MultiIndexer) indexMultiRepo(repos []config.RepoEntry) (map[string]*In
 				return
 			}
 
+			mi.configMgr.LoadWorkspaceConfig(prefix, absPath)
 			cfg := mi.configMgr.GetRepoConfig(prefix)
 			idx := New(mi.graph, mi.registry, cfg.Index, mi.logger)
 			idx.search = mi.search
@@ -256,6 +261,9 @@ func (mi *MultiIndexer) indexMultiRepo(repos []config.RepoEntry) (map[string]*In
 				idx.SetEmbedder(mi.embedder)
 			}
 			idx.SetRepoPrefix(prefix)
+			entryCopy := e
+			idx.SetWorkspaceID(resolveWorkspaceID(&entryCopy, cfg, prefix))
+			idx.SetProjectID(resolveProjectID(&entryCopy, cfg, prefix))
 			idx.SetTrackedRepoModules(trackedModules)
 			// Defer the cross-cutting passes (ResolveAll, InferImplements,
 			// semantic enrich, contract extract+commit) so they don't race
@@ -356,6 +364,7 @@ func (mi *MultiIndexer) IndexRepo(repoPrefix string) (*IndexResult, error) {
 		mi.graph.EvictRepo(repoPrefix)
 	}
 
+	mi.configMgr.LoadWorkspaceConfig(repoPrefix, meta.RootPath)
 	cfg := mi.configMgr.GetRepoConfig(repoPrefix)
 	idx := New(mi.graph, mi.registry, cfg.Index, mi.logger)
 	idx.search = mi.search
@@ -365,6 +374,9 @@ func (mi *MultiIndexer) IndexRepo(repoPrefix string) (*IndexResult, error) {
 	if mi.IsMultiRepo() {
 		idx.SetRepoPrefix(repoPrefix)
 	}
+	entry := mi.configMgr.Global().FindRepoByPrefix(repoPrefix)
+	idx.SetWorkspaceID(resolveWorkspaceID(entry, cfg, repoPrefix))
+	idx.SetProjectID(resolveProjectID(entry, cfg, repoPrefix))
 
 	result, err := idx.Index(meta.RootPath)
 	if err != nil {
