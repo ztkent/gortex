@@ -465,6 +465,18 @@ func encodeAnalyze(kind string, payload any) ([]byte, error) {
 			}
 		}
 		return buf.Bytes(), enc.Close()
+	case "string_emitters":
+		items, _ := payload.([]stringEmitterItem)
+		enc := newGCX(&buf, "analyze.string_emitters",
+			[]string{"id", "context", "value", "emits", "emitters"},
+			"count", fmt.Sprintf("%d", len(items)),
+		)
+		for _, it := range items {
+			if err := enc.WriteRow(it.ID, it.Context, it.Value, it.Emits, it.Emitters); err != nil {
+				return nil, err
+			}
+		}
+		return buf.Bytes(), enc.Close()
 	case "error_surface":
 		items, _ := payload.([]errorSurfaceItem)
 		enc := newGCX(&buf, "analyze.error_surface",

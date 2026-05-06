@@ -216,6 +216,7 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 	var fieldValSels []goDeferredValueSel
 	var fieldValIdents []goDeferredValueIdent
 	var observabilityEvents []goObservabilityEvent
+	var stringEvents []goStringEvent
 	var flagEvents []goFlagEvent
 	var configEvents []goConfigEvent
 	var sqlEvents []goSQLEvent
@@ -271,6 +272,31 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 					method: method,
 					name:   name,
 					line:   expr.StartLine + 1,
+				})
+			}
+			receiverText := m.Captures["callm.receiver"].Text
+			if name, ok := detectGoMetric(expr.Node, method, src); ok {
+				stringEvents = append(stringEvents, goStringEvent{
+					context: stringCtxMetric,
+					method:  method,
+					value:   name,
+					line:    expr.StartLine + 1,
+				})
+			}
+			if msg, ok := detectGoErrorMessage(expr.Node, receiverText, method, src); ok {
+				stringEvents = append(stringEvents, goStringEvent{
+					context: stringCtxErrorMsg,
+					method:  receiverText + "." + method,
+					value:   msg,
+					line:    expr.StartLine + 1,
+				})
+			}
+			if route, ok := detectGoRoute(expr.Node, method, src); ok {
+				stringEvents = append(stringEvents, goStringEvent{
+					context: stringCtxRoute,
+					method:  method,
+					value:   route,
+					line:    expr.StartLine + 1,
 				})
 			}
 			if provider, flagName, ok := detectGoFlagCheck(expr.Node, method, src); ok {
@@ -495,6 +521,11 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 
 	// --- Observability events ---
 	emitGoObservabilityEvents(observabilityEvents,
+		func(line int) string { return findEnclosingFunc(funcRanges, line) },
+		filePath, result)
+
+	// --- String observations (metrics, error messages, routes) ---
+	emitGoStringEvents(stringEvents,
 		func(line int) string { return findEnclosingFunc(funcRanges, line) },
 		filePath, result)
 

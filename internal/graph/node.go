@@ -98,6 +98,16 @@ const (
 	// KindLicense represents an SPDX license identifier. ID convention:
 	// `license::<spdx>`. Files link to it via EdgeLicensedAs.
 	KindLicense NodeKind = "license"
+	// KindString represents a string literal that crosses an API
+	// boundary worth tracking — Datadog/Prometheus metric names,
+	// errors.New / fmt.Errorf messages, raw HTTP route paths, and
+	// (later) HTML class/id values. ID convention:
+	// `string::<context>::<value-or-hash>`. Context ∈
+	// metric|error_msg|route|html_class|html_id|… EdgeEmits links the
+	// enclosing function/method to the string node, mirroring KindEvent.
+	// Per-repo: applyRepoPrefix prefixes every node ID with the repo
+	// slug so two repos that emit the same string don't collide.
+	KindString NodeKind = "string"
 )
 
 var validNodeKinds = map[NodeKind]bool{
@@ -111,7 +121,7 @@ var validNodeKinds = map[NodeKind]bool{
 	KindTable: true, KindColumn: true, KindConfigKey: true,
 	KindFlag: true, KindEvent: true, KindMigration: true,
 	KindFixture: true, KindTodo: true, KindTeam: true,
-	KindRelease: true, KindLicense: true,
+	KindRelease: true, KindLicense: true, KindString: true,
 }
 
 type Node struct {

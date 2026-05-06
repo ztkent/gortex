@@ -650,10 +650,12 @@ func (s *Server) handleAnalyze(ctx context.Context, req mcp.CallToolRequest) (*m
 		return s.handleAnalyzeConfigReaders(ctx, req)
 	case "event_emitters":
 		return s.handleAnalyzeEventEmitters(ctx, req)
+	case "string_emitters":
+		return s.handleAnalyzeStringEmitters(ctx, req)
 	case "error_surface":
 		return s.handleAnalyzeErrorSurface(ctx, req)
 	default:
-		return mcp.NewToolResultError("unknown analyze kind: " + kind + " (expected: dead_code, hotspots, cycles, would_create_cycle, todos, blame, coverage, stale_code, ownership, coverage_gaps, stale_flags, releases, cgo_users, wasm_users, orphan_tables, unreferenced_tables, coverage_summary, channel_ops, goroutine_spawns, field_writers, annotation_users, config_readers, event_emitters, error_surface)"), nil
+		return mcp.NewToolResultError("unknown analyze kind: " + kind + " (expected: dead_code, hotspots, cycles, would_create_cycle, todos, blame, coverage, stale_code, ownership, coverage_gaps, stale_flags, releases, cgo_users, wasm_users, orphan_tables, unreferenced_tables, coverage_summary, channel_ops, goroutine_spawns, field_writers, annotation_users, config_readers, event_emitters, string_emitters, error_surface)"), nil
 	}
 }
 
