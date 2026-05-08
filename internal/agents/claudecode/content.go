@@ -21,9 +21,7 @@ package claudecode
 import "github.com/zzet/gortex/internal/agents"
 
 // ProjectMCPJSON is the starter content for a project's .mcp.json
-// when no file exists yet. The --web flag is intentional: it turns
-// on the HTTP status page so users can peek at the index without
-// wiring anything else up.
+// when no file exists yet.
 const ProjectMCPJSON = `{
   "mcpServers": {
     "gortex": {
@@ -31,8 +29,7 @@ const ProjectMCPJSON = `{
       "args": [
         "mcp",
         "--index", ".",
-        "--watch",
-        "--web"
+        "--watch"
       ],
       "env": {
         "GORTEX_INDEX_WORKERS": "${GORTEX_WORKERS:-8}"

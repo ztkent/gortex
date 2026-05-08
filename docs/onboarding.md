@@ -93,13 +93,13 @@ gortex mcp --index . --watch
 
 `--watch` re-indexes changed files live via fsnotify. `--cache-dir ~/.cache/gortex` (default) saves snapshots between restarts so subsequent starts are ~200ms instead of 3-5s.
 
-To also get the web UI + HTTP server API:
+To also get the HTTP server API (the UI is a separate Next.js app in `web/` that talks to it over HTTP):
 
 ```bash
-gortex server --index . --web --watch
+gortex server --index . --watch
 ```
 
-Open `http://localhost:4747` for the force-directed graph explorer.
+`gortex server` listens on `http://localhost:4747` and exposes `/v1/*` (including `/v1/graph` and `/v1/events` for force-directed rendering).
 
 **Option B — your IDE starts it automatically.** The `.mcp.json` that `gortex init` created tells the IDE how to spawn `gortex mcp`. You don't run anything yourself. Claude Code, Cursor, and VS Code all work this way. Downside: each tool gets its own server process (memory cost scales with number of tools).
 
