@@ -11,11 +11,41 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 )
 
+// LSPRouter is the slice of lsp.Router that semantic.Manager needs to
+// drive batch enrichment without importing the lsp package directly
+// (which would create an import cycle, since lsp already imports
+// semantic for the Provider interface).
+type LSPRouter interface {
+	// EnabledSpecNames returns the names of LSP specs the user has
+	// enabled in config (no spawn implied — call ProviderForSpec to
+	// trigger lazy spawn).
+	EnabledSpecNames() []string
+
+	// SpecAvailable reports whether the named spec is enabled AND
+	// its command resolves on PATH. Pure read — no subprocess
+	// spawn. Used by Manager.HasProviders.
+	SpecAvailable(name string) bool
+
+	// ProviderForSpec lazy-spawns and returns the LSP provider for
+	// the given spec name as a semantic.Provider. Returns an error
+	// if the spec is not enabled or its command is not on PATH.
+	ProviderForSpec(name string) (Provider, error)
+
+	// Close shuts down every active provider. Called by Manager.Close.
+	Close() error
+}
+
 // Manager orchestrates multiple semantic providers and coordinates enrichment.
 type Manager struct {
 	providers []Provider
 	config    Config
 	logger    *zap.Logger
+
+	// lspRouter, when non-nil, owns subprocess lifecycle for LSP
+	// providers (idle reaper + LRU eviction + PATH-availability
+	// cache). EnrichAll asks it for providers via ProviderForSpec
+	// instead of holding hard references that would defeat reaping.
+	lspRouter LSPRouter
 
 	mu          sync.RWMutex
 	lastResults map[string]*EnrichResult // provider name → last result
@@ -42,6 +72,24 @@ func (m *Manager) RegisterProvider(p Provider) {
 	)
 }
 
+// SetLSPRouter installs the daemon-managed LSP router. Once set,
+// EnrichAll will lazy-spawn LSP providers via the router (allowing
+// idle reaping + LRU eviction) instead of expecting them to be
+// pre-registered via RegisterProvider. Pass nil to detach.
+//
+// Boot order matters — call SetLSPRouter before EnrichAll runs the
+// first time. The router does not need to be populated yet; specs are
+// resolved lazily via ProviderForSpec.
+func (m *Manager) SetLSPRouter(r LSPRouter) {
+	m.lspRouter = r
+}
+
+// LSPRouter returns the configured LSPRouter, or nil if none has been
+// installed.
+func (m *Manager) LSPRouter() LSPRouter {
+	return m.lspRouter
+}
+
 // EnrichAll runs all available providers against the graph.
 // For each language, only the highest-priority available provider runs.
 func (m *Manager) EnrichAll(g *graph.Graph, roots map[string]string) ([]*EnrichResult, error) {
@@ -50,6 +98,8 @@ func (m *Manager) EnrichAll(g *graph.Graph, roots map[string]string) ([]*EnrichR
 	}
 
 	// Build a map of language → sorted providers (by priority from config).
+	// This covers SCIP / go-analysis / legacy LSP providers eagerly
+	// registered via RegisterProvider.
 	langProviders := m.selectProviders()
 
 	var results []*EnrichResult
@@ -63,48 +113,97 @@ func (m *Manager) EnrichAll(g *graph.Graph, roots map[string]string) ([]*EnrichR
 			continue
 		}
 
-		// Run enrichment for each repo root.
-		for repoName, repoRoot := range roots {
-			start := time.Now()
-			m.logger.Info("semantic enrichment starting",
-				zap.String("provider", provider.Name()),
-				zap.String("language", lang),
-				zap.String("repo", repoName),
-			)
+		results = m.runEnrichForProvider(g, roots, lang, provider, results)
+	}
 
-			result, err := provider.Enrich(g, repoRoot)
+	// Router-backed LSP providers: lazy-spawn via the router so the
+	// idle reaper can recover the subprocess after this run finishes.
+	// Skip any language already covered by a higher-priority eager
+	// provider (selectProviders already picked the winner there).
+	if m.lspRouter != nil {
+		covered := make(map[string]bool, len(langProviders))
+		for lang := range langProviders {
+			covered[lang] = true
+		}
+		for _, name := range m.lspRouter.EnabledSpecNames() {
+			provider, err := m.lspRouter.ProviderForSpec(name)
 			if err != nil {
-				m.logger.Warn("semantic enrichment failed",
-					zap.String("provider", provider.Name()),
-					zap.String("language", lang),
+				m.logger.Debug("router-backed LSP provider unavailable, skipping",
+					zap.String("spec", name),
 					zap.Error(err),
 				)
 				continue
 			}
-
-			if result != nil {
-				result.DurationMs = time.Since(start).Milliseconds()
-				results = append(results, result)
-
-				m.mu.Lock()
-				m.lastResults[provider.Name()] = result
-				m.mu.Unlock()
-
-				m.logger.Info("semantic enrichment complete",
-					zap.String("provider", provider.Name()),
-					zap.String("language", lang),
-					zap.Int("confirmed", result.EdgesConfirmed),
-					zap.Int("added", result.EdgesAdded),
-					zap.Int("refuted", result.EdgesRefuted),
-					zap.Int("nodes_enriched", result.NodesEnriched),
-					zap.Float64("coverage", result.CoveragePercent),
-					zap.Int64("duration_ms", result.DurationMs),
-				)
+			langs := provider.Languages()
+			if len(langs) == 0 {
+				continue
 			}
+			// If every language this spec serves is already covered
+			// by a higher-priority eager provider, skip the LSP run.
+			allCovered := true
+			for _, l := range langs {
+				if !covered[l] {
+					allCovered = false
+					break
+				}
+			}
+			if allCovered {
+				continue
+			}
+			// Use the first language as the report label; the
+			// provider.Enrich call covers every language the LSP
+			// owns in one pass.
+			results = m.runEnrichForProvider(g, roots, langs[0], provider, results)
 		}
 	}
 
 	return results, nil
+}
+
+// runEnrichForProvider executes Enrich for one provider against every
+// repo root and appends the results. Extracted so EnrichAll can share
+// the logging + lastResults bookkeeping between eager and Router-backed
+// providers.
+func (m *Manager) runEnrichForProvider(g *graph.Graph, roots map[string]string, lang string, provider Provider, results []*EnrichResult) []*EnrichResult {
+	for repoName, repoRoot := range roots {
+		start := time.Now()
+		m.logger.Info("semantic enrichment starting",
+			zap.String("provider", provider.Name()),
+			zap.String("language", lang),
+			zap.String("repo", repoName),
+		)
+
+		result, err := provider.Enrich(g, repoRoot)
+		if err != nil {
+			m.logger.Warn("semantic enrichment failed",
+				zap.String("provider", provider.Name()),
+				zap.String("language", lang),
+				zap.Error(err),
+			)
+			continue
+		}
+
+		if result != nil {
+			result.DurationMs = time.Since(start).Milliseconds()
+			results = append(results, result)
+
+			m.mu.Lock()
+			m.lastResults[provider.Name()] = result
+			m.mu.Unlock()
+
+			m.logger.Info("semantic enrichment complete",
+				zap.String("provider", provider.Name()),
+				zap.String("language", lang),
+				zap.Int("confirmed", result.EdgesConfirmed),
+				zap.Int("added", result.EdgesAdded),
+				zap.Int("refuted", result.EdgesRefuted),
+				zap.Int("nodes_enriched", result.NodesEnriched),
+				zap.Float64("coverage", result.CoveragePercent),
+				zap.Int64("duration_ms", result.DurationMs),
+			)
+		}
+	}
+	return results
 }
 
 // EnrichFile runs incremental enrichment for a single file change.
@@ -213,12 +312,18 @@ func (m *Manager) Stats() []ProviderStatus {
 	return statuses
 }
 
-// Close shuts down all providers.
+// Close shuts down all providers, including any LSP subprocesses
+// owned by the installed LSPRouter.
 func (m *Manager) Close() error {
 	var errs []error
 	for _, p := range m.providers {
 		if err := p.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("closing %s: %w", p.Name(), err))
+		}
+	}
+	if m.lspRouter != nil {
+		if err := m.lspRouter.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("closing lsp router: %w", err))
 		}
 	}
 	if len(errs) > 0 {
@@ -233,10 +338,20 @@ func (m *Manager) Enabled() bool {
 }
 
 // HasProviders returns whether any providers are registered and available.
+// Includes Router-enabled LSP specs — Router providers are spawned
+// lazily but their availability is decided by exec.LookPath, so
+// Router.EnabledSpecNames() seen-and-resolvable counts as "have one".
 func (m *Manager) HasProviders() bool {
 	for _, p := range m.providers {
 		if p.Available() {
 			return true
+		}
+	}
+	if m.lspRouter != nil {
+		for _, name := range m.lspRouter.EnabledSpecNames() {
+			if m.lspRouter.SpecAvailable(name) {
+				return true
+			}
 		}
 	}
 	return false

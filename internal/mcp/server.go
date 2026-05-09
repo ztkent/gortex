@@ -114,6 +114,11 @@ type Server struct {
 	combo            *comboManager
 	frecency         *frecencyTracker
 
+	// diagBroadcaster forwards LSP `publishDiagnostics` payloads to
+	// MCP clients as `notifications/diagnostics`. Lazy-initialised by
+	// SetLSPDiagnosticsBroadcasting; nil until then.
+	diagBroadcaster *diagnosticsBroadcaster
+
 	// bind is the active two-entry-point handshake result.
 	// nil when no handshake has been performed (legacy callers, tests
 	// that construct the server directly). Tool handlers consult it
@@ -391,6 +396,7 @@ func NewServer(engine *query.Engine, g *graph.Graph, idx *indexer.Indexer, watch
 	s.registerAnalysisTools()
 	s.registerEnhancementTools()
 	s.registerLSPTools()
+	s.registerDiagnosticsTools()
 	s.registerResources()
 	s.registerPrompts()
 

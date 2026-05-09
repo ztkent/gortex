@@ -217,6 +217,23 @@ func runServer(_ *cobra.Command, _ []string) error {
 		// compiler-grade type info. See spec-contract-extraction.md §4.5.
 		contracts.SetBindingResolver(goProvider)
 
+		// Daemon-managed LSP router. Same shape as `gortex mcp` —
+		// owns subprocess lifecycle for every spec the user opted
+		// into, lazy-spawns on first request, idle reaper + LRU
+		// eviction. Manager borrows providers via the LSPRouter
+		// interface for batch enrichment; the MCP server reads it
+		// back through SemanticManager().LSPRouter() for on-demand
+		// requests.
+		lspWorkspace := serverIndex
+		if lspWorkspace == "" {
+			lspWorkspace, _ = os.Getwd()
+		}
+		lspRouter := lsp.NewRouter(lspWorkspace, logger).
+			WithIdleTimeout(10 * time.Minute).
+			WithReaperInterval(time.Minute).
+			WithMaxAlive(6)
+		semMgr.SetLSPRouter(lspRouter)
+
 		for _, pc := range semCfg.Providers {
 			if !pc.Enabled {
 				continue
@@ -224,18 +241,18 @@ func runServer(_ *cobra.Command, _ []string) error {
 			switch {
 			case strings.HasPrefix(pc.Name, "scip-") && pc.Command != "":
 				semMgr.RegisterProvider(scip.NewProvider(pc.Command, pc.Args, pc.Languages, semCfg.TimeoutSeconds, logger))
-			case lsp.SpecByName(pc.Name) != nil || pc.Daemon:
-				// Either a known LSP server (gopls, tsserver,
-				// pyright, rust-analyzer, clangd, jdtls, …) or a
-				// user-defined daemon. Build the Provider via the
-				// spec when one exists so file-extension routing
-				// and per-extension languageId resolution work; fall
-				// back to the legacy NewProvider for unknown daemons.
-				if spec := lsp.SpecByName(pc.Name); spec != nil {
-					semMgr.RegisterProvider(lsp.NewProviderFromSpec(spec, logger))
-				} else {
-					semMgr.RegisterProvider(lsp.NewProvider(pc.Command, pc.Args, pc.Languages, pc.Daemon, pc.MaxParallel, logger))
-				}
+			case lsp.SpecByName(pc.Name) != nil:
+				// Known registry spec (gopls, tsserver, pyright,
+				// rust-analyzer, clangd, jdtls, …). Router owns
+				// lifecycle — register the spec so it shows up in
+				// EnabledSpecNames; first ForSpec call triggers the
+				// lazy spawn.
+				lspRouter.RegisterSpec(lsp.SpecByName(pc.Name))
+			case pc.Daemon:
+				// Custom user-defined daemon (no registry spec) —
+				// keep the legacy eager-construction path so
+				// out-of-registry LSP servers still work.
+				semMgr.RegisterProvider(lsp.NewProvider(pc.Command, pc.Args, pc.Languages, pc.Daemon, pc.MaxParallel, logger))
 			}
 		}
 
@@ -299,6 +316,11 @@ func runServer(_ *cobra.Command, _ []string) error {
 
 	if semMgr := idx.SemanticManager(); semMgr != nil {
 		srv.SetSemanticManager(semMgr)
+		// Hook the LSP router (if any) into the MCP
+		// `notifications/diagnostics` broadcaster so subscribed
+		// clients receive publishDiagnostics in real time. No-op
+		// when no router is wired.
+		srv.SetLSPDiagnosticsBroadcasting()
 	}
 
 	// Create persistence store.

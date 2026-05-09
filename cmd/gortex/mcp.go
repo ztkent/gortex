@@ -210,7 +210,23 @@ func runMCP(cmd *cobra.Command, args []string) error {
 		// compiler-grade type info. See spec-contract-extraction.md §4.5.
 		contracts.SetBindingResolver(goProvider)
 
-		// Register SCIP providers from config.
+		// Daemon-managed LSP router. Owns subprocess lifecycle for
+		// every server in the registry that the user enables — lazy
+		// spawn on first request, idle reaper, LRU eviction. Manager
+		// borrows providers from it via the LSPRouter interface; the
+		// MCP server reads it back through SemanticManager().LSPRouter()
+		// for on-demand requests (get_diagnostics / get_code_actions
+		// / apply_code_action / fix_all_in_file).
+		lspWorkspace := mcpIndex
+		if lspWorkspace == "" {
+			lspWorkspace, _ = os.Getwd()
+		}
+		lspRouter := lsp.NewRouter(lspWorkspace, logger).
+			WithIdleTimeout(10 * time.Minute).
+			WithReaperInterval(time.Minute).
+			WithMaxAlive(6)
+		semMgr.SetLSPRouter(lspRouter)
+
 		for _, pc := range semCfg.Providers {
 			if !pc.Enabled {
 				continue
@@ -218,12 +234,16 @@ func runMCP(cmd *cobra.Command, args []string) error {
 			switch {
 			case strings.HasPrefix(pc.Name, "scip-") && pc.Command != "":
 				semMgr.RegisterProvider(scip.NewProvider(pc.Command, pc.Args, pc.Languages, semCfg.TimeoutSeconds, logger))
-			case lsp.SpecByName(pc.Name) != nil || pc.Daemon:
-				if spec := lsp.SpecByName(pc.Name); spec != nil {
-					semMgr.RegisterProvider(lsp.NewProviderFromSpec(spec, logger))
-				} else {
-					semMgr.RegisterProvider(lsp.NewProvider(pc.Command, pc.Args, pc.Languages, pc.Daemon, pc.MaxParallel, logger))
-				}
+			case lsp.SpecByName(pc.Name) != nil:
+				// Router owns lifecycle — register the spec so it
+				// shows up in EnabledSpecNames; first ForSpec call
+				// triggers the lazy spawn.
+				lspRouter.RegisterSpec(lsp.SpecByName(pc.Name))
+			case pc.Daemon:
+				// Custom user-defined daemon (no registry spec) —
+				// keep the legacy eager-construction path so out-of-
+				// registry LSP servers still work.
+				semMgr.RegisterProvider(lsp.NewProvider(pc.Command, pc.Args, pc.Languages, pc.Daemon, pc.MaxParallel, logger))
 			}
 		}
 
@@ -292,6 +312,11 @@ func runMCP(cmd *cobra.Command, args []string) error {
 	// Wire semantic manager to MCP server for stats reporting.
 	if semMgr := idx.SemanticManager(); semMgr != nil {
 		srv.SetSemanticManager(semMgr)
+		// Hook the LSP router (if any) into the MCP
+		// `notifications/diagnostics` broadcaster so subscribed
+		// clients receive publishDiagnostics in real time. No-op
+		// when no router is wired.
+		srv.SetLSPDiagnosticsBroadcasting()
 	}
 
 	// Initialize feedback persistence for cross-session context learning.

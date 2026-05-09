@@ -52,6 +52,13 @@ type Provider struct {
 	// loops re-collecting diagnostics after each apply).
 	diagWaitersMu sync.Mutex
 	diagWaiters   map[string][]chan []Diagnostic
+
+	// diagHookMu guards diagHook — a single persistent subscriber the
+	// router (or any caller) can install to be notified on every
+	// publishDiagnostics. The hook MUST be non-blocking; it runs on
+	// the LSP client's message-pump goroutine.
+	diagHookMu sync.RWMutex
+	diagHook   func(absPath string, diags []Diagnostic)
 }
 
 // NewProvider creates an LSP provider.
@@ -468,7 +475,14 @@ func (p *Provider) ensureClient(workspaceRoot string) error {
 }
 
 // fanoutDiagnostics wakes everyone who called WaitForDiagnostics for
-// this absPath. Run with no provider lock held.
+// this absPath AND invokes the persistent hook installed via
+// SetDiagnosticsHook (if any). Runs with no provider lock held.
+//
+// The hook MUST NOT block — this method runs on the LSP client's
+// message-pump goroutine. The MCP-level wiring uses
+// `SendNotificationToAllClients` which is non-blocking by design (the
+// SDK drops to an error hook when a session's notification channel is
+// full).
 func (p *Provider) fanoutDiagnostics(absPath string, diags []Diagnostic) {
 	p.diagWaitersMu.Lock()
 	waiters := p.diagWaiters[absPath]
@@ -480,6 +494,24 @@ func (p *Provider) fanoutDiagnostics(absPath string, diags []Diagnostic) {
 		default:
 		}
 	}
+	p.diagHookMu.RLock()
+	hook := p.diagHook
+	p.diagHookMu.RUnlock()
+	if hook != nil {
+		hook(absPath, diags)
+	}
+}
+
+// SetDiagnosticsHook installs a persistent callback invoked for every
+// `textDocument/publishDiagnostics` the LSP server emits for this
+// provider. Pass nil to detach. The Router uses this to forward LSP
+// diagnostics to MCP clients via `notifications/diagnostics`.
+//
+// The hook MUST NOT block — see fanoutDiagnostics doc.
+func (p *Provider) SetDiagnosticsHook(hook func(absPath string, diags []Diagnostic)) {
+	p.diagHookMu.Lock()
+	p.diagHook = hook
+	p.diagHookMu.Unlock()
 }
 
 // uriToAbsPath converts a file:// URI to an absolute filesystem path.

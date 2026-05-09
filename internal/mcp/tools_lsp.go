@@ -253,6 +253,12 @@ func (s *Server) handleFixAllInFile(_ context.Context, req mcp.CallToolRequest) 
 // file path. The path may be repo-relative or absolute. Returns the
 // *lsp.Provider, the absolute path it routed to, and an error when no
 // provider applies.
+//
+// Resolution order: when SemanticManager().LSPRouter() returns a
+// concrete *lsp.Router, it wins (lazy spawn + idle reaper + LRU
+// eviction). Otherwise we fall back to scanning eagerly-registered
+// Providers via Manager.AllProviders() — the legacy path that still
+// covers user-defined daemons (`pc.Daemon` without a registry spec).
 func (s *Server) lspProviderForPath(path string) (*lsp.Provider, string, error) {
 	if s.semanticMgr == nil {
 		return nil, "", errors.New("semantic manager not configured")
@@ -264,6 +270,31 @@ func (s *Server) lspProviderForPath(path string) (*lsp.Provider, string, error) 
 	spec := lsp.SpecForPath(abs)
 	if spec == nil {
 		return nil, abs, fmt.Errorf("no LSP server registered for %s", filepath.Ext(abs))
+	}
+
+	// Router-managed lifecycle wins when configured. The router
+	// returns a semantic.Provider through the interface contract; we
+	// type-assert to *lsp.Provider here because the LSP-action surface
+	// needs the concrete methods (LastDiagnostics, GetCodeActions, …).
+	if r := s.lspRouter(); r != nil {
+		// Router only knows about specs the user enabled via config
+		// — SpecAvailable filters to "enabled AND on PATH" without
+		// spawning. Probe before ForSpec so an opt-out spec or a
+		// missing binary returns a clean no_lsp_for error.
+		if r.SpecAvailable(spec.Name) {
+			lp, err := r.ForSpec(spec)
+			if err != nil {
+				return nil, abs, fmt.Errorf("router spawn %s: %w", spec.Name, err)
+			}
+			root := s.workspaceRootFor(abs)
+			if err := lp.EnsureClient(root); err != nil {
+				return nil, abs, fmt.Errorf("ensure client %s: %w", spec.Name, err)
+			}
+			return lp, abs, nil
+		}
+		// Fall through to legacy scan — Router is in charge but the
+		// user may have an out-of-registry custom daemon registered
+		// the old way.
 	}
 
 	for _, p := range s.semanticMgr.AllProviders() {
@@ -285,6 +316,18 @@ func (s *Server) lspProviderForPath(path string) (*lsp.Provider, string, error) 
 		return lp, abs, nil
 	}
 	return nil, abs, fmt.Errorf("no LSP provider registered for languages %v", spec.Languages)
+}
+
+// lspRouter returns the semantic manager's LSP router as a concrete
+// *lsp.Router for use with the LSP-action MCP surface, or nil when no
+// router is wired (legacy boot paths, tests). Centralised here so the
+// type assertion lives in one place.
+func (s *Server) lspRouter() *lsp.Router {
+	if s.semanticMgr == nil {
+		return nil
+	}
+	r, _ := s.semanticMgr.LSPRouter().(*lsp.Router)
+	return r
 }
 
 // providerCovers reports whether the provider serves at least one

@@ -12,6 +12,12 @@ Two engine tiers are used:
   heuristics. Captures top-level symbols and imports; call edges vary per
   language.
 
+For sixteen of these languages an LSP server can additionally upgrade
+edges from `ast_inferred` to `lsp_resolved` and unlock the
+on-demand action tools (`get_diagnostics`, `get_code_actions`,
+`apply_code_action`, `fix_all_in_file`). See **[lsp.md](lsp.md)** for the
+server matrix, install commands, lifecycle knobs, and config schema.
+
 ## At a glance
 
 | Category | Count | Languages |
