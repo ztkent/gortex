@@ -148,3 +148,47 @@ func TestIsTOON_ExplicitFormatWins(t *testing.T) {
 	assert.False(t, srv.isGCX(ctx, req),
 		"format=toon must not also trigger gcx")
 }
+
+// TestRespondJSONOrTOON_RoutesByFormat pins the helper that 14
+// list-shaped tools share. With explicit format=toon the payload comes
+// back as TOON-marshalled text; with no format and an unknown client
+// it falls back to JSON. This is the single decision point most tools
+// route through, so a regression here would silently flip every
+// downstream consumer to the wrong format.
+func TestRespondJSONOrTOON_RoutesByFormat(t *testing.T) {
+	srv, _ := setupTestServer(t)
+	payload := map[string]any{"x": 1, "y": "two"}
+
+	// format=toon → TOON text result.
+	reqTOON := mcp.CallToolRequest{}
+	reqTOON.Params.Arguments = map[string]any{"format": "toon"}
+	res, err := srv.respondJSONOrTOON(context.Background(), reqTOON, payload)
+	assert.NoError(t, err)
+	assert.False(t, res.IsError)
+	tc, ok := res.Content[0].(mcp.TextContent)
+	assert.True(t, ok, "expected TextContent for TOON result")
+	// TOON encodes scalar map values with `key: value` lines; an empty
+	// or JSON-shaped payload would not contain that exact prefix.
+	assert.Contains(t, tc.Text, "x: 1")
+	assert.NotContains(t, tc.Text, "{")
+
+	// no format, unknown client → JSON fallback.
+	reqJSON := mcp.CallToolRequest{}
+	reqJSON.Params.Arguments = map[string]any{}
+	res, err = srv.respondJSONOrTOON(context.Background(), reqJSON, payload)
+	assert.NoError(t, err)
+	tc, ok = res.Content[0].(mcp.TextContent)
+	assert.True(t, ok)
+	assert.Contains(t, tc.Text, "{") // JSON object braces
+
+	// format=json overrides session default → JSON.
+	srv.NoteSessionClient("sess_T", "claude-code", "1.0") // session default would be gcx, not toon
+	ctx := WithSessionID(context.Background(), "sess_T")
+	reqExplicitJSON := mcp.CallToolRequest{}
+	reqExplicitJSON.Params.Arguments = map[string]any{"format": "json"}
+	res, err = srv.respondJSONOrTOON(ctx, reqExplicitJSON, payload)
+	assert.NoError(t, err)
+	tc, ok = res.Content[0].(mcp.TextContent)
+	assert.True(t, ok)
+	assert.Contains(t, tc.Text, "{")
+}

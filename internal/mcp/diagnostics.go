@@ -303,7 +303,7 @@ func (s *Server) handleSubscribeDiagnostics(ctx context.Context, req mcp.CallToo
 		PathPrefix:  req.GetString("path_prefix", ""),
 	}
 	replayed := s.diagBroadcaster.subscribe(id, opts)
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"subscribed":   true,
 		"session_id":   id,
 		"subscribers":  s.diagBroadcaster.subscriberCount(),
@@ -313,7 +313,7 @@ func (s *Server) handleSubscribeDiagnostics(ctx context.Context, req mcp.CallToo
 	})
 }
 
-func (s *Server) handleUnsubscribeDiagnostics(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleUnsubscribeDiagnostics(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	if s.diagBroadcaster == nil {
 		return mcp.NewToolResultError("diagnostics broadcaster is not configured"), nil
 	}
@@ -322,7 +322,7 @@ func (s *Server) handleUnsubscribeDiagnostics(ctx context.Context, _ mcp.CallToo
 		id = "embedded"
 	}
 	s.diagBroadcaster.unsubscribe(id)
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"subscribed":  false,
 		"session_id":  id,
 		"subscribers": s.diagBroadcaster.subscriberCount(),

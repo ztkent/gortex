@@ -145,7 +145,7 @@ func (s *Server) handleWinnowSymbols(ctx context.Context, req mcp.CallToolReques
 		row["contributions"] = floatMapRound(r.Contributions)
 		rows = append(rows, row)
 	}
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"results":   rows,
 		"total":     total,
 		"truncated": total > c.Limit,

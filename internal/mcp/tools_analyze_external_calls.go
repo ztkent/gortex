@@ -194,7 +194,7 @@ func (s *Server) externalCallsForModule(ctx context.Context, req mcp.CallToolReq
 			out["version"] = v
 		}
 	}
-	return mcp.NewToolResultJSON(out)
+	return s.respondJSONOrTOON(ctx, req, out)
 }
 
 func (s *Server) emitExternalCallsRollup(ctx context.Context, req mcp.CallToolRequest, rows []*externalModuleRow) (*mcp.CallToolResult, error) {
@@ -222,7 +222,7 @@ func (s *Server) emitExternalCallsRollup(ctx context.Context, req mcp.CallToolRe
 		}
 		return mcp.NewToolResultText(b.String()), nil
 	}
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"modules": rows,
 		"total":   len(rows),
 	})

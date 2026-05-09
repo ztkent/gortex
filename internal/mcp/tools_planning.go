@@ -71,7 +71,7 @@ func (s *Server) handlePlanTurn(ctx context.Context, req mcp.CallToolRequest) (*
 		topCandidateIDs = append(topCandidateIDs, c.ID)
 	}
 
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"task":              task,
 		"keywords":          keywords,
 		"recommended_calls": recs,

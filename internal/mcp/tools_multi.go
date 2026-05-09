@@ -95,7 +95,7 @@ func (s *Server) handleTrackRepository(ctx context.Context, req mcp.CallToolRequ
 	// Re-run analysis after adding a new repo.
 	s.RunAnalysis()
 
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"status":     "tracked",
 		"path":       path,
 		"prefix":     config.ResolvePrefix(entry),
@@ -135,7 +135,7 @@ func (s *Server) handleUntrackRepository(ctx context.Context, req mcp.CallToolRe
 	// Re-run analysis after removing a repo.
 	s.RunAnalysis()
 
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"status":        "untracked",
 		"prefix":        prefix,
 		"nodes_removed": nodesRemoved,
@@ -180,7 +180,7 @@ func (s *Server) handleSetActiveProject(ctx context.Context, req mcp.CallToolReq
 			zap.String("project", project), zap.Error(saveErr))
 	}
 
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"status":  "active",
 		"project": project,
 		"repos":   buildRepoList(repos),
@@ -188,9 +188,9 @@ func (s *Server) handleSetActiveProject(ctx context.Context, req mcp.CallToolReq
 }
 
 // handleGetActiveProject returns the current active project name and its repo list.
-func (s *Server) handleGetActiveProject(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleGetActiveProject(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	if s.configManager == nil {
-		return mcp.NewToolResultJSON(map[string]any{
+		return s.respondJSONOrTOON(ctx, req, map[string]any{
 			"project": "",
 			"repos":   []any{},
 		})
@@ -226,7 +226,7 @@ func (s *Server) handleGetActiveProject(_ context.Context, _ mcp.CallToolRequest
 		}
 	}
 
-	return mcp.NewToolResultJSON(result)
+	return s.respondJSONOrTOON(ctx, req, result)
 }
 
 // resolveRepoPrefix resolves a path-or-prefix string to a repo prefix by

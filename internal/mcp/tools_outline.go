@@ -21,7 +21,7 @@ import (
 // ~1k tokens even on large repos. For deeper exploration, the agent
 // follows up with smart_context, find_usages, etc. on specific symbols
 // surfaced here.
-func (s *Server) handleGetRepoOutline(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleGetRepoOutline(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	const (
 		topCommunitiesN  = 5
 		topHotspotsN     = 5
@@ -96,7 +96,7 @@ func (s *Server) handleGetRepoOutline(_ context.Context, _ mcp.CallToolRequest) 
 		})
 	}
 
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"summary":             summary,
 		"communities":         communitiesSection,
 		"hotspots":            hotspotsSection,

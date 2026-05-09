@@ -100,7 +100,7 @@ func (s *Server) handleAnalyzeStringEmitters(ctx context.Context, req mcp.CallTo
 		}
 		return mcp.NewToolResultText(b.String()), nil
 	}
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"strings": rows,
 		"total":   len(rows),
 	})

@@ -317,7 +317,7 @@ func (s *Server) handleEditFile(ctx context.Context, req mcp.CallToolRequest) (*
 		// Dry-run: validate everything but skip the write + reindex.
 		// Returns the same shape so callers can branch on dry_run for a
 		// preview before committing.
-		return mcp.NewToolResultJSON(map[string]any{
+		return s.respondJSONOrTOON(ctx, req, map[string]any{
 			"path":          relPath,
 			"status":        "would_apply",
 			"dry_run":       true,
@@ -340,7 +340,7 @@ func (s *Server) handleEditFile(ctx context.Context, req mcp.CallToolRequest) (*
 
 	reindexed := s.reindexFile(absPath)
 
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"path":          relPath,
 		"status":        "applied",
 		"replacements":  replacements,
@@ -381,7 +381,7 @@ func (s *Server) handleWriteFile(ctx context.Context, req mcp.CallToolRequest) (
 		if status == "overwritten" {
 			dryStatus = "would_overwrite"
 		}
-		return mcp.NewToolResultJSON(map[string]any{
+		return s.respondJSONOrTOON(ctx, req, map[string]any{
 			"path":          relPath,
 			"status":        dryStatus,
 			"dry_run":       true,
@@ -399,7 +399,7 @@ func (s *Server) handleWriteFile(ctx context.Context, req mcp.CallToolRequest) (
 
 	reindexed := s.reindexFile(absPath)
 
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"path":          relPath,
 		"status":        status,
 		"bytes_written": len(content),

@@ -109,7 +109,7 @@ func (s *Server) handleGetDiagnostics(ctx context.Context, req mcp.CallToolReque
 		diags = d
 	}
 
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"path":        path,
 		"diagnostics": diagsToWire(diags),
 		"total":       len(diags),
@@ -160,7 +160,7 @@ func (s *Server) handleGetCodeActions(ctx context.Context, req mcp.CallToolReque
 		}
 		wire = append(wire, entry)
 	}
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"path":     path,
 		"provider": provider.Name(),
 		"actions":  wire,
@@ -206,7 +206,7 @@ func (s *Server) handleApplyCodeAction(ctx context.Context, req mcp.CallToolRequ
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("apply failed: %v", err)), nil
 	}
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"path":          path,
 		"provider":      provider.Name(),
 		"applied":       chosen.Title,
@@ -239,7 +239,7 @@ func (s *Server) handleFixAllInFile(ctx context.Context, req mcp.CallToolRequest
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("fix-all failed: %v", err)), nil
 	}
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"path":              path,
 		"provider":          provider.Name(),
 		"iterations":        res.Iterations,

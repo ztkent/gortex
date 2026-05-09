@@ -47,7 +47,7 @@ func (s *Server) handleGetCommunities(ctx context.Context, req mcp.CallToolReque
 		}
 		for _, c := range comms.Communities {
 			if c.ID == id {
-				return mcp.NewToolResultJSON(c)
+				return s.respondJSONOrTOON(ctx, req, c)
 			}
 		}
 		return mcp.NewToolResultError("community not found: " + id), nil
@@ -55,7 +55,7 @@ func (s *Server) handleGetCommunities(ctx context.Context, req mcp.CallToolReque
 
 	// Otherwise return the list of summaries.
 	if comms == nil || len(comms.Communities) == 0 {
-		return mcp.NewToolResultJSON(map[string]any{
+		return s.respondJSONOrTOON(ctx, req, map[string]any{
 			"communities": []any{},
 			"message":     "no communities detected yet — run index_repository first",
 		})
@@ -86,7 +86,7 @@ func (s *Server) handleGetCommunities(ctx context.Context, req mcp.CallToolReque
 			RepoPrefix: majorityRepoPrefix(c.Members),
 		})
 	}
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"communities": summaries,
 		"total":       len(summaries),
 		"modularity":  comms.Modularity,
@@ -103,7 +103,7 @@ func (s *Server) handleGetProcesses(ctx context.Context, req mcp.CallToolRequest
 		}
 		for _, p := range procs.Processes {
 			if p.ID == id {
-				return mcp.NewToolResultJSON(p)
+				return s.respondJSONOrTOON(ctx, req, p)
 			}
 		}
 		return mcp.NewToolResultError("process not found: " + id), nil
@@ -111,7 +111,7 @@ func (s *Server) handleGetProcesses(ctx context.Context, req mcp.CallToolRequest
 
 	// Otherwise return the list of summaries.
 	if procs == nil || len(procs.Processes) == 0 {
-		return mcp.NewToolResultJSON(map[string]any{
+		return s.respondJSONOrTOON(ctx, req, map[string]any{
 			"processes": []any{},
 			"message":   "no processes discovered yet — run index_repository first",
 		})
@@ -141,7 +141,7 @@ func (s *Server) handleGetProcesses(ctx context.Context, req mcp.CallToolRequest
 			RepoPrefixes: uniqueRepoPrefixesFromSteps(p.Steps),
 		})
 	}
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"processes": summaries,
 		"total":     len(summaries),
 	})
@@ -221,7 +221,7 @@ func (s *Server) handleDetectChanges(ctx context.Context, req mcp.CallToolReques
 	}
 
 	if len(diff.ChangedSymbols) == 0 {
-		return mcp.NewToolResultJSON(map[string]any{
+		return s.respondJSONOrTOON(ctx, req, map[string]any{
 			"changed_symbols": []any{},
 			"changed_files":   diff.ChangedFiles,
 			"risk":            "NONE",
@@ -237,7 +237,7 @@ func (s *Server) handleDetectChanges(ctx context.Context, req mcp.CallToolReques
 
 	impact := analysis.AnalyzeImpact(s.graph, symbolIDs, s.getCommunities(), s.getProcesses())
 
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"changed_symbols":      diff.ChangedSymbols,
 		"changed_files":        diff.ChangedFiles,
 		"risk":                 impact.Risk,
@@ -314,8 +314,11 @@ func (s *Server) handleEnhancedChangeImpact(ctx context.Context, req mcp.CallToo
 		// addition.
 		return gcxResponse(encodeChangeImpact(result))
 	}
+	if s.isTOON(ctx, req) {
+		return returnTOON(result)
+	}
 
-	return mcp.NewToolResultJSON(result)
+	return s.respondJSONOrTOON(ctx, req, result)
 }
 
 // -----------------------------------------------------------------------------

@@ -56,13 +56,13 @@ func (s *Server) handleListRepos(ctx context.Context, req mcp.CallToolRequest) (
 	if bind == nil {
 		out["mode"] = "unbound"
 		out["repos"] = []string{}
-		return mcp.NewToolResultJSON(out)
+		return s.respondJSONOrTOON(ctx, req, out)
 	}
 
 	out["mode"] = bind.Mode.String()
 	out["root"] = bind.Root
 	out["repos"] = bind.MemberNames()
-	return mcp.NewToolResultJSON(out)
+	return s.respondJSONOrTOON(ctx, req, out)
 }
 
 // handleWorkspaceInfo implements `workspace_info`. Returns enough
@@ -76,7 +76,7 @@ func (s *Server) handleWorkspaceInfo(ctx context.Context, req mcp.CallToolReques
 
 	bind := s.bind
 	if bind == nil {
-		return mcp.NewToolResultJSON(map[string]any{
+		return s.respondJSONOrTOON(ctx, req, map[string]any{
 			"mode":  "unbound",
 			"repos": []map[string]string{},
 		})
@@ -99,7 +99,7 @@ func (s *Server) handleWorkspaceInfo(ctx context.Context, req mcp.CallToolReques
 	}
 	sort.Strings(unknownKeys)
 
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"mode":             bind.Mode.String(),
 		"root":             bind.Root,
 		"marker":           workspace.MarkerFile,

@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -121,7 +122,7 @@ func (s *Server) returnSubGraph(ctx context.Context, req mcp.CallToolRequest, sg
 	if s.isTOON(ctx, req) {
 		return subGraphToTOON(sg)
 	}
-	return mcp.NewToolResultJSON(sg)
+	return s.respondJSONOrTOON(ctx, req, sg)
 }
 
 // requestToolName extracts the MCP tool name from a CallToolRequest.
@@ -130,6 +131,48 @@ func (s *Server) returnSubGraph(ctx context.Context, req mcp.CallToolRequest, sg
 // header tags.
 func requestToolName(req mcp.CallToolRequest) string {
 	return req.Params.Name
+}
+
+// returnTOON marshals payload as TOON and returns a text result. It
+// goes JSON-first so the on-wire field names match the JSON schema
+// every tool already advertises: toon-go honours only `toon:` tags
+// and rejects map[int]X / non-string keys outright, but every Gortex
+// payload tags its fields with `json:` (we don't double-tag with
+// `toon:`). Round-tripping through JSON gives us tag-driven naming
+// and string-key normalisation (Go's encoding/json stringifies int
+// keys) for free, with a single allocation we can amortise across
+// the tool surface.
+//
+// Falls back to JSON on encoder error so a malformed payload can
+// never take down the response — the caller never sees a half-
+// written document.
+func returnTOON(payload any) (*mcp.CallToolResult, error) {
+	jsonBytes, err := json.Marshal(payload)
+	if err != nil {
+		return mcp.NewToolResultJSON(payload)
+	}
+	var generic any
+	if err := json.Unmarshal(jsonBytes, &generic); err != nil {
+		return mcp.NewToolResultJSON(payload)
+	}
+	data, err := toon.Marshal(generic)
+	if err != nil {
+		return mcp.NewToolResultJSON(payload)
+	}
+	return mcp.NewToolResultText(string(data)), nil
+}
+
+// respondJSONOrTOON is the bottom-of-the-handler decision shared by
+// every tool that advertises `format` in its schema and lets a
+// per-tool GCX encoder run ahead of it. It returns TOON when the
+// caller (or the per-session default) asks for it and JSON otherwise.
+// GCX is handled inline at the call site because GCX uses hand-tuned
+// per-tool encoders rather than reusing the JSON shape.
+func (s *Server) respondJSONOrTOON(ctx context.Context, req mcp.CallToolRequest, payload any) (*mcp.CallToolResult, error) {
+	if s.isTOON(ctx, req) {
+		return returnTOON(payload)
+	}
+	return mcp.NewToolResultJSON(payload)
 }
 
 // subGraphToTOON converts a SubGraph to a TOON-encoded text result.
@@ -426,7 +469,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithDescription("Use instead of Read to understand a file's role: returns all its symbols and imports without reading source lines."),
 			mcp.WithString("path", mcp.Required(), mcp.Description("Relative file path")),
 			mcp.WithBoolean("compact", mcp.Description("One-line-per-symbol text output (saves 50-70% tokens)")),
-			mcp.WithString("format", mcp.Description("Output format: json (default) or gcx (GCX1 compact wire format)")),
+			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
 			mcp.WithString("repo", mcp.Description("Filter results to a specific repository prefix")),
 			mcp.WithString("project", mcp.Description("Filter results to repositories in a specific project")),
 			mcp.WithString("ref", mcp.Description("Filter results to repositories with a specific reference tag")),
@@ -579,7 +622,7 @@ func (s *Server) handleIndexRepository(ctx context.Context, req mcp.CallToolRequ
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 		s.RunAnalysis()
-		return mcp.NewToolResultJSON(result)
+		return s.respondJSONOrTOON(ctx, req, result)
 	}
 
 	result, err := s.indexer.IndexCtx(s.progressCtx(ctx, req), path)
@@ -587,7 +630,7 @@ func (s *Server) handleIndexRepository(ctx context.Context, req mcp.CallToolRequ
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	s.RunAnalysis()
-	return mcp.NewToolResultJSON(result)
+	return s.respondJSONOrTOON(ctx, req, result)
 }
 
 func (s *Server) handleGetSymbol(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -619,13 +662,13 @@ func (s *Server) handleGetSymbol(ctx context.Context, req mcp.CallToolRequest) (
 
 	detail := req.GetString("detail", "brief")
 	if detail == "brief" {
-		return mcp.NewToolResultJSON(node.Brief())
+		return s.respondJSONOrTOON(ctx, req, node.Brief())
 	}
 
 	// Full: include node + direct edges.
 	out := s.engine.GetOutEdges(node.ID)
 	in := s.engine.GetInEdges(node.ID)
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"node":      node,
 		"out_edges": out,
 		"in_edges":  in,
@@ -710,7 +753,7 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 	for _, n := range nodes {
 		results = append(results, n.Brief())
 	}
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"results":   results,
 		"total":     total,
 		"truncated": total > limit,
@@ -764,7 +807,10 @@ func (s *Server) handleGetFileSummary(ctx context.Context, req mcp.CallToolReque
 		"truncated":   sg.Truncated,
 		"etag":        etag,
 	}
-	return mcp.NewToolResultJSON(result)
+	if s.isTOON(ctx, req) {
+		return returnTOON(result)
+	}
+	return s.respondJSONOrTOON(ctx, req, result)
 }
 
 func (s *Server) handleGetDependencies(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -894,7 +940,7 @@ func (s *Server) handleFindOverrides(ctx context.Context, req mcp.CallToolReques
 	for _, n := range nodes {
 		results = append(results, n.Brief())
 	}
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"overrides": results,
 		"total":     len(results),
 		"direction": direction,
@@ -931,7 +977,7 @@ func (s *Server) handleFindImplementations(ctx context.Context, req mcp.CallTool
 	for _, n := range impls {
 		results = append(results, n.Brief())
 	}
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"implementations": results,
 		"total":           len(results),
 	})
@@ -988,7 +1034,7 @@ func (s *Server) handleGetCluster(ctx context.Context, req mcp.CallToolRequest) 
 	return s.returnSubGraph(ctx, req, sg)
 }
 
-func (s *Server) handleGraphStats(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleGraphStats(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	stats := s.engine.Stats()
 	result := map[string]any{
 		"total_nodes": stats.TotalNodes,
@@ -1019,5 +1065,5 @@ func (s *Server) handleGraphStats(ctx context.Context, _ mcp.CallToolRequest) (*
 		}
 	}
 
-	return mcp.NewToolResultJSON(result)
+	return s.respondJSONOrTOON(ctx, req, result)
 }

@@ -31,7 +31,7 @@ func (s *Server) registerDataflowTools() {
 			mcp.WithString("sink_id", mcp.Required(), mcp.Description("Sink symbol node ID — function/method/param/field")),
 			mcp.WithNumber("max_depth", mcp.Description("Maximum BFS hops (default: 8)")),
 			mcp.WithNumber("max_paths", mcp.Description("Maximum number of paths to return (default: 10)")),
-			mcp.WithString("format", mcp.Description("Output format: json (default) or gcx (GCX1 compact wire format)")),
+			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
 		),
 		s.handleFlowBetween,
 	)
@@ -43,7 +43,7 @@ func (s *Server) registerDataflowTools() {
 			mcp.WithString("sink_pattern", mcp.Required(), mcp.Description("Sink pattern — see description for syntax")),
 			mcp.WithNumber("max_depth", mcp.Description("Maximum BFS hops per (source,sink) pair (default: 8)")),
 			mcp.WithNumber("limit", mcp.Description("Maximum findings to return (default: 20)")),
-			mcp.WithString("format", mcp.Description("Output format: json (default) or gcx (GCX1 compact wire format)")),
+			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
 		),
 		s.handleTaintPaths,
 	)
@@ -69,12 +69,16 @@ func (s *Server) handleFlowBetween(ctx context.Context, req mcp.CallToolRequest)
 		return gcxResponse(payload, err)
 	}
 
-	return mcp.NewToolResultJSON(map[string]any{
+	result := map[string]any{
 		"source_id": source,
 		"sink_id":   sink,
 		"paths":     paths,
 		"total":     len(paths),
-	})
+	}
+	if s.isTOON(ctx, req) {
+		return returnTOON(result)
+	}
+	return s.respondJSONOrTOON(ctx, req, result)
 }
 
 func (s *Server) handleTaintPaths(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -114,12 +118,16 @@ func (s *Server) handleTaintPaths(ctx context.Context, req mcp.CallToolRequest) 
 			"paths":  f.Paths,
 		})
 	}
-	return mcp.NewToolResultJSON(map[string]any{
+	result := map[string]any{
 		"source_pattern": srcRaw,
 		"sink_pattern":   sinkRaw,
 		"findings":       rows,
 		"total":          len(findings),
-	})
+	}
+	if s.isTOON(ctx, req) {
+		return returnTOON(result)
+	}
+	return s.respondJSONOrTOON(ctx, req, result)
 }
 
 // describeNode returns a JSON-shaped summary of a graph node for

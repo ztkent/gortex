@@ -125,7 +125,7 @@ func (s *Server) handleAnalyzeChannelOps(ctx context.Context, req mcp.CallToolRe
 		}
 		return mcp.NewToolResultText(b.String()), nil
 	}
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"channels": rows,
 		"total":    len(rows),
 	})
@@ -207,7 +207,7 @@ func (s *Server) handleAnalyzeGoroutineSpawns(ctx context.Context, req mcp.CallT
 		}
 		return mcp.NewToolResultText(b.String()), nil
 	}
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"spawns": rows,
 		"total":  len(rows),
 	})
@@ -319,7 +319,7 @@ func (s *Server) handleAnalyzeFieldWriters(ctx context.Context, req mcp.CallTool
 		"total":     len(rows),
 		"truncated": truncated,
 	}
-	return mcp.NewToolResultJSON(resp)
+	return s.respondJSONOrTOON(ctx, req, resp)
 }
 
 // ---------------------------------------------------------------------------
@@ -393,7 +393,7 @@ func (s *Server) handleAnalyzeAnnotationUsers(ctx context.Context, req mcp.CallT
 			}
 			return mcp.NewToolResultText(b.String()), nil
 		}
-		return mcp.NewToolResultJSON(map[string]any{
+		return s.respondJSONOrTOON(ctx, req, map[string]any{
 			"annotation": idFilter,
 			"users":      rows,
 			"total":      len(rows),
@@ -459,7 +459,7 @@ func (s *Server) handleAnalyzeAnnotationUsers(ctx context.Context, req mcp.CallT
 		}
 		return mcp.NewToolResultText(b.String()), nil
 	}
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"annotations": rows,
 		"total":       len(rows),
 	})
@@ -568,7 +568,7 @@ func (s *Server) handleAnalyzeConfigReaders(ctx context.Context, req mcp.CallToo
 		}
 		return mcp.NewToolResultText(b.String()), nil
 	}
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"config_keys": rows,
 		"total":       len(rows),
 		"truncated":   truncated,
@@ -685,7 +685,7 @@ func (s *Server) handleAnalyzeEventEmitters(ctx context.Context, req mcp.CallToo
 		}
 		return mcp.NewToolResultText(b.String()), nil
 	}
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"events": rows,
 		"total":  len(rows),
 	})
@@ -810,7 +810,7 @@ func (s *Server) handleAnalyzeErrorSurface(ctx context.Context, req mcp.CallTool
 	if rowsTruncated {
 		resp["limit"] = limit
 	}
-	return mcp.NewToolResultJSON(resp)
+	return s.respondJSONOrTOON(ctx, req, resp)
 }
 
 // ---------------------------------------------------------------------------

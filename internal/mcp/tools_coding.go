@@ -22,7 +22,7 @@ func (s *Server) registerCodingTools() {
 			mcp.WithDescription("The primary tool to call before editing any file. Returns all symbols defined in the file, their signatures, direct dependencies, and immediate callers — everything needed to code without reading raw source lines."),
 			mcp.WithString("path", mcp.Required(), mcp.Description("Relative file path")),
 			mcp.WithString("detail", mcp.Description("brief or full (default: brief)")),
-			mcp.WithString("format", mcp.Description("Output format: json (default) or gcx (GCX1 compact wire format)")),
+			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
 			mcp.WithString("if_none_match", mcp.Description("ETag from a previous response — returns not_modified if content unchanged")),
 		),
 		s.handleGetEditingContext,
@@ -41,7 +41,7 @@ func (s *Server) registerCodingTools() {
 		mcp.NewTool("explain_change_impact",
 			mcp.WithDescription("Given a list of symbols you plan to modify, returns risk-tiered blast radius: d=1 will break, d=2 likely affected, d=3 needs testing. Includes affected processes and communities."),
 			mcp.WithString("ids", mcp.Required(), mcp.Description("Comma-separated list of symbol IDs to modify")),
-			mcp.WithString("format", mcp.Description("Output format: json (default) or gcx (GCX1 compact wire format)")),
+			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
 		),
 		s.handleEnhancedChangeImpact,
 	)
@@ -52,7 +52,7 @@ func (s *Server) registerCodingTools() {
 			mcp.WithString("id", mcp.Required(), mcp.Description("Symbol node ID (e.g. pkg/server.go::HandleRequest)")),
 			mcp.WithNumber("context_lines", mcp.Description("Extra lines above/below the symbol (default: 3)")),
 			mcp.WithString("if_none_match", mcp.Description("ETag from a previous response — returns not_modified if content unchanged")),
-			mcp.WithString("format", mcp.Description("Output format: json (default) or gcx (GCX1 compact wire format)")),
+			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
 		),
 		s.handleGetSymbolSource,
 	)
@@ -64,7 +64,7 @@ func (s *Server) registerCodingTools() {
 			mcp.WithBoolean("include_source", mcp.Description("Include source code for each symbol (default: false)")),
 			mcp.WithNumber("context_lines", mcp.Description("Extra lines above/below source (default: 3, only if include_source)")),
 			mcp.WithString("if_none_match", mcp.Description("ETag from a previous response — returns not_modified if content unchanged")),
-			mcp.WithString("format", mcp.Description("Output format: json (default) or gcx (GCX1 compact wire format)")),
+			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
 		),
 		s.handleBatchSymbols,
 	)
@@ -142,7 +142,7 @@ func (s *Server) registerCodingTools() {
 			mcp.WithString("task", mcp.Required(), mcp.Description("Natural language description of what you want to do (e.g. 'add a new MCP tool called list_files')")),
 			mcp.WithString("entry_point", mcp.Description("Optional symbol ID or file path to start from")),
 			mcp.WithNumber("max_symbols", mcp.Description("Max symbols to include source for (default: 5)")),
-			mcp.WithString("format", mcp.Description("Output format: json (default) or gcx (GCX1 compact wire format)")),
+			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
 			mcp.WithString("repo", mcp.Description("Filter results to a specific repository prefix")),
 			mcp.WithString("project", mcp.Description("Filter results to repositories in a specific project")),
 		),
@@ -304,7 +304,10 @@ func (s *Server) handleGetEditingContext(ctx context.Context, req mcp.CallToolRe
 		"calls":     out.Calls,
 		"etag":      etag,
 	}
-	return mcp.NewToolResultJSON(result)
+	if s.isTOON(ctx, req) {
+		return returnTOON(result)
+	}
+	return s.respondJSONOrTOON(ctx, req, result)
 }
 
 func (s *Server) handleFindImportPath(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -363,7 +366,7 @@ func (s *Server) handleFindImportPath(ctx context.Context, req mcp.CallToolReque
 	if filepath.IsAbs(importDir) {
 		importDir = s.repoRelative(importDir)
 	}
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"symbol_id":        best.ID,
 		"import_path":      importDir,
 		"already_imported": alreadyImported,
@@ -404,7 +407,7 @@ func (s *Server) handleGetRecentChanges(ctx context.Context, req mcp.CallToolReq
 		}
 	}
 
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"changes":             changes,
 		"graph_current_as_of": time.Now().Format(time.RFC3339),
 	})
@@ -493,8 +496,11 @@ func (s *Server) handleGetSymbolSource(ctx context.Context, req mcp.CallToolRequ
 	if s.isGCX(ctx, req) {
 		return gcxResponse(encodeGetSymbolSource(node, source, startLine, etag))
 	}
+	if s.isTOON(ctx, req) {
+		return returnTOON(result)
+	}
 
-	return mcp.NewToolResultJSON(result)
+	return s.respondJSONOrTOON(ctx, req, result)
 }
 
 // readLines reads lines from a file, with optional context lines above/below.
@@ -629,8 +635,11 @@ func (s *Server) handleBatchSymbols(ctx context.Context, req mcp.CallToolRequest
 	if s.isGCX(ctx, req) {
 		return gcxResponse(encodeBatchSymbols(results, includeSource))
 	}
+	if s.isTOON(ctx, req) {
+		return returnTOON(batchResult)
+	}
 
-	return mcp.NewToolResultJSON(batchResult)
+	return s.respondJSONOrTOON(ctx, req, batchResult)
 }
 
 // Test file patterns by language.
@@ -778,7 +787,7 @@ func (s *Server) handleGetTestTargets(ctx context.Context, req mcp.CallToolReque
 		}
 	}
 
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"test_targets":  targets,
 		"run_commands":  runCommands,
 		"total_files":   len(targets),
@@ -921,7 +930,7 @@ func (s *Server) handleSuggestPattern(ctx context.Context, req mcp.CallToolReque
 	}
 	result["files_to_edit"] = filesToEdit
 
-	return mcp.NewToolResultJSON(result)
+	return s.respondJSONOrTOON(ctx, req, result)
 }
 
 func (s *Server) handleGetEditPlan(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1075,7 +1084,7 @@ func (s *Server) handleGetEditPlan(ctx context.Context, req mcp.CallToolRequest)
 		}
 	}
 
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"edit_order":  editSteps,
 		"test_after":  testSteps,
 		"total_files": len(steps),
@@ -1346,7 +1355,10 @@ func (s *Server) handleSmartContext(ctx context.Context, req mcp.CallToolRequest
 	if s.isGCX(ctx, req) {
 		return gcxResponse(encodeSmartContext(result))
 	}
-	return mcp.NewToolResultJSON(result)
+	if s.isTOON(ctx, req) {
+		return returnTOON(result)
+	}
+	return s.respondJSONOrTOON(ctx, req, result)
 }
 
 // extractKeywords splits a task description into searchable keywords.
@@ -1550,7 +1562,7 @@ func (s *Server) handleRenameSymbol(ctx context.Context, req mcp.CallToolRequest
 		fileSet[e.File] = true
 	}
 
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"old_name":       oldName,
 		"new_name":       newName,
 		"edits":          edits,
@@ -1690,7 +1702,7 @@ func (s *Server) handleEditSymbol(ctx context.Context, req mcp.CallToolRequest) 
 	oldLines := strings.Count(oldSource, "\n") + 1
 	newLines := strings.Count(newSource, "\n") + 1
 
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"file":         node.FilePath,
 		"symbol":       id,
 		"lines_before": oldLines,

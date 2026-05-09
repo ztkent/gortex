@@ -97,7 +97,7 @@ func (s *Server) handleAnalyzeRoutes(ctx context.Context, req mcp.CallToolReques
 		}
 		return mcp.NewToolResultText(b.String()), nil
 	}
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"routes": rows,
 		"total":  len(rows),
 	})
@@ -215,7 +215,7 @@ func (s *Server) handleAnalyzeModels(ctx context.Context, req mcp.CallToolReques
 		}
 		return mcp.NewToolResultText(b.String()), nil
 	}
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"models": rows,
 		"total":  len(rows),
 	})
@@ -319,7 +319,7 @@ func (s *Server) componentsRollup(ctx context.Context, req mcp.CallToolRequest, 
 		}
 		return mcp.NewToolResultText(b.String()), nil
 	}
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"components": rows,
 		"total":      len(rows),
 	})
@@ -389,7 +389,7 @@ func (s *Server) componentsForOne(ctx context.Context, req mcp.CallToolRequest, 
 		}
 		return mcp.NewToolResultText(b.String()), nil
 	}
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"parent":   parentID,
 		"children": rows,
 		"total":    len(rows),

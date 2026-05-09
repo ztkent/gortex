@@ -100,7 +100,7 @@ func (s *Server) handleGetUntestedSymbols(ctx context.Context, req mcp.CallToolR
 		coverageRatio = float64(totalCandidates-totalUncovered) / float64(totalCandidates)
 	}
 
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"untested":         entries,
 		"total_candidates": totalCandidates,
 		"total_uncovered":  totalUncovered,

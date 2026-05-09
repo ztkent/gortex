@@ -90,7 +90,7 @@ func (s *Server) registerEnhancementTools() {
 			mcp.WithDescription("Evaluates project-specific guard rules against a set of changed symbols. Reports co-change and boundary violations."),
 			mcp.WithString("ids", mcp.Required(), mcp.Description("Comma-separated list of changed symbol IDs")),
 			mcp.WithBoolean("compact", mcp.Description("One-line-per-rule text output")),
-			mcp.WithString("format", mcp.Description("Output format: json (default) or gcx (GCX1 compact wire format)")),
+			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
 		),
 		s.handleCheckGuards,
 	)
@@ -103,7 +103,7 @@ func (s *Server) registerEnhancementTools() {
 			mcp.WithString("recent_symbols", mcp.Description("Comma-separated list of recently viewed symbol IDs")),
 			mcp.WithBoolean("include_source", mcp.Description("Include source code for top 5 candidates")),
 			mcp.WithBoolean("compact", mcp.Description("One-line-per-symbol text output")),
-			mcp.WithString("format", mcp.Description("Output format: json (default) or gcx (GCX1 compact wire format)")),
+			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
 		),
 		s.handlePrefetchContext,
 	)
@@ -114,7 +114,7 @@ func (s *Server) registerEnhancementTools() {
 			mcp.WithDescription("Unified graph analysis. kind=dead_code: symbols with zero incoming edges. kind=hotspots: high-complexity symbols by fan-in/out. kind=cycles: circular dependency chains. kind=would_create_cycle: check if a new edge would form a cycle (requires from_id, to_id). kind=todos: list KindTodo nodes with optional tag/assignee/ticket/has_assignee filters. kind=blame: run `git blame` against the indexed repo and stamp meta.last_authored on every symbol-level node. kind=coverage: parse a Go cover.out profile (path via `profile` arg) and stamp meta.coverage_pct on every executable symbol. kind=stale_code: list symbols whose meta.last_authored is older than the threshold (requires blame-enriched graph). kind=ownership: group blame metadata by author email — symbol count, files touched, oldest/newest timestamps; supports path_prefix scoping (requires blame-enriched graph). kind=coverage_gaps: list symbols whose meta.coverage_pct falls in [min_pct, max_pct) — sorted ascending so the most undertested code surfaces first (requires coverage-enriched graph)."),
 			mcp.WithString("kind", mcp.Required(), mcp.Description("Analysis kind: dead_code | hotspots | cycles | would_create_cycle | todos | blame | coverage | stale_code | ownership | coverage_gaps | stale_flags | releases | cgo_users | wasm_users | orphan_tables | unreferenced_tables | coverage_summary")),
 			mcp.WithBoolean("compact", mcp.Description("One-line-per-result text output")),
-			mcp.WithString("format", mcp.Description("Output format: json (default) or gcx (GCX1 compact wire format, per-kind hand-tuned encoder)")),
+			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format, per-kind hand-tuned encoder), or toon")),
 			mcp.WithBoolean("include_variables", mcp.Description("(dead_code) Include variable nodes (default false — usually false positives without data-flow analysis)")),
 			mcp.WithNumber("threshold", mcp.Description("(hotspots) Complexity score threshold (default: mean + 2σ)")),
 			mcp.WithString("scope", mcp.Description("(cycles) File path or package prefix to limit scope")),
@@ -151,7 +151,7 @@ func (s *Server) registerEnhancementTools() {
 			mcp.WithNumber("min_churn", mcp.Description("Minimum session modification count (default: 0)")),
 			mcp.WithNumber("limit", mcp.Description("Max results (default: 20)")),
 			mcp.WithBoolean("compact", mcp.Description("One-line-per-result text output")),
-			mcp.WithString("format", mcp.Description("Output format: json (default) or gcx (GCX1 compact wire format)")),
+			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
 			mcp.WithString("repo", mcp.Description("Filter results to a specific repository prefix")),
 			mcp.WithString("project", mcp.Description("Filter results to repositories in a specific project")),
 			mcp.WithString("ref", mcp.Description("Filter results to repositories with a specific reference tag")),
@@ -225,7 +225,7 @@ func (s *Server) registerEnhancementTools() {
 			mcp.WithString("type", mcp.Description("(list) Filter by type: http, grpc, graphql, topic, ws, env, openapi, dependency")),
 			mcp.WithString("role", mcp.Description("(list) Filter by role: provider or consumer")),
 			mcp.WithBoolean("compact", mcp.Description("One-line-per-contract text output")),
-			mcp.WithString("format", mcp.Description("Output format: json (default) or gcx (GCX1 compact wire format)")),
+			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
 		),
 		s.handleContracts,
 	)
@@ -242,7 +242,7 @@ func (s *Server) registerEnhancementTools() {
 			mcp.WithString("tool_source", mcp.Description("Which tool produced the context: smart_context or prefetch_context (default: smart_context). For query: filter by source or 'all'")),
 			mcp.WithNumber("top_n", mcp.Description("(query) Number of top symbols to return per category (default: 10)")),
 			mcp.WithBoolean("compact", mcp.Description("(query) One-line-per-symbol text output")),
-			mcp.WithString("format", mcp.Description("(query) Output format: json (default) or gcx (GCX1 compact wire format)")),
+			mcp.WithString("format", mcp.Description("(query) Output format: json (default), gcx (GCX1 compact wire format), or toon")),
 		),
 		s.handleFeedback,
 	)
@@ -303,7 +303,7 @@ func (s *Server) handleVerifyChange(ctx context.Context, req mcp.CallToolRequest
 		return mcp.NewToolResultText(b.String()), nil
 	}
 
-	return mcp.NewToolResultJSON(result)
+	return s.respondJSONOrTOON(ctx, req, result)
 }
 
 // ---------------------------------------------------------------------------
@@ -325,10 +325,14 @@ func (s *Server) handleCheckGuards(ctx context.Context, req mcp.CallToolRequest)
 		if s.isGCX(ctx, req) {
 			return gcxResponse(encodeCheckGuards(nil, true))
 		}
-		return mcp.NewToolResultJSON(map[string]any{
+		empty := map[string]any{
 			"violations": []any{},
 			"message":    "no guard rules configured",
-		})
+		}
+		if s.isTOON(ctx, req) {
+			return returnTOON(empty)
+		}
+		return s.respondJSONOrTOON(ctx, req, empty)
 	}
 
 	violations := analysis.EvaluateGuards(s.graph, s.guardRules, ids)
@@ -348,10 +352,14 @@ func (s *Server) handleCheckGuards(ctx context.Context, req mcp.CallToolRequest)
 		return gcxResponse(encodeCheckGuards(violations, false))
 	}
 
-	return mcp.NewToolResultJSON(map[string]any{
+	result := map[string]any{
 		"violations": violations,
 		"total":      len(violations),
-	})
+	}
+	if s.isTOON(ctx, req) {
+		return returnTOON(result)
+	}
+	return s.respondJSONOrTOON(ctx, req, result)
 }
 
 // ---------------------------------------------------------------------------
@@ -601,11 +609,15 @@ func (s *Server) handlePrefetchContext(ctx context.Context, req mcp.CallToolRequ
 		return gcxResponse(encodePrefetchContext(candidates, totalCount, truncated, includeSource))
 	}
 
-	return mcp.NewToolResultJSON(map[string]any{
+	result := map[string]any{
 		"candidates": candidates,
 		"total":      totalCount,
 		"truncated":  truncated,
-	})
+	}
+	if s.isTOON(ctx, req) {
+		return returnTOON(result)
+	}
+	return s.respondJSONOrTOON(ctx, req, result)
 }
 
 // ---------------------------------------------------------------------------
@@ -776,7 +788,7 @@ func (s *Server) handleAnalyzeTodos(ctx context.Context, req mcp.CallToolRequest
 		return mcp.NewToolResultText(b.String()), nil
 	}
 
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"todos": rows,
 		"total": len(rows),
 	})
@@ -817,7 +829,7 @@ func (s *Server) handleAnalyzeCoverage(ctx context.Context, req mcp.CallToolRequ
 	}
 	modulePath := coverage.ReadModulePath(root)
 	count := coverage.EnrichGraph(s.graph, segments, modulePath)
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"enriched":     count,
 		"segments":     len(segments),
 		"profile":      profileArg,
@@ -928,7 +940,7 @@ func (s *Server) handleAnalyzeStaleCode(ctx context.Context, req mcp.CallToolReq
 		}
 		return mcp.NewToolResultText(b.String()), nil
 	}
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"stale":          rows,
 		"total":          len(rows),
 		"older_than_day": olderThanDays,
@@ -1075,7 +1087,7 @@ func (s *Server) handleAnalyzeOwnership(ctx context.Context, req mcp.CallToolReq
 		}
 		return mcp.NewToolResultText(b.String()), nil
 	}
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"owners": rows,
 		"total":  len(rows),
 	})
@@ -1213,7 +1225,7 @@ func (s *Server) handleAnalyzeCoverageGaps(ctx context.Context, req mcp.CallTool
 		}
 		return mcp.NewToolResultText(b.String()), nil
 	}
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"gaps":    rows,
 		"total":   len(rows),
 		"min_pct": minPct,
@@ -1359,7 +1371,7 @@ func (s *Server) handleAnalyzeStaleFlags(ctx context.Context, req mcp.CallToolRe
 		}
 		return mcp.NewToolResultText(b.String()), nil
 	}
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"flags":          rows,
 		"total":          len(rows),
 		"unscored":       unscored,
@@ -1455,7 +1467,7 @@ func (s *Server) handleAnalyzeOrphanTables(ctx context.Context, req mcp.CallTool
 		}
 		return mcp.NewToolResultText(b.String()), nil
 	}
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"orphans": rows,
 		"total":   len(rows),
 	})
@@ -1528,7 +1540,7 @@ func (s *Server) handleAnalyzeUnreferencedTables(ctx context.Context, req mcp.Ca
 		}
 		return mcp.NewToolResultText(b.String()), nil
 	}
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"unreferenced": rows,
 		"total":        len(rows),
 	})
@@ -1626,7 +1638,7 @@ func (s *Server) handleAnalyzeCoverageSummary(ctx context.Context, req mcp.CallT
 		}
 		return mcp.NewToolResultText(b.String()), nil
 	}
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"directories": rows,
 		"total":       len(rows),
 	})
@@ -1657,7 +1669,7 @@ func roundTwoDecimal(v float64) float64 {
 // boundary?"), and non-interop build planning. Files are
 // reported in path order so the result is diff-able across
 // runs.
-func (s *Server) handleAnalyzeInteropUsers(_ context.Context, req mcp.CallToolRequest, metaKey, resultKey string) (*mcp.CallToolResult, error) {
+func (s *Server) handleAnalyzeInteropUsers(ctx context.Context, req mcp.CallToolRequest, metaKey, resultKey string) (*mcp.CallToolResult, error) {
 	type interopFile struct {
 		File string `json:"file"`
 		ID   string `json:"id"`
@@ -1690,7 +1702,7 @@ func (s *Server) handleAnalyzeInteropUsers(_ context.Context, req mcp.CallToolRe
 		}
 		return mcp.NewToolResultText(b.String()), nil
 	}
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		resultKey: rows,
 		"total":   len(rows),
 	})
@@ -1718,7 +1730,7 @@ func (s *Server) handleAnalyzeReleases(ctx context.Context, req mcp.CallToolRequ
 		total += count
 		perRepo[prefix] = map[string]any{"root": root, "enriched": count}
 	}
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"enriched": total,
 		"per_repo": perRepo,
 	})
@@ -1750,7 +1762,7 @@ func (s *Server) handleAnalyzeBlame(ctx context.Context, req mcp.CallToolRequest
 		total += count
 		perRepo[prefix] = map[string]any{"root": root, "enriched": count}
 	}
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"enriched": total,
 		"per_repo": perRepo,
 	})
@@ -1867,7 +1879,7 @@ func (s *Server) handleFindDeadCode(ctx context.Context, req mcp.CallToolRequest
 	if variablesNote != "" {
 		result["note"] = variablesNote
 	}
-	return mcp.NewToolResultJSON(result)
+	return s.respondJSONOrTOON(ctx, req, result)
 }
 
 func (s *Server) handleFindHotspots(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1920,7 +1932,7 @@ func (s *Server) handleFindHotspots(ctx context.Context, req mcp.CallToolRequest
 		return mcp.NewToolResultText(b.String()), nil
 	}
 
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"hotspots":  entries,
 		"total":     totalCount,
 		"truncated": truncated,
@@ -2004,7 +2016,7 @@ func (s *Server) handleScaffold(ctx context.Context, req mcp.CallToolRequest) (*
 		resp["applied"] = true
 	}
 
-	return mcp.NewToolResultJSON(resp)
+	return s.respondJSONOrTOON(ctx, req, resp)
 }
 
 // ---------------------------------------------------------------------------
@@ -2029,7 +2041,7 @@ func (s *Server) handleFindCycles(ctx context.Context, req mcp.CallToolRequest) 
 	}
 
 	if len(cycles) == 0 {
-		return mcp.NewToolResultJSON(map[string]any{
+		return s.respondJSONOrTOON(ctx, req, map[string]any{
 			"cycles":  []any{},
 			"message": "no dependency cycles detected",
 		})
@@ -2054,7 +2066,7 @@ func (s *Server) handleFindCycles(ctx context.Context, req mcp.CallToolRequest) 
 		return mcp.NewToolResultText(b.String()), nil
 	}
 
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"cycles":    cycles,
 		"total":     totalCount,
 		"truncated": truncated,
@@ -2095,7 +2107,7 @@ func (s *Server) handleWouldCreateCycle(ctx context.Context, req mcp.CallToolReq
 		return mcp.NewToolResultText("would_cycle=false\n"), nil
 	}
 
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"would_cycle": wouldCycle,
 		"path":        path,
 	})
@@ -2143,7 +2155,7 @@ func (s *Server) handleDiffContext(ctx context.Context, req mcp.CallToolRequest)
 	}
 
 	if len(diff.ChangedSymbols) == 0 {
-		return mcp.NewToolResultJSON(map[string]any{
+		return s.respondJSONOrTOON(ctx, req, map[string]any{
 			"files":   []any{},
 			"message": "no changes detected",
 		})
@@ -2291,7 +2303,7 @@ func (s *Server) handleDiffContext(ctx context.Context, req mcp.CallToolRequest)
 		return mcp.NewToolResultText(b.String()), nil
 	}
 
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"files":         groups,
 		"total_symbols": totalSymbols,
 		"total_files":   len(groups),
@@ -2387,7 +2399,7 @@ func (s *Server) handleIndexHealth(ctx context.Context, req mcp.CallToolRequest)
 		result["recommendation"] = recommendation
 	}
 
-	return mcp.NewToolResultJSON(result)
+	return s.respondJSONOrTOON(ctx, req, result)
 }
 
 // ---------------------------------------------------------------------------
@@ -2401,7 +2413,7 @@ func (s *Server) handleGetSymbolHistory(ctx context.Context, req mcp.CallToolReq
 		// Single symbol history
 		mods := s.symHistory.Get(symbolID)
 		if len(mods) == 0 {
-			return mcp.NewToolResultJSON(map[string]any{
+			return s.respondJSONOrTOON(ctx, req, map[string]any{
 				"symbol_id":     symbolID,
 				"modifications": []any{},
 				"message":       "no modifications recorded for this symbol",
@@ -2418,7 +2430,7 @@ func (s *Server) handleGetSymbolHistory(ctx context.Context, req mcp.CallToolReq
 			return mcp.NewToolResultText(fmt.Sprintf("%s count=%d%s\n", symbolID, len(mods), churnFlag)), nil
 		}
 
-		return mcp.NewToolResultJSON(map[string]any{
+		return s.respondJSONOrTOON(ctx, req, map[string]any{
 			"symbol_id":     symbolID,
 			"count":         len(mods),
 			"modifications": mods,
@@ -2429,7 +2441,7 @@ func (s *Server) handleGetSymbolHistory(ctx context.Context, req mcp.CallToolReq
 	// All symbols, sorted by count descending
 	all := s.symHistory.All()
 	if len(all) == 0 {
-		return mcp.NewToolResultJSON(map[string]any{
+		return s.respondJSONOrTOON(ctx, req, map[string]any{
 			"symbols": []any{},
 			"message": "no modifications recorded this session",
 		})
@@ -2469,7 +2481,7 @@ func (s *Server) handleGetSymbolHistory(ctx context.Context, req mcp.CallToolReq
 		return mcp.NewToolResultText(b.String()), nil
 	}
 
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"symbols": entries,
 		"total":   len(entries),
 	})
@@ -2582,7 +2594,7 @@ func (s *Server) handleBatchEdit(ctx context.Context, req mcp.CallToolRequest) (
 			return mcp.NewToolResultText(b.String()), nil
 		}
 
-		return mcp.NewToolResultJSON(map[string]any{
+		return s.respondJSONOrTOON(ctx, req, map[string]any{
 			"plan":    plan,
 			"dry_run": true,
 			"total":   len(plan),
@@ -2748,7 +2760,7 @@ func (s *Server) handleBatchEdit(ctx context.Context, req mcp.CallToolRequest) (
 		}
 	}
 
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"results": results,
 		"summary": map[string]int{
 			"applied": applied,
@@ -2944,7 +2956,7 @@ func (s *Server) handleGetContracts(ctx context.Context, req mcp.CallToolRequest
 			"hint":  "pass include_deps=true to include type=dependency and vendor-pathed contracts",
 		}
 	}
-	return mcp.NewToolResultJSON(payload)
+	return s.respondJSONOrTOON(ctx, req, payload)
 }
 
 // ---------------------------------------------------------------------------
@@ -3035,7 +3047,7 @@ func (s *Server) handleCheckContracts(ctx context.Context, req mcp.CallToolReque
 			"orphan_consumers": len(result.OrphanConsumers),
 		},
 	}
-	return mcp.NewToolResultJSON(payload)
+	return s.respondJSONOrTOON(ctx, req, payload)
 }
 
 // ---------------------------------------------------------------------------
@@ -3121,7 +3133,7 @@ func (s *Server) handleValidateContracts(ctx context.Context, req mcp.CallToolRe
 		"issues":  issues,
 		"summary": summary,
 	}
-	return mcp.NewToolResultJSON(payload)
+	return s.respondJSONOrTOON(ctx, req, payload)
 }
 
 // ---------------------------------------------------------------------------
@@ -3179,7 +3191,7 @@ func (s *Server) handleRecordFeedback(ctx context.Context, req mcp.CallToolReque
 		return mcp.NewToolResultError(fmt.Sprintf("failed to record feedback: %v", err)), nil
 	}
 
-	return mcp.NewToolResultJSON(map[string]any{
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"recorded":         true,
 		"useful_count":     len(useful),
 		"not_needed_count": len(notNeeded),
@@ -3199,7 +3211,10 @@ func (s *Server) handleQueryFeedback(ctx context.Context, req mcp.CallToolReques
 		if s.isGCX(ctx, req) {
 			return gcxResponse(encodeFeedbackQuery(empty))
 		}
-		return mcp.NewToolResultJSON(empty)
+		if s.isTOON(ctx, req) {
+			return returnTOON(empty)
+		}
+		return s.respondJSONOrTOON(ctx, req, empty)
 	}
 
 	topN := 10
@@ -3221,8 +3236,11 @@ func (s *Server) handleQueryFeedback(ctx context.Context, req mcp.CallToolReques
 	if s.isGCX(ctx, req) {
 		return gcxResponse(encodeFeedbackQuery(stats))
 	}
+	if s.isTOON(ctx, req) {
+		return returnTOON(stats)
+	}
 
-	return mcp.NewToolResultJSON(stats)
+	return s.respondJSONOrTOON(ctx, req, stats)
 }
 
 // splitCSV splits a comma-separated string into trimmed, non-empty parts.
@@ -3280,7 +3298,7 @@ func (s *Server) handleExportContext(ctx context.Context, req mcp.CallToolReques
 	}
 
 	if format == "json" {
-		return mcp.NewToolResultJSON(data)
+		return s.respondJSONOrTOON(ctx, req, data)
 	}
 
 	// Render as markdown briefing.
@@ -3439,7 +3457,7 @@ func (s *Server) handleAuditAgentConfig(ctx context.Context, req mcp.CallToolReq
 	}
 
 	if len(files) == 0 {
-		return mcp.NewToolResultJSON(map[string]any{
+		return s.respondJSONOrTOON(ctx, req, map[string]any{
 			"files_scanned": 0,
 			"message":       "no agent config files found",
 		})
@@ -3466,5 +3484,5 @@ func (s *Server) handleAuditAgentConfig(ctx context.Context, req mcp.CallToolReq
 		return mcp.NewToolResultText(b.String()), nil
 	}
 
-	return mcp.NewToolResultJSON(report)
+	return s.respondJSONOrTOON(ctx, req, report)
 }
