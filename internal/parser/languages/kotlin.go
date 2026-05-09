@@ -308,6 +308,7 @@ func (e *KotlinExtractor) emitClassOrInterface(m parser.QueryResult, filePath, f
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: startLine,
 	})
 	emitKotlinAnnotationEdges(kotlinCollectAnnotations(def.Node, src), id, filePath, result, annotationSeen)
+	emitKotlinGenericParamNodes(id, def.Node, src, filePath, startLine, result)
 
 	if enumBody == nil {
 		return

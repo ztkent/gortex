@@ -295,6 +295,7 @@ func (e *JavaExtractor) emitClass(m parser.QueryResult, filePath, fileID string,
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
 	})
 	emitJavaAnnotationEdges(javaCollectAnnotations(def.Node, src), id, filePath, result, annotationSeen)
+	emitJavaGenericParamNodes(id, def.Node, src, filePath, def.StartLine+1, result)
 }
 
 // javaVisibility scans the `modifiers` child of a Java declaration for
@@ -349,6 +350,7 @@ func (e *JavaExtractor) emitInterface(m parser.QueryResult, filePath, fileID str
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
 	})
 	emitJavaAnnotationEdges(javaCollectAnnotations(def.Node, src), id, filePath, result, annotationSeen)
+	emitJavaGenericParamNodes(id, def.Node, src, filePath, def.StartLine+1, result)
 }
 
 func (e *JavaExtractor) emitEnum(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen, annotationSeen map[string]bool) {
@@ -586,6 +588,10 @@ func (e *JavaExtractor) emitConstructor(m parser.QueryResult, filePath, fileID s
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: id, To: classID, Kind: graph.EdgeMemberOf, FilePath: filePath, Line: startLine1,
 	})
+	// Constructor params land in the same shape as method params:
+	// EdgeParamOf + EdgeTypedAs are how Spring's @Autowired CDI
+	// post-pass figures out which beans flow in.
+	emitJavaFunctionShape(id, def.Node, src, filePath, startLine1, result)
 }
 
 func (e *JavaExtractor) emitField(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen map[string]bool) {

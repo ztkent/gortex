@@ -154,6 +154,47 @@ func TestRustAsyncSpawns_TokioSpawn(t *testing.T) {
 	}
 }
 
+func TestRustFunctionShape_StructGeneric(t *testing.T) {
+	src := `pub struct Box<T> { inner: T }
+`
+	nodes, edges := runRustExtract(t, "src/lib.rs", src)
+	gp := nodesOfKind(nodes, graph.KindGenericParam)
+	hasT := false
+	for _, n := range gp {
+		if n.Name == "T" {
+			hasT = true
+		}
+	}
+	if !hasT {
+		t.Fatalf("expected KindGenericParam T from struct; got %v", nodeNames(gp))
+	}
+	hasMember := false
+	for _, e := range edges {
+		if e.Kind == graph.EdgeMemberOf && e.From == "src/lib.rs::Box#tparam:T" && e.To == "src/lib.rs::Box" {
+			hasMember = true
+		}
+	}
+	if !hasMember {
+		t.Errorf("expected struct generic EdgeMemberOf")
+	}
+}
+
+func TestRustFunctionShape_TraitGeneric(t *testing.T) {
+	src := `pub trait Repo<E> { fn list(&self) -> Vec<E>; }
+`
+	nodes, _ := runRustExtract(t, "src/lib.rs", src)
+	gp := nodesOfKind(nodes, graph.KindGenericParam)
+	hasE := false
+	for _, n := range gp {
+		if n.Name == "E" {
+			hasE = true
+		}
+	}
+	if !hasE {
+		t.Errorf("expected KindGenericParam E from trait; got %v", nodeNames(gp))
+	}
+}
+
 func TestCanonicalizeRustTypeRef(t *testing.T) {
 	cases := []struct {
 		in, out string

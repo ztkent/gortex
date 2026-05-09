@@ -33,7 +33,129 @@ func emitTSFunctionShape(ownerID string, declNode *sitter.Node, src []byte, file
 	emitTSGenericParamNodes(ownerID, declNode, src, filePath, declLine, result)
 	if body := tsFunctionBody(declNode); body != nil {
 		emitTSAsyncSpawns(ownerID, body, src, filePath, result)
+		emitTSFieldAccess(ownerID, body, src, filePath, result)
 	}
+}
+
+// emitTSFieldAccess walks a function body and emits EdgeWrites for
+// every assignment whose LHS is a member_expression and EdgeReads
+// for every member_expression used as a value (selector use, method
+// invocation receiver, expression operand). Mirrors the schema rule
+// already implemented in golang.go: LHS-of-assignment writes,
+// everything else reads. Nested functions are walked too — TS
+// extractors don't always materialise inner closures as separate
+// graph nodes, so member accesses anywhere in the enclosing
+// function attribute back to it.
+func emitTSFieldAccess(ownerID string, body *sitter.Node, src []byte, filePath string, result *parser.ExtractionResult) {
+	if body == nil {
+		return
+	}
+	type record struct {
+		field string
+		op    graph.EdgeKind // EdgeReads | EdgeWrites
+		line  int
+	}
+	seen := map[string]bool{}
+	emit := func(r record) {
+		if r.field == "" {
+			return
+		}
+		key := string(r.op) + "\x00" + r.field
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		result.Edges = append(result.Edges, &graph.Edge{
+			From:     ownerID,
+			To:       "unresolved::*." + r.field,
+			Kind:     r.op,
+			FilePath: filePath,
+			Line:     r.line,
+			Origin:   graph.OriginASTInferred,
+		})
+	}
+	// Track member expressions that appear on the LHS of an
+	// assignment so the value-side walker doesn't double-classify
+	// them as reads. Keyed by (line, field) — sufficient because
+	// an assignment LHS appears once per line per field.
+	written := map[string]bool{}
+	walkTSNodes(body, func(n *sitter.Node) bool {
+		switch n.Type() {
+		case "function_declaration", "method_definition":
+			// Top-level lexical sub-functions own their own
+			// member access; attributing them to the parent
+			// would conflate scopes.
+			return false
+		case "assignment_expression":
+			left := n.ChildByFieldName("left")
+			if left == nil {
+				return true
+			}
+			line := int(n.StartPoint().Row) + 1
+			if left.Type() == "member_expression" {
+				prop := left.ChildByFieldName("property")
+				if prop != nil {
+					field := prop.Content(src)
+					emit(record{field: field, op: graph.EdgeWrites, line: line})
+					written[strconv.Itoa(line)+":"+field] = true
+				}
+			}
+		case "augmented_assignment_expression":
+			// `x.y += 1` reads + writes; emit both.
+			left := n.ChildByFieldName("left")
+			line := int(n.StartPoint().Row) + 1
+			if left != nil && left.Type() == "member_expression" {
+				prop := left.ChildByFieldName("property")
+				if prop != nil {
+					field := prop.Content(src)
+					emit(record{field: field, op: graph.EdgeWrites, line: line})
+					emit(record{field: field, op: graph.EdgeReads, line: line})
+					written[strconv.Itoa(line)+":"+field] = true
+				}
+			}
+		case "update_expression":
+			// `x.y++` / `x.y--` write.
+			arg := n.ChildByFieldName("argument")
+			line := int(n.StartPoint().Row) + 1
+			if arg != nil && arg.Type() == "member_expression" {
+				prop := arg.ChildByFieldName("property")
+				if prop != nil {
+					field := prop.Content(src)
+					emit(record{field: field, op: graph.EdgeWrites, line: line})
+					written[strconv.Itoa(line)+":"+field] = true
+				}
+			}
+		}
+		return true
+	})
+	walkTSNodes(body, func(n *sitter.Node) bool {
+		switch n.Type() {
+		case "function_declaration", "method_definition":
+			return false
+		case "member_expression":
+			// Skip when this expression is the LHS of an
+			// assignment we already classified.
+			line := int(n.StartPoint().Row) + 1
+			prop := n.ChildByFieldName("property")
+			if prop == nil {
+				return true
+			}
+			field := prop.Content(src)
+			if written[strconv.Itoa(line)+":"+field] {
+				return true
+			}
+			// Skip method-call receivers — those become
+			// EdgeCalls via the existing call-emit pass and
+			// shouldn't double-count as reads.
+			if parent := n.Parent(); parent != nil && parent.Type() == "call_expression" {
+				if fn := parent.ChildByFieldName("function"); fn != nil && fn.Equal(n) {
+					return true
+				}
+			}
+			emit(record{field: field, op: graph.EdgeReads, line: line})
+		}
+		return true
+	})
 }
 
 // emitTSAsyncSpawns walks a function body and emits EdgeSpawns for

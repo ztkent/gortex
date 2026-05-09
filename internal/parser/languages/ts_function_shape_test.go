@@ -147,6 +147,40 @@ func TestTSFunctionShape_ArrayAndPromiseReturnUnwrapped(t *testing.T) {
 	}
 }
 
+func TestTSFunctionShape_ArrowFieldNestJsControllerStyle(t *testing.T) {
+	// NestJS controllers and route registries set arrow-shaped fields
+	// inside an object — the params/returns should still get
+	// function-shape edges so cross-file refactors land properly.
+	src := `export const api = {
+	health: async (req: Request): Promise<Health> => buildHealth(req),
+};
+`
+	_, edges := runTSExtract(t, "src/api.ts", src)
+
+	paramEdges := edgesByKind(edges, graph.EdgeParamOf)
+	hasReq := false
+	for _, e := range paramEdges {
+		if e.To != "" && (e.To == "src/api.ts::api.health@2" || // colocated id
+			e.To == "src/api.ts::api.health") {
+			hasReq = true
+		}
+	}
+	if !hasReq {
+		t.Errorf("expected EdgeParamOf for arrow-field method; got %v", edgeTargets(paramEdges))
+	}
+
+	returns := edgesByKind(edges, graph.EdgeReturns)
+	hasHealth := false
+	for _, e := range returns {
+		if e.To == "unresolved::Health" {
+			hasHealth = true
+		}
+	}
+	if !hasHealth {
+		t.Errorf("expected EdgeReturns → unresolved::Health (Promise unwrapped); got %v", edgeTargets(returns))
+	}
+}
+
 func TestTSAsyncSpawns_AwaitedCall(t *testing.T) {
 	src := `async function load(id: string) {
 	const u = await fetchUser(id);
@@ -204,6 +238,82 @@ func TestTSAsyncSpawns_NestedFunctionScopeRespected(t *testing.T) {
 	// `foo` is called by inner, NOT awaited, so no spawn edge.
 	for _, e := range edgesByKind(edges, graph.EdgeSpawns) {
 		t.Errorf("unexpected EdgeSpawns %v", e.To)
+	}
+}
+
+func TestTSFieldAccess_Writes(t *testing.T) {
+	src := `class Server {
+	private port: number = 0;
+	private addr: string = "";
+	configure(p: number) {
+		this.port = p;
+		this.addr += "x";
+		this.port++;
+	}
+}
+`
+	_, edges := runTSExtract(t, "src/srv.ts", src)
+	writes := edgesByKind(edges, graph.EdgeWrites)
+	hasPort, hasAddr := false, false
+	for _, e := range writes {
+		if e.To == "unresolved::*.port" {
+			hasPort = true
+		}
+		if e.To == "unresolved::*.addr" {
+			hasAddr = true
+		}
+	}
+	if !hasPort || !hasAddr {
+		t.Errorf("expected EdgeWrites for port and addr; got %v", edgeTargets(writes))
+	}
+}
+
+func TestTSFieldAccess_Reads(t *testing.T) {
+	src := `class Server {
+	private port: number = 0;
+	snapshot(): number {
+		return this.port;
+	}
+}
+`
+	_, edges := runTSExtract(t, "src/srv.ts", src)
+	reads := edgesByKind(edges, graph.EdgeReads)
+	hasPort := false
+	for _, e := range reads {
+		if e.To == "unresolved::*.port" {
+			hasPort = true
+		}
+	}
+	if !hasPort {
+		t.Errorf("expected EdgeReads → unresolved::*.port; got %v", edgeTargets(reads))
+	}
+}
+
+func TestTSFieldAccess_AugmentedAssignReadsAndWrites(t *testing.T) {
+	src := `class Counter {
+	count: number = 0;
+	bump() {
+		this.count += 1;
+	}
+}
+`
+	_, edges := runTSExtract(t, "src/c.ts", src)
+	writes := edgesByKind(edges, graph.EdgeWrites)
+	reads := edgesByKind(edges, graph.EdgeReads)
+	hasWrite, hasRead := false, false
+	for _, e := range writes {
+		if e.To == "unresolved::*.count" {
+			hasWrite = true
+		}
+	}
+	for _, e := range reads {
+		if e.To == "unresolved::*.count" {
+			hasRead = true
+		}
+	}
+	if !hasWrite || !hasRead {
+		t.Errorf("expected EdgeWrites + EdgeReads on count for `+= ` op; got W=%v R=%v",
+			edgeTargets(writes), edgeTargets(reads))
 	}
 }
 

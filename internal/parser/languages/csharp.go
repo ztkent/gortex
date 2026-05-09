@@ -309,6 +309,7 @@ func (e *CSharpExtractor) emitContainer(m parser.QueryResult, kind string, nodeK
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
 	})
 	emitCSharpAnnotationEdges(csharpCollectAttributes(def.Node, src), id, filePath, result, annotationSeen)
+	emitCSharpGenericParamNodes(id, def.Node, src, filePath, def.StartLine+1, result)
 }
 
 // csharpVisibility scans a declaration's modifier children for an
@@ -459,6 +460,7 @@ func (e *CSharpExtractor) emitMethod(m parser.QueryResult, filePath, fileID stri
 	if body := csharpFunctionBody(def.Node); body != nil {
 		emitCSharpAsyncSpawns(id, body, src, filePath, result)
 	}
+	emitCSharpFunctionShape(id, def.Node, src, filePath, startLine1, result)
 }
 
 func (e *CSharpExtractor) emitConstructor(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen map[string]bool) {
@@ -489,6 +491,12 @@ func (e *CSharpExtractor) emitConstructor(m parser.QueryResult, filePath, fileID
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: id, To: ownerID, Kind: graph.EdgeMemberOf, FilePath: filePath, Line: startLine1,
 	})
+	// Constructor params: same shape as methods so DI containers and
+	// codegen tooling see the dependencies they need.
+	if body := csharpFunctionBody(def.Node); body != nil {
+		emitCSharpAsyncSpawns(id, body, src, filePath, result)
+	}
+	emitCSharpFunctionShape(id, def.Node, src, filePath, startLine1, result)
 }
 
 func (e *CSharpExtractor) emitField(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen map[string]bool) {

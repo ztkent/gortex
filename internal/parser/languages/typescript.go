@@ -443,6 +443,15 @@ func (e *TypeScriptExtractor) emitArrowField(m parser.QueryResult, filePath, fil
 		From: fileID, To: id, Kind: graph.EdgeDefines,
 		FilePath: filePath, Line: def.StartLine + 1,
 	})
+	// Function shape on the arrow body — covers NestJS controller
+	// patterns (`@Controller class Foo { @Get() health = async () => …`)
+	// and bare `export const api = { health: async (req) => ... }`
+	// shapes whose params/returns/generics weren't surfaced before.
+	if body := m.Captures["objfn.body"]; body != nil && body.Node != nil {
+		emitTSFunctionShape(id, body.Node, src, filePath, def.StartLine+1, result)
+	} else {
+		emitTSFunctionShape(id, def.Node, src, filePath, def.StartLine+1, result)
+	}
 }
 
 // tsArrowFieldOwner walks from a `pair` node up the AST looking for

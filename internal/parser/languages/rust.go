@@ -746,6 +746,7 @@ func (e *RustExtractor) emitStruct(m parser.QueryResult, filePath, fileID string
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
 	})
 	emitRustAnnotationEdges(rustCollectAttributes(def.Node), id, filePath, src, result, annotationSeen)
+	emitRustGenericParamNodes(id, def.Node, src, filePath, def.StartLine+1, result)
 }
 
 func (e *RustExtractor) emitEnum(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen, annotationSeen map[string]bool) {
@@ -773,6 +774,7 @@ func (e *RustExtractor) emitEnum(m parser.QueryResult, filePath, fileID string, 
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
 	})
 	emitRustAnnotationEdges(rustCollectAttributes(def.Node), id, filePath, src, result, annotationSeen)
+	emitRustGenericParamNodes(id, def.Node, src, filePath, def.StartLine+1, result)
 }
 
 func (e *RustExtractor) emitTrait(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen, annotationSeen map[string]bool, traitMethods map[string][]string) {
@@ -799,6 +801,7 @@ func (e *RustExtractor) emitTrait(m parser.QueryResult, filePath, fileID string,
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
 	})
 	emitRustAnnotationEdges(rustCollectAttributes(def.Node), id, filePath, src, result, annotationSeen)
+	emitRustGenericParamNodes(id, def.Node, src, filePath, def.StartLine+1, result)
 }
 
 func (e *RustExtractor) emitVariant(m parser.QueryResult, filePath string, src []byte, result *parser.ExtractionResult) {

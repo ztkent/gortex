@@ -54,6 +54,24 @@ fun runAll() {
 	}
 }
 
+func TestKotlinFunctionShape_ClassLevelGeneric(t *testing.T) {
+	src := `package x
+
+class Repo<T : Any>
+`
+	nodes, _ := runKotlinExtract(t, "x/Repo.kt", src)
+	gp := nodesOfKind(nodes, graph.KindGenericParam)
+	hasT := false
+	for _, n := range gp {
+		if n.Name == "T" {
+			hasT = true
+		}
+	}
+	if !hasT {
+		t.Fatalf("expected KindGenericParam T at class level; got %v", nodeNames(gp))
+	}
+}
+
 func TestKotlinAsyncSpawns_RunBlocking(t *testing.T) {
 	src := `package x
 

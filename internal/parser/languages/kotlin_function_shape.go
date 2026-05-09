@@ -110,6 +110,63 @@ func walkKotlinNodes(n *sitter.Node, visit func(*sitter.Node) bool) {
 	}
 }
 
+// emitKotlinGenericParamNodes emits KindGenericParam nodes plus
+// EdgeMemberOf edges for the type_parameters of a Kotlin class /
+// interface / function declaration.
+func emitKotlinGenericParamNodes(ownerID string, decl *sitter.Node, src []byte, filePath string, line int, result *parser.ExtractionResult) {
+	if decl == nil {
+		return
+	}
+	tparams := decl.ChildByFieldName("type_parameters")
+	if tparams == nil {
+		for i := 0; i < int(decl.NamedChildCount()); i++ {
+			c := decl.NamedChild(i)
+			if c != nil && c.Type() == "type_parameters" {
+				tparams = c
+				break
+			}
+		}
+	}
+	if tparams == nil {
+		return
+	}
+	for i := 0; i < int(tparams.NamedChildCount()); i++ {
+		tp := tparams.NamedChild(i)
+		if tp == nil || tp.Type() != "type_parameter" {
+			continue
+		}
+		var name string
+		for j := 0; j < int(tp.NamedChildCount()); j++ {
+			c := tp.NamedChild(j)
+			if c != nil && (c.Type() == "type_identifier" || c.Type() == "simple_identifier") && name == "" {
+				name = c.Content(src)
+				break
+			}
+		}
+		if name == "" {
+			continue
+		}
+		gpID := ownerID + "#tparam:" + name
+		result.Nodes = append(result.Nodes, &graph.Node{
+			ID:        gpID,
+			Kind:      graph.KindGenericParam,
+			Name:      name,
+			FilePath:  filePath,
+			StartLine: line,
+			EndLine:   line,
+			Language:  "kotlin",
+		})
+		result.Edges = append(result.Edges, &graph.Edge{
+			From:     gpID,
+			To:       ownerID,
+			Kind:     graph.EdgeMemberOf,
+			FilePath: filePath,
+			Line:     line,
+			Origin:   graph.OriginASTResolved,
+		})
+	}
+}
+
 // kotlinFunctionBody returns the body block of a Kotlin function
 // declaration, or nil for abstract / expression-bodied functions
 // without explicit braces (those don't have spawn-style calls in

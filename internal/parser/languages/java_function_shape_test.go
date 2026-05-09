@@ -104,6 +104,66 @@ public class Args {
 	}
 }
 
+func TestJavaFunctionShape_ClassLevelGeneric(t *testing.T) {
+	src := `package x;
+
+public class Repo<T extends Number> {}
+`
+	nodes, edges := runJavaExtract(t, "x/Repo.java", src)
+	gp := nodesOfKind(nodes, graph.KindGenericParam)
+	hasT := false
+	for _, n := range gp {
+		if n.Name == "T" {
+			hasT = true
+		}
+	}
+	if !hasT {
+		t.Fatalf("expected KindGenericParam T at class level; got %v", nodeNames(gp))
+	}
+	hasMember := false
+	for _, e := range edges {
+		if e.Kind == graph.EdgeMemberOf && e.From == "x/Repo.java::Repo#tparam:T" && e.To == "x/Repo.java::Repo" {
+			hasMember = true
+		}
+	}
+	if !hasMember {
+		t.Errorf("expected EdgeMemberOf class generic → class")
+	}
+}
+
+func TestJavaFunctionShape_ConstructorParams(t *testing.T) {
+	src := `package x;
+
+public class UserService {
+	public UserService(UserRepo repo, AuthClient auth) {}
+}
+`
+	_, edges := runJavaExtract(t, "x/UserService.java", src)
+	params := edgesByKind(edges, graph.EdgeParamOf)
+	hasCtor := false
+	for _, e := range params {
+		if e.To == "x/UserService.java::UserService.<init>" {
+			hasCtor = true
+		}
+	}
+	if !hasCtor {
+		t.Errorf("expected EdgeParamOf for constructor; got %v", edgeTargets(params))
+	}
+	typed := edgesByKind(edges, graph.EdgeTypedAs)
+	hasUserRepo, hasAuthClient := false, false
+	for _, e := range typed {
+		if e.To == "unresolved::UserRepo" {
+			hasUserRepo = true
+		}
+		if e.To == "unresolved::AuthClient" {
+			hasAuthClient = true
+		}
+	}
+	if !hasUserRepo || !hasAuthClient {
+		t.Errorf("expected EdgeTypedAs for UserRepo and AuthClient; got %v", edgeTargets(typed))
+	}
+}
+
 func TestCanonicalizeJavaTypeRef(t *testing.T) {
 	cases := []struct {
 		in, out string

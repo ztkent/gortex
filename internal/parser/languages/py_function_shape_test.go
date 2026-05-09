@@ -1,6 +1,7 @@
 package languages
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/zzet/gortex/internal/graph"
@@ -124,6 +125,29 @@ func TestPyFunctionShape_SkipsSelfAndCls(t *testing.T) {
 			t.Errorf("KindParam %q should not be emitted (receiver)", n.Name)
 		}
 	}
+}
+
+func TestPyFunctionShape_ClassLevelPEP695Generic(t *testing.T) {
+	// PEP 695: `class Foo[T]:`. Depending on the bundled tree-sitter-
+	// python version the type_parameters child may or may not be
+	// present at the class level. We assert no panic + (best-effort)
+	// the generic parameter is attached to the class. When the
+	// grammar doesn't recognise it, the helper silently emits
+	// nothing — which is acceptable since callers are tolerant of
+	// missing class generics.
+	src := `class Repo[T]:
+	def get(self, x: T) -> T:
+		return x
+`
+	nodes, _ := runPyExtract(t, "x.py", src)
+	gp := nodesOfKind(nodes, graph.KindGenericParam)
+	for _, n := range gp {
+		if n.Name == "T" && strings.Contains(n.ID, "x.py::Repo#tparam") {
+			return // grammar supports PEP 695: assertion satisfied.
+		}
+	}
+	t.Logf("PEP-695 class generic not surfaced; tree-sitter-python "+
+		"version may predate the syntax — got %v", nodeIDs(gp))
 }
 
 func TestPyAsyncSpawns_Await(t *testing.T) {

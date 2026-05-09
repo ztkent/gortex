@@ -437,34 +437,54 @@ func (p *Provider) enrichCallHierarchy(g *graph.Graph, absRoot string, result *s
 		}
 		for _, item := range items {
 			calls, err := p.outgoingCalls(item)
-			if err != nil {
-				continue
+			if err == nil {
+				for _, c := range calls {
+					p.recordHierarchyCall(g, absRoot, n, c.To, true, result)
+				}
 			}
-			for _, c := range calls {
-				toPath := uriToPath(c.To.URI, absRoot)
-				if toPath == "" {
-					continue
+			incoming, err := p.incomingCalls(item)
+			if err == nil {
+				for _, c := range incoming {
+					p.recordHierarchyCall(g, absRoot, n, c.From, false, result)
 				}
-				toNode := semantic.MatchNodeByFileLine(g, toPath,
-					c.To.SelectionRange.Start.Line+1)
-				if toNode == nil {
-					continue
-				}
-				existing := semantic.FindMatchingEdge(g, n.ID, toNode.ID, graph.EdgeCalls)
-				if existing != nil {
-					if graph.OriginRank(existing.Origin) < graph.OriginRank(graph.OriginLSPResolved) {
-						semantic.ConfirmEdge(existing, p.Name())
-						existing.Origin = graph.OriginLSPResolved
-						result.EdgesConfirmed++
-					}
-					continue
-				}
-				semantic.AddSemanticEdge(g, n.ID, toNode.ID, graph.EdgeCalls,
-					n.FilePath, n.StartLine, p.Name())
-				result.EdgesAdded++
 			}
 		}
 	}
+}
+
+// recordHierarchyCall lands one call-hierarchy hop into the graph.
+// asOutgoing=true means "this node calls other"; false means "other
+// calls this node" (incoming-calls direction). Existing edges get
+// promoted to lsp_resolved; missing edges get added.
+func (p *Provider) recordHierarchyCall(g *graph.Graph, absRoot string, n *graph.Node, other CallHierarchyItem, asOutgoing bool, result *semantic.EnrichResult) {
+	otherPath := uriToPath(other.URI, absRoot)
+	if otherPath == "" {
+		return
+	}
+	otherNode := semantic.MatchNodeByFileLine(g, otherPath,
+		other.SelectionRange.Start.Line+1)
+	if otherNode == nil {
+		return
+	}
+	from, to := n, otherNode
+	if !asOutgoing {
+		from, to = otherNode, n
+	}
+	if from.ID == to.ID {
+		return
+	}
+	existing := semantic.FindMatchingEdge(g, from.ID, to.ID, graph.EdgeCalls)
+	if existing != nil {
+		if graph.OriginRank(existing.Origin) < graph.OriginRank(graph.OriginLSPResolved) {
+			semantic.ConfirmEdge(existing, p.Name())
+			existing.Origin = graph.OriginLSPResolved
+			result.EdgesConfirmed++
+		}
+		return
+	}
+	semantic.AddSemanticEdge(g, from.ID, to.ID, graph.EdgeCalls,
+		from.FilePath, from.StartLine, p.Name())
+	result.EdgesAdded++
 }
 
 // enrichTypeHierarchy walks every type / interface node and uses
