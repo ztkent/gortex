@@ -117,6 +117,40 @@ func (r *Router) RegisterSpec(spec *ServerSpec) {
 	r.mu.Unlock()
 }
 
+// RegisterAvailable iterates every spec in the global registry and
+// registers each one whose command (or any AlternativeCommands entry)
+// resolves on the daemon's PATH. The `disabled` set is checked first
+// — listed names are skipped unconditionally so users keep precise
+// per-spec opt-out without needing to know the registry contents.
+//
+// Returns the list of names that were actually registered, in
+// registration order. Idempotent against RegisterSpec — re-running
+// over already-registered specs is a no-op.
+//
+// Why this is safe-by-default: RegisterSpec only marks the spec as
+// eligible — no subprocess is spawned until something calls
+// ForSpec / ForSpecWorkspace. Routers that no caller queries cost
+// the daemon nothing beyond a cached PATH lookup.
+func (r *Router) RegisterAvailable(disabled map[string]bool) []string {
+	specs := AllSpecs()
+	var registered []string
+	for _, spec := range specs {
+		if spec == nil {
+			continue
+		}
+		if disabled[spec.Name] {
+			continue
+		}
+		if !r.specAvailable(spec) {
+			continue
+		}
+		r.RegisterSpec(spec)
+		registered = append(registered, spec.Name)
+	}
+	sort.Strings(registered)
+	return registered
+}
+
 // EnabledSpecs returns every spec previously registered via
 // RegisterSpec, sorted by name. The slice may include specs whose
 // command is not on PATH — call Available(spec) to filter.

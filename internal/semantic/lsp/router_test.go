@@ -320,3 +320,93 @@ func TestRouter_DefaultWorkspace(t *testing.T) {
 // timeNow is a tiny shim so the test file doesn't need the time
 // import for one call.
 func timeNow() (t time.Time) { return time.Now() }
+
+// TestRouter_RegisterAvailable_RespectsDisabled — every spec marked
+// disabled in the input map must be skipped, even if its binary
+// resolves on PATH. We pre-poison the avail cache so this test runs
+// the same way on a CI box without any LSP binaries installed.
+func TestRouter_RegisterAvailable_RespectsDisabled(t *testing.T) {
+	r := NewRouter(t.TempDir(), zap.NewNop())
+	defer func() { _ = r.Close() }()
+
+	// Force-mark every known spec as available so the test isn't
+	// sensitive to the host's LSP install. Then exercise the
+	// disabled-set logic in isolation.
+	r.availMu.Lock()
+	for _, s := range AllSpecs() {
+		r.avail[s.Name] = true
+	}
+	r.availMu.Unlock()
+
+	registered := r.RegisterAvailable(map[string]bool{
+		"gopls":         true,
+		"rust-analyzer": true,
+	})
+
+	for _, name := range registered {
+		if name == "gopls" || name == "rust-analyzer" {
+			t.Fatalf("disabled spec %q must not appear in registered list: %v", name, registered)
+		}
+	}
+	enabled := r.EnabledSpecNames()
+	for _, name := range enabled {
+		if name == "gopls" || name == "rust-analyzer" {
+			t.Fatalf("disabled spec %q must not appear in EnabledSpecNames: %v", name, enabled)
+		}
+	}
+	// And at least one other spec should have been registered (the
+	// registry contains 18+ entries; with PATH availability forced,
+	// every non-disabled one lands).
+	if len(registered) == 0 {
+		t.Fatal("expected RegisterAvailable to register at least one non-disabled spec")
+	}
+}
+
+// TestRouter_RegisterAvailable_SkipsBinariesNotOnPath — a spec whose
+// command isn't on PATH must NOT be registered. Asserts the
+// PATH-probe gate kicks in even when the disabled set is empty.
+func TestRouter_RegisterAvailable_SkipsBinariesNotOnPath(t *testing.T) {
+	r := NewRouter(t.TempDir(), zap.NewNop())
+	defer func() { _ = r.Close() }()
+
+	// Pre-poison avail to false for every spec so RegisterAvailable
+	// has to skip them all.
+	r.availMu.Lock()
+	for _, s := range AllSpecs() {
+		r.avail[s.Name] = false
+	}
+	r.availMu.Unlock()
+
+	registered := r.RegisterAvailable(nil)
+	if len(registered) != 0 {
+		t.Fatalf("expected zero registrations when no binaries are on PATH, got %v", registered)
+	}
+	if names := r.EnabledSpecNames(); len(names) != 0 {
+		t.Fatalf("expected EnabledSpecNames to stay empty, got %v", names)
+	}
+}
+
+// TestRouter_RegisterAvailable_Idempotent — re-running the auto-
+// register pass over an already-populated router doesn't duplicate
+// entries. Same shape as TestRouter_RegisterSpec_Idempotent but for
+// the bulk path.
+func TestRouter_RegisterAvailable_Idempotent(t *testing.T) {
+	r := NewRouter(t.TempDir(), zap.NewNop())
+	defer func() { _ = r.Close() }()
+
+	r.availMu.Lock()
+	for _, s := range AllSpecs() {
+		r.avail[s.Name] = true
+	}
+	r.availMu.Unlock()
+
+	first := r.RegisterAvailable(nil)
+	second := r.RegisterAvailable(nil)
+	if len(first) != len(second) {
+		t.Fatalf("re-running RegisterAvailable changed the registered set: first=%v second=%v", first, second)
+	}
+	enabled := r.EnabledSpecNames()
+	if len(enabled) != len(first) {
+		t.Fatalf("EnabledSpecNames length %d should equal RegisterAvailable return %d", len(enabled), len(first))
+	}
+}

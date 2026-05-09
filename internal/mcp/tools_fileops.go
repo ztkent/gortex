@@ -32,22 +32,29 @@ var errPathEscape = errors.New("relative path escapes the indexed repo root")
 //   - repo-prefixed paths (e.g. "gortex/internal/foo.go" in multi-repo mode)
 //   - paths relative to the single indexer's root (single-repo mode only)
 //
-// Returns the absolute path and the repo-relative form suitable for
-// session bookkeeping. In multi-repo mode, a bare-relative path with no
-// repo prefix is ambiguous — there is no implicit "primary repo" — so it
-// returns ("", "") and the caller must surface an error to the agent.
+// Returns the absolute path, the repo-relative form for session
+// bookkeeping, and an error sentinel describing WHY the input was
+// rejected when one of the rejection paths fires:
 //
-// Relative or repo-prefixed paths that resolve outside the anchor repo's
-// root via `..` segments are rejected with ("", "") so a stray
-// `../../etc/passwd` style input doesn't silently land on a system file.
-func (s *Server) resolveFilePath(rawPath string) (absPath, relPath string) {
+//   - errPathUnresolved — empty input, missing indexer, or a multi-repo
+//     bare-relative path that doesn't match any registered prefix
+//     (no implicit "primary repo", so the daemon refuses to fall
+//     through to its process CWD).
+//   - errPathEscape — relative or repo-prefixed input that resolves
+//     outside the anchor repo's root via `..` segments. Catches
+//     `../../etc/passwd` style attempts at the boundary instead of
+//     letting them silently land on system files.
+//
+// Absolute paths bypass containment by design — agents that hand
+// over an absolute path own the location.
+func (s *Server) resolveFilePath(rawPath string) (absPath, relPath string, err error) {
 	if rawPath == "" {
-		return "", ""
+		return "", "", fmt.Errorf("%w: path is empty", errPathUnresolved)
 	}
 
 	if filepath.IsAbs(rawPath) {
 		abs := filepath.Clean(rawPath)
-		return abs, s.repoRelative(abs)
+		return abs, s.repoRelative(abs), nil
 	}
 
 	if s.multiIndexer != nil {
@@ -56,30 +63,32 @@ func (s *Server) resolveFilePath(rawPath string) (absPath, relPath string) {
 		// daemon process CWD.
 		prefix := matchedRepoPrefix(s.multiIndexer, rawPath)
 		if prefix == "" {
-			return "", ""
+			prefixes := s.multiIndexer.RepoPrefixes()
+			return "", "", fmt.Errorf("%w: path %q does not start with a known repo prefix; expected one of: %s/, or an absolute path",
+				errPathUnresolved, rawPath, strings.Join(prefixes, "/, "))
 		}
 		root, ok := s.multiIndexer.RepoRoot(prefix)
 		if !ok {
-			return "", ""
+			return "", "", fmt.Errorf("%w: repo prefix %q has no root path", errPathUnresolved, prefix)
 		}
 		abs := filepath.Clean(filepath.Join(root, strings.TrimPrefix(rawPath, prefix+"/")))
 		if !pathContainedIn(abs, root) {
-			return "", ""
+			return "", "", fmt.Errorf("%w: %q resolves to %q, outside repo root %q", errPathEscape, rawPath, abs, root)
 		}
-		return abs, rawPath
+		return abs, rawPath, nil
 	}
 
 	if s.indexer != nil {
 		if root := s.indexer.RootPath(); root != "" {
 			abs := filepath.Clean(filepath.Join(root, rawPath))
 			if !pathContainedIn(abs, root) {
-				return "", ""
+				return "", "", fmt.Errorf("%w: %q resolves to %q, outside repo root %q", errPathEscape, rawPath, abs, root)
 			}
-			return abs, rawPath
+			return abs, rawPath, nil
 		}
 	}
 
-	return "", ""
+	return "", "", fmt.Errorf("%w: no indexer is attached and path %q is not absolute", errPathUnresolved, rawPath)
 }
 
 // matchedRepoPrefix returns the longest repo prefix that prefixes rawPath
@@ -272,9 +281,9 @@ func (s *Server) handleEditFile(ctx context.Context, req mcp.CallToolRequest) (*
 	replaceAll := req.GetBool("replace_all", false)
 	dryRun := req.GetBool("dry_run", false)
 
-	absPath, relPath := s.resolveFilePath(rawPath)
-	if absPath == "" {
-		return mcp.NewToolResultError(pathResolutionError(s, rawPath)), nil
+	absPath, relPath, resolveErr := s.resolveFilePath(rawPath)
+	if resolveErr != nil {
+		return mcp.NewToolResultError(resolveErr.Error()), nil
 	}
 
 	content, err := os.ReadFile(absPath)
@@ -351,9 +360,9 @@ func (s *Server) handleWriteFile(ctx context.Context, req mcp.CallToolRequest) (
 	}
 	dryRun := req.GetBool("dry_run", false)
 
-	absPath, relPath := s.resolveFilePath(rawPath)
-	if absPath == "" {
-		return mcp.NewToolResultError(pathResolutionError(s, rawPath)), nil
+	absPath, relPath, resolveErr := s.resolveFilePath(rawPath)
+	if resolveErr != nil {
+		return mcp.NewToolResultError(resolveErr.Error()), nil
 	}
 
 	status := "created"
@@ -396,33 +405,6 @@ func (s *Server) handleWriteFile(ctx context.Context, req mcp.CallToolRequest) (
 		"bytes_written": len(content),
 		"reindexed":     reindexed,
 	})
-}
-
-// pathResolutionError builds an actionable error message for a path that
-// resolveFilePath couldn't anchor. Names which mode the daemon is in
-// (single-repo / multi-repo / unindexed) and what shape would have
-// worked, so an agent can self-correct without retrying blindly.
-func pathResolutionError(s *Server, rawPath string) string {
-	if rawPath == "" {
-		return "path is required"
-	}
-	if filepath.IsAbs(rawPath) {
-		return fmt.Sprintf("could not resolve absolute path %q", rawPath)
-	}
-	if s.multiIndexer != nil {
-		prefixes := s.multiIndexer.RepoPrefixes()
-		return fmt.Sprintf(
-			"path %q is not absolute and does not start with a known repo prefix; expected one of: %s/, or an absolute path. The path also must not escape the repo via `..`.",
-			rawPath, strings.Join(prefixes, "/, "))
-	}
-	if s.indexer != nil {
-		root := s.indexer.RootPath()
-		if root == "" {
-			return fmt.Sprintf("path %q is not absolute and no repo is indexed; pass an absolute path or run gortex track first", rawPath)
-		}
-		return fmt.Sprintf("path %q is not absolute and resolves outside the indexed repo root %q; pass an absolute path or use a path relative to the repo root without `..` escapes", rawPath, root)
-	}
-	return fmt.Sprintf("path %q could not be anchored: no indexer is attached to the daemon", rawPath)
 }
 
 // matchLocationsHint returns a brief " (lines X, Y, Z)" hint listing up to

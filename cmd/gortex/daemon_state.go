@@ -77,6 +77,49 @@ func isTruthyEnv(name string) bool {
 	}
 }
 
+// lspDisabledSet builds the set of LSP spec names that should NOT be
+// auto-registered by Router.RegisterAvailable. Two inputs are merged:
+//
+//  1. Per-spec config overrides — any entry in `semantic.providers`
+//     with `enabled: false` whose name matches a known LSP spec.
+//     Already-disabled-by-config users keep their opt-out without
+//     having to also set the env var.
+//  2. The GORTEX_LSP_DISABLE env var — comma-separated spec names.
+//     The literal value "all" or "*" disables auto-registration
+//     entirely (the explicit-config loop above still runs).
+//
+// The special key "__all__" in the returned map signals
+// "skip auto-register everywhere" and is checked separately by
+// callers; per-spec keys carry the spec.Name.
+func lspDisabledSet(providers []config.SemanticProviderConfig, envVar string) map[string]bool {
+	out := map[string]bool{}
+	for _, pc := range providers {
+		if pc.Enabled {
+			continue
+		}
+		// Only consider entries that resolve to a known LSP spec —
+		// otherwise an `enabled: false` for a SCIP indexer or a
+		// custom daemon would silently shadow an LSP of the same
+		// name (rare in practice, but the registry-membership check
+		// makes the intent explicit).
+		if lsp.SpecByName(pc.Name) != nil {
+			out[pc.Name] = true
+		}
+	}
+	for _, raw := range strings.Split(envVar, ",") {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			continue
+		}
+		if strings.EqualFold(name, "all") || name == "*" {
+			out["__all__"] = true
+			continue
+		}
+		out[name] = true
+	}
+	return out
+}
+
 func buildDaemonState(logger *zap.Logger) (*daemonState, error) {
 	cfg, err := config.Load(cfgFile)
 	if err != nil {
@@ -151,8 +194,29 @@ func buildDaemonState(logger *zap.Logger) (*daemonState, error) {
 				semMgr.RegisterProvider(lsp.NewProvider(pc.Command, pc.Args, pc.Languages, pc.Daemon, pc.MaxParallel, logger))
 			}
 		}
+
+		// Auto-register every known LSP spec whose binary resolves on
+		// PATH. Compiler-grade providers (gopls, tsserver, pyright,
+		// rust-analyzer, clangd, jdtls, …) should be on by default —
+		// users get diagnostics / code actions / find_implementations
+		// without learning the YAML knob, and the lazy-spawn router
+		// keeps cost at "one cached PATH lookup" until a tool actually
+		// calls into a spec. Per-spec opt-out works two ways:
+		//   - .gortex.yaml: `semantic.providers: [{ name: gopls,
+		//     enabled: false }]` — config-side disable.
+		//   - GORTEX_LSP_DISABLE=gopls,tsserver — env-var quick kill.
+		// GORTEX_LSP_DISABLE=all (or =*) disables auto-register
+		// entirely while still honoring the explicit-config loop above.
+		disabled := lspDisabledSet(cfg.Semantic.Providers, os.Getenv("GORTEX_LSP_DISABLE"))
+		var autoRegistered []string
+		if !disabled["__all__"] {
+			autoRegistered = lspRouter.RegisterAvailable(disabled)
+		}
+
 		idx.SetSemanticManager(semMgr)
-		logger.Info("daemon: semantic enrichment enabled", zap.Int("providers", len(semCfg.Providers)))
+		logger.Info("daemon: semantic enrichment enabled",
+			zap.Int("providers", len(semCfg.Providers)),
+			zap.Strings("lsp_auto_registered", autoRegistered))
 	}
 
 	// Embeddings are OPT-IN on the daemon. Enabled by any of:

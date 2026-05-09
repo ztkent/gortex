@@ -1,6 +1,7 @@
 package lsp
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -9,6 +10,37 @@ import (
 	"strings"
 	"time"
 )
+
+// wholeFileEnd returns the (line, character) position of the end of
+// the file at absPath, suitable for a full-file LSP Range. Position
+// is 0-based and exclusive — line N where the file has N+1 lines, or
+// line N character C when the last line has C characters before EOL.
+//
+// gopls (and other strict servers) reject `Position{Line: 1<<30}` as
+// "line number out of range"; this helper returns a real bound so the
+// fix-all loop survives strict validators. On stat / read errors we
+// fall back to a bounded-but-still-large sentinel — better to ask for
+// "the first ~1M lines" than to fail the whole pass on a transient
+// read error.
+func wholeFileEnd(absPath string) (line, character int) {
+	data, err := os.ReadFile(absPath)
+	if err != nil {
+		return 1_000_000, 0
+	}
+	if len(data) == 0 {
+		return 0, 0
+	}
+	// Trailing newline → last "line" is empty. LSP positions are
+	// 0-based and an "End" pointing at the start of an empty line N
+	// is the canonical way to span everything before it.
+	lineCount := bytes.Count(data, []byte{'\n'})
+	lastNL := bytes.LastIndexByte(data, '\n')
+	tail := data[lastNL+1:]
+	if len(tail) == 0 {
+		return lineCount, 0
+	}
+	return lineCount, len(tail)
+}
 
 // FixAllOptions controls FixAllInFile behaviour.
 type FixAllOptions struct {
@@ -94,10 +126,16 @@ func (p *Provider) FixAllInFile(opts FixAllOptions) (*FixAllResult, error) {
 		diags, _ := p.LastDiagnostics(opts.AbsPath)
 
 		// Build the request — full-file range, restricted to the
-		// caller's allowed kinds.
+		// caller's allowed kinds. We can't pass an unbounded sentinel
+		// (1 << 30 etc.) because gopls and a few other servers
+		// validate End.Line against the file's real line count and
+		// reject with `line number N out of range 0-M`. Read the
+		// file's actual line count once per iteration so re-edits
+		// during fix-all stay in sync.
+		endLine, endChar := wholeFileEnd(opts.AbsPath)
 		req := CodeActionsRequest{
 			AbsPath:     opts.AbsPath,
-			Range:       Range{Start: Position{Line: 0, Character: 0}, End: Position{Line: 1 << 30, Character: 0}},
+			Range:       Range{Start: Position{Line: 0, Character: 0}, End: Position{Line: endLine, Character: endChar}},
 			Diagnostics: diags,
 			Only:        kinds,
 		}

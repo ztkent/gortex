@@ -256,8 +256,21 @@ func runServer(_ *cobra.Command, _ []string) error {
 			}
 		}
 
+		// Auto-register every known LSP spec whose binary resolves on
+		// PATH — same default-on shape as the daemon path, so
+		// `gortex server` and `gortex daemon start` agree on which
+		// LSPs are available without forcing users to learn a YAML
+		// knob. Per-spec opt-out via `semantic.providers: [{ name,
+		// enabled: false }]` or GORTEX_LSP_DISABLE=name1,name2.
+		// GORTEX_LSP_DISABLE=all skips the auto-register entirely.
+		disabled := lspDisabledSet(cfg.Semantic.Providers, os.Getenv("GORTEX_LSP_DISABLE"))
+		var autoRegistered []string
+		if !disabled["__all__"] {
+			autoRegistered = lspRouter.RegisterAvailable(disabled)
+		}
+
 		idx.SetSemanticManager(semMgr)
-		fmt.Fprintf(os.Stderr, "[gortex] server: semantic enrichment enabled (mode: %s)\n", serverSemanticMode)
+		fmt.Fprintf(os.Stderr, "[gortex] server: semantic enrichment enabled (mode: %s, lsp_auto_registered: %v)\n", serverSemanticMode, autoRegistered)
 	}
 
 	// Multi-repo support.

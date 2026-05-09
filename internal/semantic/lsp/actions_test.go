@@ -214,3 +214,41 @@ func TestSortActionsIsStable(t *testing.T) {
 	sort.Strings(titles)
 	require.Equal(t, []string{"First", "Second", "Third"}, titles)
 }
+
+// TestWholeFileEnd regresses the fix-all "line number 1073741824 out
+// of range" panic — gopls validates End.Line against actual file
+// length, so wholeFileEnd must return real positions, not a 1<<30
+// sentinel.
+func TestWholeFileEnd(t *testing.T) {
+	tests := []struct {
+		name     string
+		content  string
+		wantLine int
+		wantChar int
+	}{
+		{name: "empty file", content: "", wantLine: 0, wantChar: 0},
+		{name: "single line no newline", content: "package main", wantLine: 0, wantChar: 12},
+		{name: "single line with trailing newline", content: "package main\n", wantLine: 1, wantChar: 0},
+		{name: "two lines no trailing newline", content: "a\nbb", wantLine: 1, wantChar: 2},
+		{name: "two lines trailing newline", content: "a\nbb\n", wantLine: 2, wantChar: 0},
+		{name: "many lines", content: "line1\nline2\nline3\nline4\n", wantLine: 4, wantChar: 0},
+		{name: "blank lines", content: "\n\n\n", wantLine: 3, wantChar: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := filepath.Join(t.TempDir(), "x.go")
+			require.NoError(t, os.WriteFile(f, []byte(tt.content), 0o644))
+			line, char := wholeFileEnd(f)
+			require.Equal(t, tt.wantLine, line, "line for %q", tt.content)
+			require.Equal(t, tt.wantChar, char, "char for %q", tt.content)
+		})
+	}
+}
+
+// TestWholeFileEnd_NonexistentFallsBackBounded — read errors must
+// return a bounded fallback rather than the old 1<<30 sentinel.
+func TestWholeFileEnd_NonexistentFallsBackBounded(t *testing.T) {
+	line, char := wholeFileEnd(filepath.Join(t.TempDir(), "does-not-exist.go"))
+	require.Equal(t, 1_000_000, line, "should fall back to a million-line bound, not 1<<30")
+	require.Equal(t, 0, char)
+}
