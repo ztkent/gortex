@@ -108,6 +108,15 @@ func RegisterAll(reg *parser.Registry) {
 	reg.Register(NewValaExtractor())
 	reg.Register(NewGroovyExtractor())
 	reg.Register(NewJSONExtractor())
+
+	// Forest-backed (alexaandru/go-sitter-forest) — signature-only.
+	// Each registration adds a brand-new language not covered by the
+	// hand-written extractors above. The forest framework reads the
+	// grammar's bundled tags.scm when present and falls back to a
+	// generic node-kind walker otherwise.
+	reg.Register(NewElmExtractor())
+	registerForestLanguages(reg)
+
 	// ObjC registered last so it wins the `.m` extension over Matlab.
 	reg.Register(NewObjCExtractor())
 }

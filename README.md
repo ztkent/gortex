@@ -36,7 +36,7 @@ For Homebrew, package managers (`.deb` / `.rpm` / `.apk`), direct binary downloa
 
 - **Knowledge graph** — every file, symbol, import, call chain, and type relationship in one queryable structure
 - **Multi-repo workspaces** — index multiple repositories into a single graph with cross-repo symbol resolution, project grouping, reference tags, and per-repo scoping
-- **92 languages** — tree-sitter + regex extractors across core programming (Go, TypeScript, Python, Rust, Java, C#, Kotlin, Swift, C, C++, …), scripting (Bash, PowerShell, Perl, Lua, …), functional (Haskell, OCaml, Elixir, Clojure, …), template engines (Blade, EJS, Jinja, Twig, ERB, Liquid, Pug, Handlebars), blockchain (Solidity, Move, Cairo, Noir, Tact, Ballerina), scientific (Julia, R, MATLAB, Mathematica, SAS, Stata, Fortran, COBOL, Ada, Pascal, ABAP, Apex), emerging (Mojo, Odin, V, Hare, Carbon, ReScript, Gleam), build/data (Makefile, CMake, Dockerfile, SQL, Protobuf, JSON, YAML, TOML, HCL), and more. See [docs/languages.md](docs/languages.md) for the full table
+- **256 languages** across three tiers — bespoke tree-sitter extractors (~30) for the deep-resolution tier (Go, TypeScript, Python, Rust, Java, C#, Kotlin, Swift, C, C++, Ruby, Elixir, OCaml, …), regex extractors (~60) for niche/legacy (ABAP, COBOL, Verse, AL, AutoHotkey, …), and forest-backed signature-only (~165 via `alexaandru/go-sitter-forest`) for the long tail (Vue, Svelte, Astro, GraphQL, Prisma, Latex, Typst, Agda, Idris, Hack, Haxe, MLIR, LLVM, SystemVerilog, Cedar, CEL, TLA+, Robot, Hurl, …). See [docs/languages.md](docs/languages.md) for the full table
 - **50 MCP tools** — symbol lookup, call chains, blast radius, community/process discovery, contract detection, unified `analyze` (dead code, hotspots, cycles), scaffolding, inline editing, symbol renaming, read-free file writes (`edit_file` / `write_file` — no Read-before-Edit roundtrip for docs/configs/specs), multi-axis structured retrieval (`winnow_symbols`), multi-repo management, agent feedback loop, context export, graph-validated config hygiene (`audit_agent_config`), opening-move routing (`plan_turn`), narrative repo overview (`get_repo_outline`), test-coverage gaps (`get_untested_symbols`), and 18 agent-optimized tools
 - **Semantic search** — hybrid BM25 + vector search with RRF fusion. Hugot (pure-Go ONNX runtime with MiniLM-L6-v2) is bundled by default and auto-downloads the model on first use — zero-config, no native dependencies. GloVe word vectors remain as fallback. Optional build tags switch to ONNX or GoMLX for higher throughput
 - **LSP-enriched call-graph tiers** — every edge carries an `origin` tier (`lsp_resolved` / `lsp_dispatch` / `ast_resolved` / `ast_inferred` / `text_matched`); pass `min_tier` to `get_callers`, `find_usages`, `find_implementations`, etc. to restrict results to compiler-verified edges for high-stakes refactors
@@ -651,7 +651,7 @@ gortex binary
 
 ## Language Support
 
-Gortex indexes **92 languages** — see **[docs/languages.md](docs/languages.md)** for the full table (extensions, engine, extracted symbols per language).
+Gortex indexes **256 languages** across three tiers (bespoke tree-sitter, regex, and forest-backed signature-only) — see **[docs/languages.md](docs/languages.md)** for the full table (extensions, engine, extracted symbols per language).
 
 ## Building
 

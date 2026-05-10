@@ -1,16 +1,31 @@
 # Supported Languages
 
-Gortex currently indexes **92 languages**. Each language has an extractor that
+Gortex currently indexes **256 languages**. Each language has an extractor that
 walks the source, emits symbols (functions, methods, types, interfaces,
 variables) into the graph, and records `imports` / `calls` edges.
 
-Two engine tiers are used:
+Three engine tiers are used, in order of decreasing extraction depth:
 
-- **tree-sitter** — full concrete syntax tree via a vendored grammar. Produces
-  high-fidelity symbols, precise call edges, and accurate node ranges.
-- **regex** — pattern-matched line scanning with indent / brace / keyword block
-  heuristics. Captures top-level symbols and imports; call edges vary per
-  language.
+- **bespoke tree-sitter** (~30 languages) — full concrete syntax tree via a
+  vendored grammar with hand-tuned S-expression queries. Produces high-fidelity
+  symbols, resolved call edges, ORM/contract/dataflow extraction, and accurate
+  node ranges. Languages: Go, TypeScript, JavaScript, Python, Rust, Java, C#,
+  Kotlin, Swift, Scala, PHP, Ruby, Elixir, C, C++, Dart, OCaml, Lua, Bash, SQL,
+  HTML, CSS, Markdown, OrgMode, Protobuf, YAML, TOML, HCL, Dockerfile.
+- **regex** (~60 languages) — pattern-matched line scanning with indent / brace /
+  keyword block heuristics. Captures top-level symbols and imports; call edges
+  vary per language. Used where no upstream tree-sitter grammar is available
+  (Verse, AL, SAS, Stata, AutoHotkey, CoffeeScript) or for legacy / niche
+  languages where the regex path was sufficient (ABAP, COBOL, Fortran, …).
+- **forest signature-only** (~165 languages) — generic `*ts.Language`-driven
+  extractor wrapping `github.com/alexaandru/go-sitter-forest`. Reads the
+  grammar's bundled `tags.scm` (nvim-treesitter convention) when present and
+  falls back to a node-kind heuristic walker otherwise. Emits definitions
+  (function / method / type / interface / variable / constant / module) plus
+  `EdgeDefines` from the file. `@reference.call` / `@reference.function`
+  captures route to the enclosing function. **No** ORM / contract / dataflow /
+  scope-aware resolution — graduate a language to the bespoke tier when those
+  matter.
 
 For sixteen of these languages an LSP server can additionally upgrade
 edges from `ast_inferred` to `lsp_resolved` and unlock the
@@ -33,7 +48,16 @@ server matrix, install commands, lifecycle knobs, and config schema.
 | Template engines | 8 | Blade, EJS, Handlebars, Jinja, Twig, ERB, Liquid, Pug |
 | Data, config, build | 12 | JSON, YAML, TOML, HCL/Terraform, SQL, Protobuf, Markdown, HTML, CSS, Dockerfile, Makefile, CMake |
 | Niche / domain | 4 | Nix, AL (Business Central), Assembly (NASM/GAS/ARM/WLA-DX/CA65), Shaders (GLSL/HLSL) |
-| **Total** | **92** | |
+| Forest — frontend / templates | ~16 | Vue, Svelte, Astro, htmldjango, gotmpl, Haml, Slim, Glimmer, Razor, Templ, Tera, Mustache, Vento, SuperHTML, HEEx |
+| Forest — schemas / IaC / IDLs | ~25 | GraphQL, Prisma, Jsonnet, Dhall, CUE, Pkl, Nickel, KCL, Bicep, Smithy, Cap'n Proto, Thrift, KDL, RON, TypeSpec, DBML, HJSON, HOCON, INI, JSON5, JSONC, Properties, SCFG, YANG, XML, DTD, EditorConfig, dotenv, Desktop, Devicetree, Kconfig, Linker script |
+| Forest — shaders / hardware | ~14 | WGSL, GLSL, HLSL, CUDA, ISPC, VHDL, SystemVerilog, MLIR, LLVM, Jasmin, QBE, FIRRTL, PIO ASM, GDShader |
+| Forest — docs / typesetting | 8 | LaTeX, Typst, AsciiDoc, Djot, Mermaid, Norg, BibTeX, PlantUML |
+| Forest — functional / niche | ~26 | Agda, Idris, PureScript, Roc, Gren, Elm, Fennel, Janet, Hack, Haxe, Pony, C3, Aiken, Effekt, Eiffel, Jule, Koka, Luau, MoonBit, Motoko, Ralph, Scheme, SML, Wing, Common Lisp |
+| Forest — build / DSL / testing | ~16 | Meson, Just, Beancount, Ledger, Gherkin, Hurl, Robot, Earthfile, Ninja, BitBake, Caddy, Snakemake, GN, Cooklang, Requirements, Cedar, CEL, Circom, Clarity, Rego, TLA+, Quint, Structurizr, GritQL, QL |
+| Forest — DB / query | 8 | SPARQL, SurrealQL, PromQL, Kusto, SOQL, SOSL, PRQL, Turtle |
+| Forest — data / lockfiles / shells / configs | ~28 | TSV, PSV, textproto, .po, PGN, todo.txt, go.mod / go.sum / go.work, godot_resource, Fish, Nushell, jq, Awk, Elvish, gitconfig / gitattributes / gitcommit / gitignore, Hyprlang, nftables, passwd, PEM, PoE filter, Puppet, ssh_config, sxhkdrc, tmux |
+| Forest — misc | ~14 | DOT, gnuplot, GPG, Strace, VRL, Zeek, Ziggy + Schema, Starlark, SourcePawn, SCSS, RBS, OCamllex, DataWeave, USD, WIT |
+| **Total** | **256** | |
 
 ## Core programming — deep extraction
 
@@ -194,10 +218,34 @@ A few extensions conflict across languages; the registration order in
 
 ## Adding a language
 
-New extractors go in `internal/parser/languages/`. Follow the template of
-[`nim.go`](../internal/parser/languages/nim.go) (regex-based) or
-[`golang.go`](../internal/parser/languages/golang.go) (tree-sitter). Register
-in [`register.go`](../internal/parser/languages/register.go) and add a
-`_test.go` with at least a happy-path and empty-input case. Shared helpers
-live in [`helpers_indent.go`](../internal/parser/languages/helpers_indent.go)
-(`findBlockEnd`, `findIndentedBlockEnd`, `findKeywordBlockEnd`, `lineAt`).
+Three paths, in order of decreasing effort:
+
+1. **Bespoke tree-sitter** (deep extraction). Add a new sub-package under
+   [`internal/parser/tsitter/`](../internal/parser/tsitter/) wrapping the C
+   grammar, then a hand-tuned extractor under
+   [`internal/parser/languages/`](../internal/parser/languages/) that compiles
+   per-language S-expression queries. Use [`golang.go`](../internal/parser/languages/golang.go)
+   as a reference. Justified for languages where you need ORM / contract /
+   dataflow / scope-aware call resolution.
+
+2. **Regex** (simple structural). Use [`nim.go`](../internal/parser/languages/nim.go)
+   or [`abap.go`](../internal/parser/languages/abap.go) as templates. Pick this
+   when no upstream grammar exists and signature-only is acceptable. Shared
+   helpers in [`helpers_indent.go`](../internal/parser/languages/helpers_indent.go)
+   (`findBlockEnd`, `findIndentedBlockEnd`, `findKeywordBlockEnd`, `lineAt`).
+
+3. **Forest signature-only** (cheapest, broadest). If the language already has
+   a grammar in [`alexaandru/go-sitter-forest`](https://github.com/alexaandru/go-sitter-forest),
+   add `github.com/alexaandru/go-sitter-forest/<lang>` to `go.mod` and append
+   one row to `forestLanguages` in
+   [`forest_registrations.go`](../internal/parser/languages/forest_registrations.go):
+   `{"<name>", []string{".<ext>"}, <pkg>.GetLanguage, <pkg>.GetQuery}`.
+   `registerForestLanguages` skips the row at runtime if the name or any
+   extension is already claimed by a hand-written extractor. The framework
+   reads the grammar's bundled `tags.scm` when present and falls back to a
+   generic node-kind walker otherwise — see
+   [`internal/parser/forest/`](../internal/parser/forest/) for the
+   implementation.
+
+All three paths must ship a `_test.go` with at least a happy-path and
+empty-input case.
