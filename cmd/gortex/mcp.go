@@ -345,6 +345,10 @@ func runMCP(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "[gortex] savings persistence disabled: %v\n", err)
 	}
 
+	// In-process LLM service — same wiring as the daemon path. No-op
+	// when cfg.LLM is empty or gortex was built without `-tags llama`.
+	srv.SetupLLM(cfg.LLM)
+
 	fmt.Fprintf(os.Stderr, "[gortex] MCP server ready (transport: %s)\n", mcpTransport)
 
 	// Start server HTTP API if requested.

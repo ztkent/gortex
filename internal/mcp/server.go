@@ -17,6 +17,8 @@ import (
 	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/indexer"
+	"github.com/zzet/gortex/internal/llm"
+	"github.com/zzet/gortex/internal/llm/svc"
 	"github.com/zzet/gortex/internal/query"
 	"github.com/zzet/gortex/internal/savings"
 	"github.com/zzet/gortex/internal/semantic"
@@ -119,6 +121,14 @@ type Server struct {
 	// MCP clients as `notifications/diagnostics`. Lazy-initialised by
 	// SetLSPDiagnosticsBroadcasting; nil until then.
 	diagBroadcaster *diagnosticsBroadcaster
+
+	// llmService is the optional in-process LLM agent service backing
+	// the `ask` MCP tool (plus future internal callers like wiki/doc
+	// generation). nil until SetLLMService is called by the daemon
+	// entrypoint with a real service instance — in which case the
+	// `ask` tool is registered. In builds without `-tags llama`, the
+	// service is a stub that returns errServiceUnavailable.
+	llmService *svc.Service
 
 	// resourcesNotifier overrides the live mcpServer when pushing
 	// `notifications/resources/updated`. Test-only: production code
@@ -528,9 +538,47 @@ func NewServer(engine *query.Engine, g *graph.Graph, idx *indexer.Indexer, watch
 	// to a one-member view.
 	s.registerWorkspaceTools()
 
+	// LLM-backed tools (`ask`) are NOT registered here — they're
+	// gated on SetLLMService being called with an enabled service,
+	// which happens post-construction from the daemon entrypoint.
+
 	s.applyDefaultToolScopes()
 
 	return s
+}
+
+// SetLLMService attaches the in-process LLM service to the server
+// and registers the `ask` MCP tool. Call after NewServer; without
+// this, the `ask` MCP tool is not registered (clean degradation for
+// builds / deployments without an LLM).
+//
+// Safe to call with a stub service (built without `-tags llama`) —
+// tool registration is a no-op in that case.
+//
+// Lifecycle: the server does NOT take ownership of the service; the
+// daemon entrypoint that constructed the service is responsible for
+// calling svc.Close() on shutdown.
+func (s *Server) SetLLMService(service *svc.Service) {
+	s.llmService = service
+	s.registerLLMTools()
+}
+
+// SetupLLM is the convenience constructor used by daemon entrypoints.
+// It builds an in-process backend wired to this server's engine +
+// contract registry, constructs the service from cfg, and attaches
+// it. A zero or disabled cfg is a no-op — safe to call
+// unconditionally.
+//
+// Available in both `-tags llama` and pure-Go builds: the stub
+// Service is what gets attached without the tag, and the stub
+// registerLLMTools then skips registration.
+func (s *Server) SetupLLM(cfg llm.Config) {
+	cfg = cfg.MergeEnv()
+	if !cfg.IsEnabled() {
+		return
+	}
+	backend := svc.NewInProcessBackend(s.engine, s.effectiveContractRegistry)
+	s.SetLLMService(svc.NewService(cfg, backend))
 }
 
 // InitFeedback initializes the feedback manager for cross-session feedback persistence.
