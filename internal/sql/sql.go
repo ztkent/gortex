@@ -466,6 +466,134 @@ func isPlainSQLIdent(s string) bool {
 	return true
 }
 
+// selectNoFromRe matches a `SELECT <projection>` that has no FROM
+// clause (e.g. `SELECT 1 AS id`). Used only as the fallback when a
+// query contains no FROM at all — selectFromRe takes precedence.
+var selectNoFromRe = regexp.MustCompile(`(?is)\bSELECT\s+(.+?)\s*(?:;|$)`)
+
+// ProjectionColumns returns the output column names a query produces —
+// the columns of the relation the query *materialises*, as opposed to
+// ExtractColumns which attributes columns to the source tables a query
+// reads or writes. Used by the dbt / SQLMesh model extractor to record
+// a model's own columns.
+//
+// The output column of a projection slot is its alias when one is
+// present (`total AS order_total` → `order_total`) and the bare column
+// identifier otherwise (`customers.id` → `id`). Slots that are pure
+// expressions / function calls with no alias, and `*` / `tbl.*`
+// wildcards, produce no name.
+//
+// Heuristic (mirrors the v1 regex stance of the rest of this package):
+// the last `SELECT <projection> FROM` occurrence is taken as the
+// query's output projection — CTEs and subqueries appear earlier in
+// source order, so the final top-level SELECT is what the query
+// returns. When the query has no FROM clause at all the trailing
+// `SELECT <projection>` is used. Subquery-valued projection slots and
+// JOIN-bearing final SELECTs degrade gracefully to whatever bare
+// identifiers can still be recovered.
+func ProjectionColumns(query string) []string {
+	if query == "" {
+		return nil
+	}
+	var projection string
+	if all := selectFromRe.FindAllStringSubmatch(query, -1); len(all) > 0 {
+		projection = strings.TrimSpace(all[len(all)-1][1])
+	} else if m := selectNoFromRe.FindStringSubmatch(query); m != nil {
+		projection = strings.TrimSpace(m[1])
+	}
+	if projection == "" || projection == "*" {
+		return nil
+	}
+	cols := splitProjectionList(projection)
+	seen := make(map[string]struct{}, len(cols))
+	out := cols[:0]
+	for _, c := range cols {
+		if _, dup := seen[c]; dup {
+			continue
+		}
+		seen[c] = struct{}{}
+		out = append(out, c)
+	}
+	return out
+}
+
+// splitProjectionList parses a SELECT projection list and returns the
+// output column names — the alias when one is present, otherwise the
+// bare column identifier. Distinct from splitColumnList, which collapses
+// `col AS alias` to the source `col` because it attributes reads to a
+// source table; here the alias *is* the produced column name.
+func splitProjectionList(list string) []string {
+	out := []string{}
+	depth := 0
+	cur := strings.Builder{}
+	flush := func() {
+		seg := strings.TrimSpace(cur.String())
+		cur.Reset()
+		if seg == "" {
+			return
+		}
+		if idx := lastTopLevelAS(seg); idx >= 0 {
+			alias := strings.TrimSpace(stripQuoting(strings.TrimSpace(seg[idx+4:])))
+			if isPlainSQLIdent(alias) {
+				out = append(out, alias)
+			}
+			return
+		}
+		// No alias: strip a `tbl.` qualifier, require a bare identifier.
+		s := seg
+		if i := strings.LastIndex(s, "."); i >= 0 {
+			s = s[i+1:]
+		}
+		s = strings.TrimSpace(stripQuoting(s))
+		if s != "" && s != "*" && isPlainSQLIdent(s) {
+			out = append(out, s)
+		}
+	}
+	for i := 0; i < len(list); i++ {
+		c := list[i]
+		switch c {
+		case '(':
+			depth++
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+		case ',':
+			if depth == 0 {
+				flush()
+				continue
+			}
+		}
+		cur.WriteByte(c)
+	}
+	flush()
+	return out
+}
+
+// lastTopLevelAS returns the byte index of the last ` AS ` keyword in
+// seg that sits at paren depth zero, or -1 when there is none. Case-
+// insensitive. Keeps a cast's inner ` AS ` (`CAST(x AS int)`) from
+// being mistaken for a projection alias.
+func lastTopLevelAS(seg string) int {
+	upper := strings.ToUpper(seg)
+	depth := 0
+	last := -1
+	for i := 0; i+4 <= len(upper); i++ {
+		switch upper[i] {
+		case '(':
+			depth++
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+		}
+		if depth == 0 && upper[i:i+4] == " AS " {
+			last = i
+		}
+	}
+	return last
+}
+
 // ColumnNodeID returns the canonical synthetic ID for a column.
 func ColumnNodeID(dialect, schema, table, column string) string {
 	if dialect == "" {

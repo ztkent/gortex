@@ -310,6 +310,15 @@ const (
 	// Dockerfile stage → parent stage / external base Image,
 	// Resource → Image. Direction: dependent → dependency. Origin:
 	// ast_resolved.
+	//
+	// Also the model-lineage edge for the dbt / SQLMesh graph layer:
+	// a dbt model → the models / seeds / snapshots it `ref()`s and the
+	// sources it `source()`s, and a SQLMesh model → the models its
+	// body reads via FROM / JOIN. Direction is the same (dependent →
+	// dependency), so a downstream-impact walk over EdgeDependsOn
+	// answers "what breaks if this model changes?" uniformly across
+	// infra manifests and the transformation DAG. Edge Meta["link"]
+	// disambiguates (ref|source|from).
 	EdgeDependsOn EdgeKind = "depends_on"
 	// EdgeUsesEnv links a Resource (workload) or Image (Dockerfile
 	// stage) to a KindConfigKey representing an environment variable

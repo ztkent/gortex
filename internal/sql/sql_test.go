@@ -350,3 +350,36 @@ func TestTableNodeID(t *testing.T) {
 		}
 	}
 }
+
+func TestProjectionColumns(t *testing.T) {
+	cases := []struct {
+		name  string
+		query string
+		want  []string
+	}{
+		{"plain columns", "SELECT id, name FROM users", []string{"id", "name"}},
+		{"table-qualified", "SELECT u.id, u.name FROM users u", []string{"id", "name"}},
+		{"alias wins", "SELECT total AS order_total, id FROM orders", []string{"order_total", "id"}},
+		{"expression alias", "SELECT count(*) AS n, max(x) AS m FROM t", []string{"n", "m"}},
+		{"cast inner AS ignored", "SELECT cast(zip AS text) AS zip_code FROM t", []string{"zip_code"}},
+		{"unaliased expr dropped", "SELECT count(*), id FROM t", []string{"id"}},
+		{"star yields nothing", "SELECT * FROM t", nil},
+		{"final select of CTE", "WITH a AS (SELECT p FROM raw) SELECT x, y FROM a", []string{"x", "y"}},
+		{"no from clause", "SELECT 1 AS id, 2 AS qty", []string{"id", "qty"}},
+		{"empty", "", nil},
+		{"dedup", "SELECT id, id FROM t", []string{"id"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := ProjectionColumns(c.query)
+			if len(got) != len(c.want) {
+				t.Fatalf("ProjectionColumns(%q) = %v, want %v", c.query, got, c.want)
+			}
+			for i := range got {
+				if got[i] != c.want[i] {
+					t.Fatalf("ProjectionColumns(%q) = %v, want %v", c.query, got, c.want)
+				}
+			}
+		})
+	}
+}

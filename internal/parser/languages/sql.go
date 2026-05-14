@@ -36,6 +36,18 @@ func (e *SQLExtractor) Extract(filePath string, src []byte) (*parser.ExtractionR
 	}
 	result.Nodes = append(result.Nodes, fileNode)
 
+	// Specialised SQL dispatch: dbt and SQLMesh models are `.sql`
+	// files but carry their own model/column/lineage graph shape, so
+	// they short-circuit the generic DDL walk below.
+	switch classifySQLFile(filePath, src) {
+	case "dbt":
+		extractDbtSQLModel(filePath, fileNode.ID, src, result)
+		return result, nil
+	case "sqlmesh":
+		extractSQLMeshSQLModel(filePath, fileNode.ID, src, result)
+		return result, nil
+	}
+
 	seen := make(map[string]bool)
 
 	// Walk top-level statements.

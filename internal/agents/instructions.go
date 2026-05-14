@@ -140,6 +140,7 @@ The ` + "`analyze`" + ` MCP tool is a unified dispatcher. Pass ` + "`kind: \"<na
 - Edge-driven: ` + "`channel_ops`" + `, ` + "`goroutine_spawns`" + `, ` + "`field_writers`" + `, ` + "`annotation_users`" + `, ` + "`config_readers`" + `, ` + "`event_emitters`" + `, ` + "`error_surface`" + `, ` + "`external_calls`" + `
 - Framework layer: ` + "`routes`" + ` (handler ↔ HTTP/gRPC/WS/GraphQL/topic), ` + "`models`" + ` (ORM class ↔ DB table), ` + "`components`" + ` (parent → child JSX)
 - Infrastructure: ` + "`k8s_resources`" + ` (KindResource fan-out by kind/namespace), ` + "`images`" + ` (KindImage with consumer count), ` + "`kustomize`" + ` (KindKustomization overlay tree)
+- Data transformation: ` + "`dbt_models`" + ` (dbt / SQLMesh models, seeds, snapshots, sources with column counts + lineage fan-in/out)
 - Multi-repo: ` + "`cross_repo`" + ` (repo-boundary-crossing calls / implements / extends grouped by source → target repo)
 
 The ` + "`gortex enrich blame|coverage|releases|all`" + ` CLI hydrates the graph with the metadata that the ` + "`stale_*`" + `, ` + "`coverage*`" + `, ` + "`ownership`" + `, and ` + "`releases`" + ` analyzers need.
@@ -312,6 +313,7 @@ The ` + "`analyze`" + ` MCP tool is a unified dispatcher. Supported ` + "`kind`"
 | Listing container images in use       | ` + "`analyze`" + ` with ` + "`kind: \"images\"`" + ` — every KindImage (Dockerfile FROM target or K8s container.image) with consumer count; ` + "`role`" + ` (base/stage), ` + "`ref`" + `, ` + "`tag`" + ` filters |
 | Mapping the Kustomize overlay tree    | ` + "`analyze`" + ` with ` + "`kind: \"kustomize\"`" + ` — every KindKustomization with base / resource fan-out; ` + "`dir`" + ` filter |
 | Auditing what crosses repo boundaries | ` + "`analyze`" + ` with ` + "`kind: \"cross_repo\"`" + ` — calls / implements / extends edges whose endpoints live in different repos, grouped by (source repo → target repo, relation); ` + "`repo`" + `, ` + "`base_kind`" + `, ` + "`path_prefix`" + ` filters |
+| Surveying dbt / SQLMesh models        | ` + "`analyze`" + ` with ` + "`kind: \"dbt_models\"`" + ` — dbt / SQLMesh models, seeds, snapshots, sources with column count + EdgeDependsOn lineage fan-in/out; ` + "`framework`" + `, ` + "`type`" + `, ` + "`materialized`" + `, ` + "`name`" + ` filters |
 | Checking if the index is stale        | ` + "`index_health`" + ` — health score, parse failures, stale files |
 | Wondering what changed this session   | ` + "`get_symbol_history`" + ` — modification counts, flags churning (3+ edits) |
 | Hydrating blame / coverage / releases | ` + "`gortex enrich blame|coverage|releases|all`" + ` (CLI) — bulk-stamps the graph for the ` + "`stale_*`" + `, ` + "`coverage_*`" + `, ` + "`ownership`" + `, and ` + "`releases`" + ` analyzers |

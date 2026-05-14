@@ -223,3 +223,87 @@ func TestAnalyzeComponents_EmptyOnNoEdges(t *testing.T) {
 		t.Fatalf("expected 0 components, got %d", len(rows))
 	}
 }
+
+func addDbtModelNode(g *graph.Graph, id, name, framework, resourceType, materialized string) {
+	g.AddNode(&graph.Node{
+		ID: id, Kind: graph.KindTable, Name: name, Language: "sql",
+		FilePath: name + ".sql", StartLine: 1,
+		Meta: map[string]any{
+			"framework": framework, "resource_type": resourceType,
+			"materialized": materialized,
+		},
+	})
+}
+
+func addDbtColumn(g *graph.Graph, modelID, col string) {
+	colID := modelID + "::" + col
+	g.AddNode(&graph.Node{ID: colID, Kind: graph.KindColumn, Name: col, Language: "sql"})
+	g.AddEdge(&graph.Edge{From: colID, To: modelID, Kind: graph.EdgeMemberOf})
+}
+
+func TestAnalyzeDbtModels_ListingAndCounts(t *testing.T) {
+	srv, _ := setupTestServer(t)
+	g := srv.graph
+	addDbtModelNode(g, "dbt::model::stg_orders", "stg_orders", "dbt", "model", "view")
+	addDbtModelNode(g, "dbt::model::dim_orders", "dim_orders", "dbt", "model", "table")
+	addDbtModelNode(g, "dbt::source::raw.orders", "raw.orders", "dbt", "source", "")
+	addDbtModelNode(g, "sqlmesh::model::sushi.customers", "customers", "sqlmesh", "model", "full")
+
+	addDbtColumn(g, "dbt::model::stg_orders", "order_id")
+	addDbtColumn(g, "dbt::model::stg_orders", "total")
+	addDbtColumn(g, "dbt::model::dim_orders", "order_id")
+
+	// Lineage: dim_orders depends on stg_orders depends on raw.orders.
+	g.AddEdge(&graph.Edge{From: "dbt::model::dim_orders", To: "dbt::model::stg_orders", Kind: graph.EdgeDependsOn})
+	g.AddEdge(&graph.Edge{From: "dbt::model::stg_orders", To: "dbt::source::raw.orders", Kind: graph.EdgeDependsOn})
+
+	out := callAnalyzeFramework(t, srv, "dbt_models", map[string]any{})
+	rows, _ := out["dbt_models"].([]any)
+	if len(rows) != 4 {
+		t.Fatalf("expected 4 dbt model rows, got %d", len(rows))
+	}
+	byName := map[string]map[string]any{}
+	for _, r := range rows {
+		m := r.(map[string]any)
+		byName[m["name"].(string)] = m
+	}
+	stg := byName["stg_orders"]
+	if stg["columns"].(float64) != 2 {
+		t.Errorf("stg_orders columns = %v, want 2", stg["columns"])
+	}
+	if stg["upstream"].(float64) != 1 {
+		t.Errorf("stg_orders upstream = %v, want 1", stg["upstream"])
+	}
+	if stg["downstream"].(float64) != 1 {
+		t.Errorf("stg_orders downstream = %v, want 1", stg["downstream"])
+	}
+}
+
+func TestAnalyzeDbtModels_FilterByFramework(t *testing.T) {
+	srv, _ := setupTestServer(t)
+	g := srv.graph
+	addDbtModelNode(g, "dbt::model::a", "a", "dbt", "model", "view")
+	addDbtModelNode(g, "sqlmesh::model::b", "b", "sqlmesh", "model", "full")
+
+	out := callAnalyzeFramework(t, srv, "dbt_models", map[string]any{"framework": "sqlmesh"})
+	rows, _ := out["dbt_models"].([]any)
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row after framework=sqlmesh, got %d", len(rows))
+	}
+	if rows[0].(map[string]any)["name"] != "b" {
+		t.Errorf("expected sqlmesh model b, got %v", rows[0])
+	}
+}
+
+func TestAnalyzeDbtModels_FilterByType(t *testing.T) {
+	srv, _ := setupTestServer(t)
+	g := srv.graph
+	addDbtModelNode(g, "dbt::model::a", "a", "dbt", "model", "view")
+	addDbtModelNode(g, "dbt::source::raw.b", "raw.b", "dbt", "source", "")
+
+	out := callAnalyzeFramework(t, srv, "dbt_models", map[string]any{"type": "source"})
+	rows, _ := out["dbt_models"].([]any)
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 source row, got %d", len(rows))
+	}
+}

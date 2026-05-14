@@ -48,13 +48,18 @@ func (e *YAMLExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 	// Specialised YAML dispatch. Order matters:
 	//   1. Kustomize files have a fixed basename — short-circuit.
 	//   2. K8s manifests are detected by content (apiVersion+kind).
-	//   3. Otherwise fall through to the generic top-level-keys
+	//   3. dbt schema / properties files are detected by content
+	//      fingerprint (models/sources/seeds/snapshots + columns).
+	//   4. Otherwise fall through to the generic top-level-keys
 	//      walker so plain config YAMLs still index.
 	if isKustomizationFile(filePath) {
 		extractKustomizeYAML(filePath, fileNode.ID, src, result)
 		return result, nil
 	}
 	if extractKubernetesYAML(filePath, fileNode.ID, src, result) {
+		return result, nil
+	}
+	if extractDbtSchemaYAML(filePath, fileNode.ID, src, result) {
 		return result, nil
 	}
 

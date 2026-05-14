@@ -396,6 +396,131 @@ func (s *Server) componentsForOne(ctx context.Context, req mcp.CallToolRequest, 
 	})
 }
 
+// handleAnalyzeDbtModels surfaces the dbt / SQLMesh graph layer: every
+// KindTable node the dbt / SQLMesh extractor emitted (models, seeds,
+// snapshots, sources), with its column count and its lineage fan-out /
+// fan-in over EdgeDependsOn. Answers "which models have no columns
+// documented?", "what feeds stg_orders?", "which sources does nothing
+// consume?" without walking the graph by hand.
+//
+// Filters:
+//   - framework:     dbt | sqlmesh
+//   - type:          resource type — model / seed / snapshot / source.
+//                    Named `type` (not `kind`) because the analyze
+//                    dispatcher reserves `kind` for the analyzer name.
+//   - materialized:  substring match on the materialization
+//   - name:          substring match on the model / source name
+func (s *Server) handleAnalyzeDbtModels(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := req.GetArguments()
+	frameworkFilter := strings.ToLower(strings.TrimSpace(stringArg(args, "framework")))
+	typeFilter := strings.ToLower(strings.TrimSpace(stringArg(args, "type")))
+	matFilter := strings.ToLower(strings.TrimSpace(stringArg(args, "materialized")))
+	nameFilter := strings.ToLower(strings.TrimSpace(stringArg(args, "name")))
+
+	type dbtModelRow struct {
+		ID           string `json:"id"`
+		Name         string `json:"name"`
+		Framework    string `json:"framework"`
+		ResourceType string `json:"resource_type"`
+		Materialized string `json:"materialized,omitempty"`
+		Schema       string `json:"schema,omitempty"`
+		Columns      int    `json:"columns"`
+		Upstream     int    `json:"upstream"`
+		Downstream   int    `json:"downstream"`
+		File         string `json:"file"`
+		Line         int    `json:"line"`
+	}
+
+	// First pass: collect the model nodes (KindTable nodes the dbt /
+	// SQLMesh extractor stamped with a `framework` meta key).
+	rowByID := map[string]*dbtModelRow{}
+	for _, n := range s.scopedNodes(ctx) {
+		if n.Kind != graph.KindTable {
+			continue
+		}
+		framework, _ := n.Meta["framework"].(string)
+		if framework != "dbt" && framework != "sqlmesh" {
+			continue
+		}
+		resourceType, _ := n.Meta["resource_type"].(string)
+		materialized, _ := n.Meta["materialized"].(string)
+		schema, _ := n.Meta["schema"].(string)
+		rowByID[n.ID] = &dbtModelRow{
+			ID: n.ID, Name: n.Name, Framework: framework,
+			ResourceType: resourceType, Materialized: materialized,
+			Schema: schema, File: n.FilePath, Line: n.StartLine,
+		}
+	}
+
+	// Second pass: tally columns (EdgeMemberOf → model) and lineage
+	// (EdgeDependsOn between two model nodes) in one walk of AllEdges.
+	for _, e := range s.graph.AllEdges() {
+		switch e.Kind {
+		case graph.EdgeMemberOf:
+			if r := rowByID[e.To]; r != nil {
+				r.Columns++
+			}
+		case graph.EdgeDependsOn:
+			if r := rowByID[e.From]; r != nil {
+				r.Upstream++
+			}
+			if r := rowByID[e.To]; r != nil {
+				r.Downstream++
+			}
+		}
+	}
+
+	var rows []*dbtModelRow
+	for _, r := range rowByID {
+		if frameworkFilter != "" && r.Framework != frameworkFilter {
+			continue
+		}
+		if typeFilter != "" && strings.ToLower(r.ResourceType) != typeFilter {
+			continue
+		}
+		if matFilter != "" && !strings.Contains(strings.ToLower(r.Materialized), matFilter) {
+			continue
+		}
+		if nameFilter != "" && !strings.Contains(strings.ToLower(r.Name), nameFilter) {
+			continue
+		}
+		rows = append(rows, r)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Framework != rows[j].Framework {
+			return rows[i].Framework < rows[j].Framework
+		}
+		if rows[i].ResourceType != rows[j].ResourceType {
+			return rows[i].ResourceType < rows[j].ResourceType
+		}
+		return rows[i].Name < rows[j].Name
+	})
+
+	if s.isGCX(ctx, req) {
+		items := make([]dbtModelItem, 0, len(rows))
+		for _, r := range rows {
+			items = append(items, dbtModelItem(*r))
+		}
+		return s.gcxResponseWithBudget(req)(encodeAnalyze("dbt_models", items))
+	}
+	if isCompact(req) {
+		var b strings.Builder
+		for _, r := range rows {
+			fmt.Fprintf(&b, "%-7s %-9s %-14s %-30s  %2d cols  %d↑ %d↓  (%s:%d)\n",
+				r.Framework, r.ResourceType, r.Materialized, r.Name,
+				r.Columns, r.Upstream, r.Downstream, r.File, r.Line)
+		}
+		if len(rows) == 0 {
+			b.WriteString("no dbt / SQLMesh models\n")
+		}
+		return mcp.NewToolResultText(b.String()), nil
+	}
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
+		"dbt_models": rows,
+		"total":      len(rows),
+	})
+}
+
 func boolStr(b bool) string {
 	if b {
 		return "true"
@@ -440,4 +565,21 @@ type componentChildItem struct {
 	Resolved string `gcx:"resolved"`
 	File     string `gcx:"file"`
 	Line     int    `gcx:"line"`
+}
+
+// dbtModelItem is the GCX1 row layout for the dbt_models analyzer. The
+// field set mirrors the JSON dbtModelRow one-for-one so the
+// dbtModelItem(*r) conversion in handleAnalyzeDbtModels stays valid.
+type dbtModelItem struct {
+	ID           string `gcx:"id"`
+	Name         string `gcx:"name"`
+	Framework    string `gcx:"framework"`
+	ResourceType string `gcx:"resource_type"`
+	Materialized string `gcx:"materialized"`
+	Schema       string `gcx:"schema"`
+	Columns      int    `gcx:"columns"`
+	Upstream     int    `gcx:"upstream"`
+	Downstream   int    `gcx:"downstream"`
+	File         string `gcx:"file"`
+	Line         int    `gcx:"line"`
 }
