@@ -302,12 +302,15 @@ func buildDaemonState(logger *zap.Logger) (*daemonState, error) {
 		logger.Warn("daemon: savings persistence disabled", zap.Error(err))
 	}
 
-	// In-process LLM service (opt-in via `.gortex.yaml` `llm.model:`,
-	// `~/.config/gortex/config.yaml::llm:`, or GORTEX_LLM_MODEL env
-	// var). Repo-local config wins per non-zero field; global fills
-	// the rest. Env overrides land last inside SetupLLM via MergeEnv.
-	// No-op when the merged config has no model, or when gortex was
-	// built without `-tags llama` (stub service + stub registerLLMTools).
+	// LLM service (opt-in via the `.gortex.yaml` `llm:` block,
+	// `~/.config/gortex/config.yaml::llm:`, or GORTEX_LLM_* env vars).
+	// Repo-local config wins per non-zero field; the global config
+	// fills the rest; env overrides land last inside SetupLLM via
+	// MergeEnv. The active provider is chosen by `llm.provider`
+	// (local / anthropic / openai / ollama). No-op when the active
+	// provider has no model configured; a provider that fails to
+	// construct (e.g. "local" without `-tags llama`, or a missing API
+	// key) is logged and the service stays disabled.
 	gc, _ := config.LoadGlobal()
 	srv.SetupLLM(gc.MergeLLMInto(cfg.LLM))
 

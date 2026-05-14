@@ -1,5 +1,3 @@
-//go:build llama
-
 package mcp
 
 import (
@@ -23,7 +21,7 @@ func (s *Server) registerLLMTools() {
 	}
 	s.mcpServer.AddTool(
 		mcp.NewTool("ask",
-			mcp.WithDescription("Ask a local research agent (small GGUF model running in-process via llama.cpp) to navigate the gortex graph and return a synthesized answer. Use this instead of issuing many search_symbols / get_callers / contracts calls yourself when the question is open-ended or requires multi-hop reasoning across repos — the agent does that work locally and returns a filtered answer. Set chain=true for cross-system call-chain tracing (consumer → contract → provider → downstream)."),
+			mcp.WithDescription("Ask a research agent to navigate the gortex graph and return a synthesized answer. The agent runs on whichever LLM provider is configured (`llm.provider`): an in-process llama.cpp model, or a hosted Anthropic / OpenAI / Ollama backend. Use this instead of issuing many search_symbols / get_callers / contracts calls yourself when the question is open-ended or requires multi-hop reasoning across repos — the agent does that work and returns a filtered answer. Set chain=true for cross-system call-chain tracing (consumer → contract → provider → downstream)."),
 			mcp.WithString("question", mcp.Required(), mcp.Description("Natural-language question about the indexed codebase. Examples: \"who calls NewServer in the mcp package?\", \"trace the path from web's /v1/stats consumer to the gortex handler\".")),
 			mcp.WithString("repo", mcp.Description("Optional repo-prefix scope (e.g. \"gortex-cloud\"). Restricts the agent's tool calls to one repo. Leave empty for cross-repo questions.")),
 			mcp.WithString("project", mcp.Description("Optional project scope.")),
@@ -66,4 +64,3 @@ func (s *Server) handleAsk(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 	}
 	return mcp.NewToolResultText(string(out)), nil
 }
-

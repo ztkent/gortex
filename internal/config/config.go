@@ -230,10 +230,11 @@ type Config struct {
 	Guards   GuardsConfig    `mapstructure:"guards"   yaml:"guards,omitempty"`
 	Multi    MultiRepoConfig `mapstructure:"multi"    yaml:"multi,omitempty"`
 	Semantic SemanticConfig  `mapstructure:"semantic" yaml:"semantic,omitempty"`
-	// LLM configures the in-process local-LLM service that backs the
-	// `ask` MCP tool (and future wiki / doc generators). Empty by
-	// default — daemon skips LLM wiring entirely when llm.model is
-	// unset. Env vars GORTEX_LLM_* override file values; see
+	// LLM configures the LLM service that backs the `ask` MCP tool and
+	// the search-assist passes. Empty by default — daemon skips LLM
+	// wiring entirely when the active provider has no model configured.
+	// The `llm.provider` key selects the backend (local / anthropic /
+	// openai / ollama); env vars GORTEX_LLM_* override file values; see
 	// internal/llm/config.go::Config.MergeEnv.
 	LLM llm.Config `mapstructure:"llm" yaml:"llm,omitempty"`
 }

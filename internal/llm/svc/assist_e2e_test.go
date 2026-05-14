@@ -36,10 +36,13 @@ func TestE2E_AssistAgainstRealModel(t *testing.T) {
 	}
 
 	cfg := llm.Config{
-		Model:    modelPath,
-		Template: "chatml",
-		Ctx:      4096,
+		Provider: "local",
 		MaxSteps: 16,
+		Local: llm.LocalConfig{
+			Model:    modelPath,
+			Template: "chatml",
+			Ctx:      4096,
+		},
 	}.ApplyDefaults()
 
 	svcInst := NewService(cfg, llm.MockBackend{})

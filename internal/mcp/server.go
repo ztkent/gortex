@@ -123,12 +123,12 @@ type Server struct {
 	// SetLSPDiagnosticsBroadcasting; nil until then.
 	diagBroadcaster *diagnosticsBroadcaster
 
-	// llmService is the optional in-process LLM agent service backing
-	// the `ask` MCP tool (plus future internal callers like wiki/doc
-	// generation). nil until SetLLMService is called by the daemon
-	// entrypoint with a real service instance — in which case the
-	// `ask` tool is registered. In builds without `-tags llama`, the
-	// service is a stub that returns errServiceUnavailable.
+	// llmService is the optional LLM service backing the `ask` MCP tool
+	// and the `search_symbols` assist modes. nil until SetLLMService is
+	// called by the daemon entrypoint. The service wraps whichever
+	// provider `llm.provider` selects (local llama.cpp / Anthropic /
+	// OpenAI / Ollama); when the provider can't be constructed it
+	// reports Enabled() == false and the dependent tools stay absent.
 	llmService *svc.Service
 
 	// resourcesNotifier overrides the live mcpServer when pushing
@@ -565,13 +565,14 @@ func NewServer(engine *query.Engine, g *graph.Graph, idx *indexer.Indexer, watch
 	return s
 }
 
-// SetLLMService attaches the in-process LLM service to the server
-// and registers the `ask` MCP tool. Call after NewServer; without
-// this, the `ask` MCP tool is not registered (clean degradation for
-// builds / deployments without an LLM).
+// SetLLMService attaches the LLM service to the server and registers
+// the `ask` MCP tool. Call after NewServer; without this, the `ask`
+// MCP tool is not registered (clean degradation for deployments
+// without an LLM).
 //
-// Safe to call with a stub service (built without `-tags llama`) —
-// tool registration is a no-op in that case.
+// Safe to call with a disabled service (no provider configured, or
+// provider construction failed) — registerLLMTools gates on
+// Service.Enabled() and skips registration in that case.
 //
 // Lifecycle: the server does NOT take ownership of the service; the
 // daemon entrypoint that constructed the service is responsible for
@@ -587,16 +588,25 @@ func (s *Server) SetLLMService(service *svc.Service) {
 // it. A zero or disabled cfg is a no-op — safe to call
 // unconditionally.
 //
-// Available in both `-tags llama` and pure-Go builds: the stub
-// Service is what gets attached without the tag, and the stub
-// registerLLMTools then skips registration.
+// The provider is chosen by cfg.Provider. Selecting "local" in a
+// binary built without `-tags llama` — or any provider with a missing
+// model / API key — leaves the service disabled; the construction
+// error is logged as a warning rather than failing daemon startup, so
+// a misconfigured `llm:` block degrades cleanly (the `ask` tool and
+// `search_symbols` assist modes are simply absent).
 func (s *Server) SetupLLM(cfg llm.Config) {
 	cfg = cfg.MergeEnv()
 	if !cfg.IsEnabled() {
 		return
 	}
 	backend := svc.NewInProcessBackend(s.engine, s.effectiveContractRegistry)
-	s.SetLLMService(svc.NewService(cfg, backend))
+	service := svc.NewService(cfg, backend)
+	s.SetLLMService(service)
+	if err := service.ProviderErr(); err != nil {
+		s.logger.Warn("LLM provider unavailable — `ask` tool and search assist disabled",
+			zap.String("provider", cfg.ProviderName()),
+			zap.Error(err))
+	}
 }
 
 // InitFeedback initializes the feedback manager for cross-session feedback persistence.

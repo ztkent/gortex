@@ -1,5 +1,3 @@
-//go:build llama
-
 package agent
 
 import (

@@ -1,5 +1,3 @@
-//go:build llama
-
 package svc
 
 import (
@@ -252,25 +250,5 @@ func TestCandIDs(t *testing.T) {
 	want := []string{"z", "a"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got=%v want=%v", got, want)
-	}
-}
-
-func TestAssistJSONComplete(t *testing.T) {
-	cases := []struct {
-		in   string
-		want bool
-	}{
-		{"{}", true},
-		{`{"a":1}`, true},
-		{"  {} ", true},
-		{"{", false},
-		{`{"a":`, false},
-		{"not json", false},
-		{"", false},
-	}
-	for _, tc := range cases {
-		if got := assistJSONComplete(tc.in); got != tc.want {
-			t.Fatalf("in=%q got=%v want=%v", tc.in, got, tc.want)
-		}
 	}
 }

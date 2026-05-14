@@ -1,181 +1,157 @@
-//go:build llama
-
-// Package svc is the runner layer that ties the LLM model (package
-// llm) to the agent loop (package llm/agent). It lives in its own
-// package to break the import cycle that would otherwise exist
-// between `llm` (defines Context, Backend) and `llm/agent` (depends
-// on those types).
+// Package svc is the runner layer that ties an llm.Provider to the
+// agent tool-loop (package llm/agent) and the search-assist passes
+// (assist.go). It lives in its own package to break the import cycle
+// that would otherwise exist between `llm` and `llm/agent`.
+//
+// svc is pure Go: the `-tags llama` build-tag split is contained
+// entirely within the provider packages. The daemon links the same
+// Service whether or not the tag is set — without it only the `local`
+// provider is unavailable; the HTTP providers still work, and a
+// disabled service degrades cleanly (Enabled() reports false).
 package svc
 
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/zzet/gortex/internal/llm"
 	"github.com/zzet/gortex/internal/llm/agent"
+	"github.com/zzet/gortex/internal/llm/provider"
 )
 
-// Service is the reusable in-process LLM access point. Wraps a
-// lazily-loaded llama.cpp model plus a Backend (typically an
-// InProcessBackend pointing at the daemon's *query.Engine). Two
-// consumption shapes:
+// errServiceUnavailable is returned by operational methods when no
+// provider could be constructed (disabled config, build without
+// `-tags llama` for the local provider, missing API key, ...).
+var errServiceUnavailable = errors.New("llm: service unavailable — no provider configured")
+
+// Service is the reusable LLM access point. It wraps a constructed
+// llm.Provider plus a Backend (typically an InProcessBackend pointing
+// at the daemon's *query.Engine). Three consumption shapes:
 //
-//   - Generate: one-shot prompt → text. Used by future wiki / doc
-//     generation features that don't need a tool-calling loop.
-//   - RunAgent: grammar-constrained agent loop that uses Backend's
-//     tools to navigate the graph and produce a synthesized answer.
-//     Used by the MCP `ask` tool handler.
+//   - Generate: one-shot prompt → text. Freeform completion.
+//   - RunAgent: the grammar/schema-constrained tool-calling loop that
+//     uses the Backend's tools to navigate the graph. Backs the MCP
+//     `ask` tool.
+//   - ExpandQuery / RerankSymbols / VerifyRelevance: the search-assist
+//     passes — short structured completions backing the `search_symbols`
+//     `assist` argument (see assist.go).
 //
-// Both go through the same model and the same inference mutex —
-// llama.cpp is single-stream on a given device.
-//
-// In addition to the full-size RunAgent / Generate contexts, Service
-// keeps a pre-warmed *assist context* — a smaller llama context used
-// for short single-shot grammar-constrained calls (ExpandQuery,
-// RerankSymbols). The assist context has its own mutex so a long
-// `ask` doesn't head-of-line block hot-path NL search calls; at the
-// llama.cpp level the two contexts share the model weights but each
-// holds its own KV cache.
+// The active provider is chosen by llm.Config.Provider. The prompt
+// tier (profile) is derived from the provider's Name() so the assist
+// passes prompt small local models and hosted frontier models
+// differently — see llm.ProfileForProvider.
 type Service struct {
-	cfg     llm.Config
-	backend llm.Backend
+	cfg         llm.Config
+	backend     llm.Backend
+	provider    llm.Provider
+	providerErr error
+	profile     llm.PromptProfile
 
-	loadOnce sync.Once
-	model    *llm.Model
-	loadErr  error
-
-	infer sync.Mutex
-
-	assistOnce  sync.Once
-	assistCtx   *llm.Context
-	assistErr   error
-	assistMu    sync.Mutex
 	expandCache *assistCache
 	rerankCache *assistCache
 	verifyCache *assistCache
 }
 
-// NewService is cheap — it just stores the config and backend. The
-// model is mmap'd and Metal kernels compiled lazily on the first
-// Generate / RunAgent call, so daemon startup isn't slowed.
+// NewService constructs the service and its provider. Provider
+// construction is cheap for every backend — the local provider only
+// validates its config here and defers the model mmap to the first
+// call. A disabled or misconfigured config yields a Service whose
+// Enabled() reports false; the construction error is retained and
+// surfaced via ProviderErr.
 func NewService(cfg llm.Config, backend llm.Backend) *Service {
-	return &Service{
-		cfg:         cfg.ApplyDefaults(),
+	cfg = cfg.ApplyDefaults()
+	s := &Service{
+		cfg:         cfg,
 		backend:     backend,
 		expandCache: newAssistCache(256),
 		rerankCache: newAssistCache(256),
 		verifyCache: newAssistCache(256),
 	}
-}
-
-// Enabled reports whether the service has a valid configuration
-// (non-empty model path) and a backend. Callers should check this
-// before registering features that depend on the service.
-func (s *Service) Enabled() bool {
-	return s != nil && s.cfg.IsEnabled() && s.backend != nil
-}
-
-func (s *Service) ensureLoaded() error {
-	s.loadOnce.Do(func() {
-		if !s.cfg.IsEnabled() {
-			s.loadErr = errors.New("llm: model path is empty")
-			return
-		}
-		m, err := llm.LoadModel(s.cfg.Model, s.cfg.GPULayers)
+	if cfg.IsEnabled() && backend != nil {
+		p, err := provider.New(cfg)
 		if err != nil {
-			s.loadErr = fmt.Errorf("llm: load model: %w", err)
-			return
+			s.providerErr = err
+		} else {
+			s.provider = p
+			s.profile = llm.ProfileForProvider(p.Name())
 		}
-		s.model = m
-	})
-	return s.loadErr
+	}
+	return s
 }
 
-// Close releases the underlying model and any assist context. Safe
-// to call multiple times. After Close, every operational method
-// returns an error.
+// Enabled reports whether the service can do real work — a provider
+// was constructed and a backend is wired. Callers gate feature /
+// tool registration on this.
+func (s *Service) Enabled() bool {
+	return s != nil && s.provider != nil && s.backend != nil
+}
+
+// ProviderErr returns the error from provider construction, if any.
+// Enabled() is false whenever this is non-nil; the daemon entrypoint
+// surfaces it as a startup warning so a misconfigured `llm:` block
+// (unset API key, model file missing) isn't silently ignored.
+func (s *Service) ProviderErr() error {
+	if s == nil {
+		return nil
+	}
+	return s.providerErr
+}
+
+// ProviderName returns the active provider's name, or "" when no
+// provider was constructed.
+func (s *Service) ProviderName() string {
+	if s == nil || s.provider == nil {
+		return ""
+	}
+	return s.provider.Name()
+}
+
+// Close releases the provider's resources (model weights, idle HTTP
+// connections). Safe to call multiple times and on a disabled service.
 func (s *Service) Close() error {
-	// Order matters: drop the assist context first so its KV cache
-	// is freed before the model itself goes away.
-	s.assistMu.Lock()
-	if s.assistCtx != nil {
-		s.assistCtx.Close()
-		s.assistCtx = nil
+	if s == nil || s.provider == nil {
+		return nil
 	}
-	s.assistMu.Unlock()
-
-	s.infer.Lock()
-	defer s.infer.Unlock()
-	if s.model != nil {
-		s.model.Close()
-		s.model = nil
-	}
-	return nil
+	return s.provider.Close()
 }
 
-// Generate runs one-shot inference: prompt in, generated text out.
-// No agent loop, no tools — just the model. Intended for future
-// summarization / wiki generation use cases where the caller assembles
-// the prompt with relevant code context itself.
-//
-// maxTokens caps the generation length; 0 falls back to a sensible
-// default (1024). The model's chat template is NOT applied — pass a
-// fully-formatted prompt.
+// Generate runs one-shot freeform inference: prompt in, generated text
+// out. No agent loop, no tools. maxTokens caps generation length; 0
+// falls back to a sensible default.
 func (s *Service) Generate(ctx context.Context, prompt string, maxTokens int) (string, error) {
-	_ = ctx // greedy inference is uninterruptible in the current wrapper
-	if err := s.ensureLoaded(); err != nil {
-		return "", err
+	if s.provider == nil {
+		return "", errServiceUnavailable
 	}
 	if maxTokens <= 0 {
 		maxTokens = 1024
 	}
-
-	s.infer.Lock()
-	defer s.infer.Unlock()
-
-	llmCtx, err := s.model.NewContext(s.cfg.Ctx, 0)
-	if err != nil {
-		return "", fmt.Errorf("llm: new context: %w", err)
-	}
-	defer llmCtx.Close()
-
-	var out strings.Builder
-	_, err = llmCtx.Generate(prompt, maxTokens, func(piece string) bool {
-		out.WriteString(piece)
-		return true
+	resp, err := s.provider.Complete(ctx, llm.CompletionRequest{
+		Messages:  []llm.Message{{Role: llm.RoleUser, Content: prompt}},
+		MaxTokens: maxTokens,
+		Shape:     llm.ShapeFreeform,
 	})
 	if err != nil {
-		return out.String(), err
+		return "", err
 	}
-	return out.String(), nil
+	return resp.Text, nil
 }
 
-// RunAgent runs the grammar-constrained tool-calling agent loop. The
-// agent issues tool calls against the configured Backend (typically an
-// InProcessBackend wired to gortex's *query.Engine) and synthesizes a
-// final answer via the model's final_answer tool.
+// RunAgent runs the structured tool-calling agent loop. The agent
+// issues tool calls against the configured Backend and synthesizes a
+// final answer via the final_answer tool.
 //
-// Returned AgentAnswer always has at least Answer/Error populated —
-// non-nil even on error paths.
+// The returned AgentAnswer always has at least Answer/Error populated
+// — non-nil even on error paths.
 func (s *Service) RunAgent(ctx context.Context, opts llm.RunAgentOptions) (*llm.AgentAnswer, error) {
-	_ = ctx
 	answer := &llm.AgentAnswer{Scope: opts.Scope, ChainMode: opts.Chain}
-	if err := s.ensureLoaded(); err != nil {
-		answer.Error = err.Error()
-		return answer, err
+	if s.provider == nil {
+		answer.Error = errServiceUnavailable.Error()
+		return answer, errServiceUnavailable
 	}
 	if strings.TrimSpace(opts.Question) == "" {
 		err := errors.New("llm: question is empty")
-		answer.Error = err.Error()
-		return answer, err
-	}
-
-	tmpl, err := agent.TemplateByName(s.cfg.Template)
-	if err != nil {
 		answer.Error = err.Error()
 		return answer, err
 	}
@@ -196,24 +172,14 @@ func (s *Service) RunAgent(ctx context.Context, opts llm.RunAgentOptions) (*llm.
 		tools = agent.GortexTools(s.backend, opts.Scope)
 	}
 
-	s.infer.Lock()
-	defer s.infer.Unlock()
-
-	llmCtx, err := s.model.NewContext(s.cfg.Ctx, 0)
-	if err != nil {
-		answer.Error = err.Error()
-		return answer, err
-	}
-	defer llmCtx.Close()
-
-	ag, err := agent.New(llmCtx, tools, tmpl)
+	ag, err := agent.New(s.provider, tools)
 	if err != nil {
 		answer.Error = err.Error()
 		return answer, err
 	}
 
 	t0 := time.Now()
-	answerText, transcript, runErr := ag.Run(systemExtras, opts.Question, s.cfg.MaxSteps)
+	answerText, transcript, runErr := ag.Run(ctx, systemExtras, opts.Question, s.cfg.MaxSteps)
 	answer.ElapsedMs = time.Since(t0).Milliseconds()
 	answer.Answer = answerText
 
@@ -239,8 +205,8 @@ func (s *Service) RunAgent(ctx context.Context, opts llm.RunAgentOptions) (*llm.
 	return answer, runErr
 }
 
-// promptSimple — P2-equivalent rules from the bench experiments. Tight
-// system prompt for single-hop / cross-repo lookups.
+// promptSimple — tight system-prompt extras for single-hop /
+// cross-repo lookups.
 const promptSimple = `RULES (follow these exactly):
 - If the user gives you only a bare name (not a path-qualified id like "pkg/x.Foo"), you MUST first call search_symbols to resolve it to an id before calling get_callers.
 - For search_symbols, pass ONLY the bare symbol name as "query" — no prepositions, no package qualifiers, no extra words.
@@ -249,9 +215,8 @@ const promptSimple = `RULES (follow these exactly):
 - Never call the same tool with the same args twice in a row.
 - When you have enough information, call final_answer summarising what you found.`
 
-// promptChain — chain-mode rules with the explicit "no get_callers"
-// direction warning that we proved closes Coder-7B's directional
-// confusion in the bench.
+// promptChain — chain-mode extras with the explicit "no get_callers"
+// direction warning.
 const promptChain = `RULES (follow these exactly):
 - You are tracing a cross-system call chain. Output one tool call per turn.
 - DIRECTION MATTERS. Only these tools are correct in chain mode:

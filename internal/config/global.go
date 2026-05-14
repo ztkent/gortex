@@ -67,32 +67,20 @@ type GlobalConfig struct {
 	configPath string `yaml:"-"`
 }
 
-// MergeLLMInto returns local with any zero fields filled from gc.LLM.
-// Local non-zero values always win — including an explicit per-repo
-// override of an inherited global model path. Safe to call on a nil
-// receiver (returns local unchanged), so daemon startup paths don't
-// need separate nil-checks for the global config.
+// MergeLLMInto layers a repo-local llm.Config over the global user
+// config: each zero-valued field of local is filled from gc.LLM,
+// per provider sub-block. Local non-zero values always win — including
+// an explicit per-repo override of an inherited global model path.
+// Safe to call on a nil receiver (returns local unchanged), so daemon
+// startup paths don't need separate nil-checks for the global config.
+//
+// The local provider's model path additionally gets `~/` expanded
+// against $HOME so users can write portable paths in either config.
 func (gc *GlobalConfig) MergeLLMInto(local llm.Config) llm.Config {
-	if gc == nil {
-		return local
+	if gc != nil {
+		local = local.MergedWith(gc.LLM)
 	}
-	g := gc.LLM
-	if local.Model == "" {
-		local.Model = g.Model
-	}
-	if local.Ctx == 0 {
-		local.Ctx = g.Ctx
-	}
-	if local.GPULayers == 0 {
-		local.GPULayers = g.GPULayers
-	}
-	if local.MaxSteps == 0 {
-		local.MaxSteps = g.MaxSteps
-	}
-	if local.Template == "" {
-		local.Template = g.Template
-	}
-	local.Model = expandHome(local.Model)
+	local.Local.Model = expandHome(local.Local.Model)
 	return local
 }
 

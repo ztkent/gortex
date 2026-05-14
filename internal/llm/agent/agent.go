@@ -1,20 +1,25 @@
-//go:build llama
-
-// Package agent runs a grammar-constrained tool-calling loop on top of
-// the internal/llm wrapper. The model can only emit JSON of the
-// shape {"tool": "<one of the registered names>", "args": {...}};
-// each tool call is executed and its result fed back as a new turn.
+// Package agent runs a provider-agnostic tool-calling loop. On each
+// turn the model emits one JSON object {"tool":"<name>","args":{...}};
+// the loop executes that call and feeds the result back as a new turn.
 // The loop terminates when the model calls the final_answer tool.
+//
+// The structured-output constraint — the model may only emit a valid
+// tool-call object — is enforced by the llm.Provider via
+// CompletionRequest.Shape == ShapeToolCall: a GBNF grammar for the
+// local llama.cpp provider, json-schema / forced-tool for the HTTP
+// providers. The loop carries the conversation as a provider-neutral
+// []llm.Message, so the same agent drives every provider.
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
 	"strings"
 
-	llm "github.com/zzet/gortex/internal/llm"
+	"github.com/zzet/gortex/internal/llm"
 )
 
 // ToolFunc executes a single tool call. args is the parsed JSON object
@@ -37,78 +42,28 @@ type Step struct {
 	Args map[string]any // parsed args (call/final)
 }
 
-// ChatTemplate describes how to wrap conversation turns for a given
-// model family. The four wrappers each take raw content and return
-// the fully-marked-up turn; AssistPrime is the marker we append to
-// the running conversation right before each generate call so the
-// model starts emitting an assistant turn.
-type ChatTemplate struct {
-	Name        string
-	BOS         string
-	System      func(content string) string
-	User        func(content string) string
-	AssistEnd   string // marker appended after a captured assistant emission
-	Tool        func(content string) string
-	AssistPrime string
-}
-
-// TemplateChatML covers Qwen2.5 family and Nous Hermes-3 (which
-// re-trains Llama-3 onto ChatML).
-var TemplateChatML = ChatTemplate{
-	Name:      "chatml",
-	System:    func(c string) string { return "<|im_start|>system\n" + c + "<|im_end|>\n" },
-	User:      func(c string) string { return "<|im_start|>user\n" + c + "<|im_end|>\n" },
-	AssistEnd: "<|im_end|>\n",
-	Tool:      func(c string) string { return "<|im_start|>tool\n" + c + "<|im_end|>\n" },
-	AssistPrime: "<|im_start|>assistant\n",
-}
-
-// TemplateLlama3 covers Meta's Llama-3.x stock instruct format. Used by
-// models that keep Llama-3's native template (NOT Hermes-3, which
-// switches to ChatML).
-var TemplateLlama3 = ChatTemplate{
-	Name: "llama3",
-	BOS:  "<|begin_of_text|>",
-	System: func(c string) string {
-		return "<|start_header_id|>system<|end_header_id|>\n\n" + c + "<|eot_id|>"
-	},
-	User: func(c string) string {
-		return "<|start_header_id|>user<|end_header_id|>\n\n" + c + "<|eot_id|>"
-	},
-	AssistEnd: "<|eot_id|>",
-	Tool: func(c string) string {
-		return "<|start_header_id|>ipython<|end_header_id|>\n\n" + c + "<|eot_id|>"
-	},
-	AssistPrime: "<|start_header_id|>assistant<|end_header_id|>\n\n",
-}
-
-// TemplateByName returns a known chat template by short name.
-func TemplateByName(name string) (ChatTemplate, error) {
-	switch name {
-	case "", "chatml", "qwen", "hermes":
-		return TemplateChatML, nil
-	case "llama3", "llama":
-		return TemplateLlama3, nil
-	}
-	return ChatTemplate{}, fmt.Errorf("unknown chat template %q", name)
-}
-
-type Agent struct {
-	ctx     *llm.Context
-	tmpl    ChatTemplate
-	tools   map[string]Tool
-	names   []string // sorted, for stable grammar
-	grammar string
-	maxTok  int
-}
-
 // FinalAnswerTool is the name of the synthetic terminator tool. It is
-// registered automatically by New; callers should not pre-register it.
+// registered automatically by New; callers must not pre-register it.
 const FinalAnswerTool = "final_answer"
 
-func New(ctx *llm.Context, tools []Tool, tmpl ChatTemplate) (*Agent, error) {
-	if tmpl.AssistPrime == "" {
-		tmpl = TemplateChatML
+// stepMaxTokens caps a single tool-call emission. A tool call is a
+// small JSON object, so this is generous.
+const stepMaxTokens = 512
+
+type Agent struct {
+	provider llm.Provider
+	tools    map[string]Tool
+	names    []string       // sorted, stable iteration order
+	specs    []llm.ToolSpec // sorted by name; handed to the provider
+}
+
+// New builds an Agent over a provider and a tool set. The synthetic
+// final_answer tool is appended automatically. Returns an error for a
+// nil provider or a malformed tool (empty name, reserved name, nil
+// Run).
+func New(provider llm.Provider, tools []Tool) (*Agent, error) {
+	if provider == nil {
+		return nil, errors.New("agent: nil provider")
 	}
 	reg := make(map[string]Tool, len(tools)+1)
 	for _, t := range tools {
@@ -134,44 +89,36 @@ func New(ctx *llm.Context, tools []Tool, tmpl ChatTemplate) (*Agent, error) {
 		names = append(names, n)
 	}
 	sort.Strings(names)
+	specs := make([]llm.ToolSpec, len(names))
+	for i, n := range names {
+		specs[i] = llm.ToolSpec{Name: n, Description: reg[n].Description}
+	}
 
-	a := &Agent{
-		ctx:    ctx,
-		tmpl:   tmpl,
-		tools:  reg,
-		names:  names,
-		maxTok: 512,
-	}
-	a.grammar = buildGrammar(names)
-	if err := ctx.SetGrammar(a.grammar); err != nil {
-		return nil, fmt.Errorf("agent: install grammar: %w", err)
-	}
-	return a, nil
+	return &Agent{provider: provider, tools: reg, names: names, specs: specs}, nil
 }
-
-// Grammar returns the GBNF the agent installed. Exposed for debugging.
-func (a *Agent) Grammar() string { return a.grammar }
 
 // Run executes the tool-calling loop until the model invokes
 // final_answer or maxSteps is reached. The transcript captures every
 // call/result/final step in order.
-func (a *Agent) Run(systemExtras, userQuestion string, maxSteps int) (answer string, transcript []Step, err error) {
-	conv := a.initialPrompt(systemExtras, userQuestion)
+func (a *Agent) Run(ctx context.Context, systemExtras, userQuestion string, maxSteps int) (answer string, transcript []Step, err error) {
+	conv := []llm.Message{
+		{Role: llm.RoleSystem, Content: a.systemPrompt(systemExtras)},
+		{Role: llm.RoleUser, Content: userQuestion},
+	}
 	seen := map[string]struct{}{}
 
-	for step := 0; step < maxSteps; step++ {
-		a.ctx.Reset()
-
-		var buf strings.Builder
-		_, gerr := a.ctx.Generate(conv, a.maxTok, func(piece string) bool {
-			buf.WriteString(piece)
-			return !jsonComplete(buf.String())
+	for step := range maxSteps {
+		resp, gerr := a.provider.Complete(ctx, llm.CompletionRequest{
+			Messages:  conv,
+			MaxTokens: stepMaxTokens,
+			Shape:     llm.ShapeToolCall,
+			Tools:     a.specs,
 		})
 		if gerr != nil {
 			return "", transcript, fmt.Errorf("step %d generate: %w", step, gerr)
 		}
 
-		raw := strings.TrimSpace(buf.String())
+		raw := strings.TrimSpace(resp.Text)
 		call, perr := parseToolCall(raw)
 		if perr != nil {
 			return "", transcript, fmt.Errorf("step %d parse %q: %w", step, raw, perr)
@@ -187,24 +134,25 @@ func (a *Agent) Run(systemExtras, userQuestion string, maxSteps int) (answer str
 
 		tool, ok := a.tools[call.Tool]
 		if !ok {
-			// Grammar shouldn't allow this, but defend anyway.
-			return "", transcript, fmt.Errorf("step %d unknown tool %q (grammar bug?)", step, call.Tool)
+			// Structured output shouldn't allow this, but defend anyway.
+			return "", transcript, fmt.Errorf("step %d unknown tool %q (provider bug?)", step, call.Tool)
 		}
 		transcript = append(transcript, Step{
 			Kind: "call", Raw: raw, Tool: call.Tool, Args: call.Args,
 		})
 
 		// Loop detection: if we've already executed this exact
-		// (tool, args) pair in this run, refuse to execute it again
-		// and feed back a synthetic loop_detected observation so the
-		// model is forced to change strategy.
+		// (tool, args) pair in this run, refuse to execute it again and
+		// feed back a synthetic loop_detected observation so the model
+		// is forced to change strategy.
 		key := callKey(call.Tool, call.Args)
 		if _, dup := seen[key]; dup {
 			loopResult := `{"error":"loop_detected","message":"You already called this exact tool with these exact args; the result did not help. Try DIFFERENT args, a DIFFERENT tool, or call final_answer to give your best summary of what you found."}`
 			transcript = append(transcript, Step{Kind: "result", Raw: loopResult})
-			conv += raw + a.tmpl.AssistEnd +
-				a.tmpl.Tool(loopResult) +
-				a.tmpl.AssistPrime
+			conv = append(conv,
+				llm.Message{Role: llm.RoleAssistant, Content: raw},
+				llm.Message{Role: llm.RoleTool, Content: loopResult, ToolName: call.Tool},
+			)
 			continue
 		}
 		seen[key] = struct{}{}
@@ -215,22 +163,25 @@ func (a *Agent) Run(systemExtras, userQuestion string, maxSteps int) (answer str
 		}
 		transcript = append(transcript, Step{Kind: "result", Raw: result})
 
-		conv += raw + a.tmpl.AssistEnd +
-			a.tmpl.Tool(result) +
-			a.tmpl.AssistPrime
+		conv = append(conv,
+			llm.Message{Role: llm.RoleAssistant, Content: raw},
+			llm.Message{Role: llm.RoleTool, Content: result, ToolName: call.Tool},
+		)
 	}
 	return "", transcript, fmt.Errorf("agent: exceeded %d steps without final_answer", maxSteps)
 }
 
-func (a *Agent) initialPrompt(extras, question string) string {
+// systemPrompt assembles the agent's system message: the tool-call
+// protocol, the tool catalogue, and any caller-supplied extras
+// (the simple / chain mode rule sets).
+func (a *Agent) systemPrompt(extras string) string {
 	var sys strings.Builder
 	sys.WriteString("You are a tool-using agent. ")
 	sys.WriteString("On each turn, emit ONE JSON object: ")
 	sys.WriteString(`{"tool": "<name>", "args": {...}}.`)
 	sys.WriteString(" Available tools:\n")
 	for _, n := range a.names {
-		t := a.tools[n]
-		fmt.Fprintf(&sys, "- %s: %s\n", n, t.Description)
+		fmt.Fprintf(&sys, "- %s: %s\n", n, a.tools[n].Description)
 	}
 	sys.WriteString("\nAfter receiving a tool result, call the next tool. ")
 	sys.WriteString("When you have enough information, call ")
@@ -240,11 +191,7 @@ func (a *Agent) initialPrompt(extras, question string) string {
 		sys.WriteString("\n\n")
 		sys.WriteString(extras)
 	}
-
-	return a.tmpl.BOS +
-		a.tmpl.System(sys.String()) +
-		a.tmpl.User(question) +
-		a.tmpl.AssistPrime
+	return sys.String()
 }
 
 type toolCall struct {
@@ -271,37 +218,4 @@ func parseToolCall(s string) (toolCall, error) {
 func callKey(tool string, args map[string]any) string {
 	b, _ := json.Marshal(args)
 	return tool + ":" + string(b)
-}
-
-// jsonComplete reports whether s is a complete top-level JSON object.
-// Used to early-stop generation as soon as the grammar-driven model
-// closes the brace, instead of waiting on EOS.
-func jsonComplete(s string) bool {
-	s = strings.TrimSpace(s)
-	if !strings.HasPrefix(s, "{") || !strings.HasSuffix(s, "}") {
-		return false
-	}
-	var v any
-	return json.Unmarshal([]byte(s), &v) == nil
-}
-
-// buildGrammar returns a GBNF that accepts {"tool": "<one of names>",
-// "args": {<arbitrary JSON object>}} with whitespace tolerance.
-func buildGrammar(names []string) string {
-	alt := make([]string, len(names))
-	for i, n := range names {
-		alt[i] = `"\"" "` + n + `" "\""`
-	}
-	toolname := strings.Join(alt, " | ")
-
-	return `root ::= ws "{" ws "\"tool\"" ws ":" ws toolname ws "," ws "\"args\"" ws ":" ws object ws "}" ws
-toolname ::= ` + toolname + `
-object ::= "{" ws ( pair ( ws "," ws pair )* )? ws "}"
-pair ::= string ws ":" ws value
-array ::= "[" ws ( value ( ws "," ws value )* )? ws "]"
-value ::= string | number | object | array | "true" | "false" | "null"
-string ::= "\"" ( [^"\\] | "\\" ( ["\\/bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] ) )* "\""
-number ::= "-"? ( "0" | [1-9] [0-9]* ) ( "." [0-9]+ )? ( [eE] [-+]? [0-9]+ )?
-ws ::= [ \t\n]*
-`
 }

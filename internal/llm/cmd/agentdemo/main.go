@@ -1,8 +1,8 @@
 //go:build llama
 
-// agentdemo: drive the grammar-constrained tool-calling agent against
-// either canned mock data or the real gortex daemon. Same model, same
-// agent loop, the only variable is the backend.
+// agentdemo: drive the structured tool-calling agent against either
+// canned mock data or the real gortex daemon. Same agent loop, the
+// only variable is the backend.
 //
 //	go build -tags llama -o /tmp/agentdemo ./internal/llm/cmd/agentdemo
 //	/tmp/agentdemo -model ~/models/qwen2.5-3b-instruct-q4_k_m.gguf \
@@ -13,6 +13,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/zzet/gortex/internal/llm"
 	"github.com/zzet/gortex/internal/llm/agent"
+	"github.com/zzet/gortex/internal/llm/provider"
 )
 
 const promptP1 = `RULES (follow these exactly):
@@ -88,16 +90,9 @@ func main() {
 	ref := flag.String("ref", "", "restrict queries to this ref tag")
 	promptName := flag.String("prompt", "p2", "prompt variant: p0 | p1 | p2 | chain")
 	chainMode := flag.Bool("chain", false, "register contract + dependency tools for cross-system tracing")
-	showGrammar := flag.Bool("show-grammar", false, "print the generated GBNF and exit")
 	flag.Parse()
 
 	systemExtras, err := promptByName(*promptName)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(2)
-	}
-
-	tmpl, err := agent.TemplateByName(*tmplName)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
@@ -132,33 +127,30 @@ func main() {
 		tools = agent.GortexTools(backend, scope)
 	}
 
-	m, err := llm.LoadModel(*modelPath, *gpu)
+	cfg := llm.Config{
+		Provider: "local",
+		Local: llm.LocalConfig{
+			Model:     *modelPath,
+			Ctx:       *nCtx,
+			GPULayers: *gpu,
+			Template:  *tmplName,
+		},
+	}.ApplyDefaults()
+	prov, err := provider.New(cfg)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "load: %v\n", err)
+		fmt.Fprintf(os.Stderr, "provider: %v\n", err)
 		os.Exit(1)
 	}
-	defer m.Close()
+	defer prov.Close()
 
-	ctx, err := m.NewContext(*nCtx, 0)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "context: %v\n", err)
-		os.Exit(1)
-	}
-	defer ctx.Close()
-
-	ag, err := agent.New(ctx, tools, tmpl)
+	ag, err := agent.New(prov, tools)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "agent: %v\n", err)
 		os.Exit(1)
 	}
 
-	if *showGrammar {
-		fmt.Println(ag.Grammar())
-		return
-	}
-
 	t0 := time.Now()
-	answer, transcript, runErr := ag.Run(systemExtras, *question, *maxSteps)
+	answer, transcript, runErr := ag.Run(context.Background(), systemExtras, *question, *maxSteps)
 
 	fmt.Println("=== TRANSCRIPT ===")
 	for i, st := range transcript {

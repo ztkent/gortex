@@ -9,6 +9,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/zzet/gortex/internal/llm"
 	"github.com/zzet/gortex/internal/llm/agent"
+	"github.com/zzet/gortex/internal/llm/provider"
 )
 
 type modelSpec struct {
@@ -158,29 +160,25 @@ func promptByName(name string) (string, error) {
 func runOne(spec modelSpec, qs []question, ctxSize int, systemExtras string, backend llm.Backend, runScope llm.Scope, chain bool) []result {
 	results := make([]result, 0, len(qs))
 
-	m, err := llm.LoadModel(spec.Path, 999)
+	cfg := llm.Config{
+		Provider: "local",
+		Local: llm.LocalConfig{
+			Model:     spec.Path,
+			Ctx:       ctxSize,
+			GPULayers: 999,
+			Template:  spec.Template,
+		},
+	}.ApplyDefaults()
+	prov, err := provider.New(cfg)
 	if err != nil {
 		for _, q := range qs {
-			results = append(results, result{Question: q.Name, Err: "load: " + err.Error()})
+			results = append(results, result{Question: q.Name, Err: "provider: " + err.Error()})
 		}
 		return results
 	}
-	defer m.Close()
-
-	tmpl, err := agent.TemplateByName(spec.Template)
-	if err != nil {
-		for _, q := range qs {
-			results = append(results, result{Question: q.Name, Err: "template: " + err.Error()})
-		}
-		return results
-	}
+	defer prov.Close()
 
 	for _, q := range qs {
-		ctx, err := m.NewContext(ctxSize, 0)
-		if err != nil {
-			results = append(results, result{Question: q.Name, Err: "context: " + err.Error()})
-			continue
-		}
 		// Rebuild tools per question so the scope can differ across
 		// the cross-repo set. Chain mode adds contracts +
 		// get_dependencies for cross-system tracing.
@@ -190,10 +188,9 @@ func runOne(spec modelSpec, qs []question, ctxSize int, systemExtras string, bac
 		} else {
 			tools = agent.GortexTools(backend, q.effectiveScope(runScope))
 		}
-		ag, err := agent.New(ctx, tools, tmpl)
+		ag, err := agent.New(prov, tools)
 		if err != nil {
 			results = append(results, result{Question: q.Name, Err: "agent: " + err.Error()})
-			ctx.Close()
 			continue
 		}
 
@@ -202,7 +199,7 @@ func runOne(spec modelSpec, qs []question, ctxSize int, systemExtras string, bac
 			maxSteps = 20
 		}
 		t0 := time.Now()
-		ans, transcript, runErr := ag.Run(systemExtras, q.Text, maxSteps)
+		ans, transcript, runErr := ag.Run(context.Background(), systemExtras, q.Text, maxSteps)
 		elapsed := time.Since(t0)
 
 		r := result{Question: q.Name, Steps: stepCount(transcript), Answer: ans, Elapsed: elapsed}
@@ -210,7 +207,6 @@ func runOne(spec modelSpec, qs []question, ctxSize int, systemExtras string, bac
 			r.Err = runErr.Error()
 		}
 		results = append(results, r)
-		ctx.Close()
 	}
 	return results
 }

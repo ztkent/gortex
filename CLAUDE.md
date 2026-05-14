@@ -20,9 +20,22 @@ go test -race ./...                 # all test packages must pass
 
 Gortex is running as an MCP server. You MUST use graph queries instead of file reads whenever possible. This saves thousands of tokens per task.
 
-### Optional: delegate research to a local agent
+### Optional: LLM features and provider selection
 
-When the daemon is built with `-tags llama` and `llm.model` is set in `.gortex.yaml` (or via the `GORTEX_LLM_MODEL` env var), the `ask` MCP tool is registered. It runs a grammar-constrained agent locally that uses gortex tools to research one question and returns a synthesized answer — useful when you'd otherwise issue many `search_symbols` / `get_callers` / `contracts` calls.
+The `ask` tool and the `search_symbols` `assist` modes are backed by an LLM provider, selected by the `llm.provider` config key (in `.gortex.yaml` or `~/.config/gortex/config.yaml`):
+
+| `llm.provider` | Backend | Requires |
+|----------------|---------|----------|
+| `local` (default) | in-process llama.cpp | a `-tags llama` build + `llm.local.model` (a `.gguf` path) |
+| `anthropic` | Anthropic Messages API | `llm.anthropic.model` + `ANTHROPIC_API_KEY` |
+| `openai` | OpenAI Chat Completions | `llm.openai.model` + `OPENAI_API_KEY` |
+| `ollama` | Ollama daemon | `llm.ollama.model` (+ `llm.ollama.host`, default `localhost:11434`) |
+
+The HTTP providers are pure Go — available without `-tags llama`. `GORTEX_LLM_PROVIDER` / `GORTEX_LLM_MODEL` env vars override the file config. If the active provider can't be constructed (missing model / API key, or `local` without `-tags llama`), the daemon logs a warning and the LLM features stay absent.
+
+### Optional: delegate research to the `ask` agent
+
+When a provider is configured, the `ask` MCP tool is registered. It runs a structured tool-calling agent that uses gortex tools to research one question and returns a synthesized answer — useful when you'd otherwise issue many `search_symbols` / `get_callers` / `contracts` calls.
 
 | When you'd otherwise...               | Consider...                              |
 |---------------------------------------|------------------------------------------|
@@ -30,18 +43,18 @@ When the daemon is built with `-tags llama` and `llm.model` is set in `.gortex.y
 | Trace a request across repos (consumer → contract → handler → downstream) | `ask` with `chain: true` |
 | Look up a single known fact | Skip `ask` — direct tools are faster |
 
-If `ask` isn't in `tools/list`, gortex was built without `-tags llama` or `llm.model` is unset. Fall through to direct tools.
+If `ask` isn't in `tools/list`, no LLM provider is configured (or it failed to construct). Fall through to direct tools.
 
 ### Optional: LLM-assisted search ranking (`search_symbols` `assist:` arg)
 
-When the same `-tags llama` build + `llm.model` is in place, `search_symbols` accepts an `assist` argument that engages the local model in the search pipeline. The default `auto` is sub-100 ms on identifier lookups; the active modes add latency but materially improve precision on natural-language queries.
+When a provider is configured, `search_symbols` accepts an `assist` argument that engages the model in the search pipeline. The default `auto` is sub-100 ms on identifier lookups; the active modes add latency but materially improve precision on natural-language queries.
 
 | `assist` value | Behaviour | Cost |
 |----------------|-----------|------|
 | `auto` (default) | NL heuristic decides per-query. Identifier-shaped queries (`Server.handleAsk`, `parseToolCall`) skip the LLM. NL queries (≥3 tokens with a stop word, or ≥4 plain-word tokens) trigger query expansion + name+sig rerank. | None for identifier lookups; +200–500 ms for NL. |
 | `on` | Forces expansion + name+sig rerank regardless of shape. Use when you know the query is fuzzy. | +200–500 ms. |
 | `off` | Pure BM25 + combo/frecency. No LLM. | None. |
-| `deep` | `on` plus a body-grounded verification pass — reads each top candidate's body + callers and HONESTLY drops candidates whose code isn't about the query. May return zero results when nothing genuinely matches; that's the load-bearing honest-negative signal. | +1.5–4 s. Quality is **highly model-dependent**: Qwen2.5-Coder 3B is unreliable on disambiguation cases (e.g. "hash passwords" vs functions that hash other data); Qwen2.5-Coder 7B and above produce stable, useful results. Prefer 7B+ if you want to rely on `deep`. |
+| `deep` | `on` plus a body-grounded verification pass — reads each top candidate's body + callers and HONESTLY drops candidates whose code isn't about the query. May return zero results when nothing genuinely matches; that's the load-bearing honest-negative signal. | +1.5–4 s. Quality is **highly model-dependent**: small local models (Qwen2.5-Coder 3B) are unreliable on disambiguation cases (e.g. "hash passwords" vs functions that hash other data); a 7B-class local model or any hosted provider produces stable, useful results. The assist prompts are tiered automatically — terser for hosted frontier models, rule-heavy for small local ones. |
 
 The response gains an `assist` debug block when an active mode engaged: `terms` (expansion words), `primary_count` (raw BM25 hits on the original query), `merged_count` (after expansion union), `final_count` (after filter/rerank), plus `verify_kept_ids` / `verify_dropped` for `deep`.
 
