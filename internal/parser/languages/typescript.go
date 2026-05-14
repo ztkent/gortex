@@ -129,6 +129,9 @@ type deferredCall struct {
 	receiver string // receiver text for member calls
 	line     int    // 1-based line of the call_expression
 	isMember bool
+	// expr is the call_expression node, kept for member calls so the
+	// post-pass can inspect arguments for pub/sub topic detection.
+	expr *sitter.Node
 }
 
 // deferredVar holds a lexical_declaration match whose emission is
@@ -168,6 +171,11 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 
 	var calls []deferredCall
 	var vars []deferredVar
+	// importPaths collects every imported module path — including named
+	// imports, which emitImport's alias map intentionally skips — so the
+	// post-pass can disambiguate generic pub/sub method names and infer
+	// the broker transport.
+	var importPaths []string
 	// classCarries accumulates (class_declaration node, classID) pairs
 	// as they're matched, so the post-pass can run a single
 	// walkClassMembers per class — covering @Inject consumer edges,
@@ -209,6 +217,9 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 
 		case m.Captures["import.def"] != nil:
 			e.emitImport(m, filePath, fileID, src, result, imports)
+			if p := m.Captures["import.path"]; p != nil {
+				importPaths = append(importPaths, strings.Trim(p.Text, "\"'`"))
+			}
 
 		case m.Captures["method.def"] != nil:
 			e.emitMethod(m, filePath, src, result, annotationSeen)
@@ -230,6 +241,7 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 				receiver: m.Captures["callm.receiver"].Text,
 				line:     expr.StartLine + 1,
 				isMember: true,
+				expr:     expr.Node,
 			})
 
 		case m.Captures["tvar.def"] != nil:
@@ -347,6 +359,20 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 			FilePath: filePath, Line: v.startLn + 1,
 		})
 	}
+
+	// --- Event pub/sub edges ---
+	var pubsubEvents []pubsubEvent
+	for _, c := range calls {
+		if !c.isMember || c.expr == nil {
+			continue
+		}
+		if ev, ok := detectJSPubsubCall(c.expr, c.method, src, importPaths, c.line); ok {
+			pubsubEvents = append(pubsubEvents, ev)
+		}
+	}
+	emitPubsubEvents(pubsubEvents,
+		func(line int) string { return findEnclosingFunc(funcRanges, line) },
+		filePath, "typescript", result)
 
 	return result, nil
 }

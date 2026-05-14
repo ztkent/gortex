@@ -132,6 +132,7 @@ func (e *PythonExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 				receiver: m.Captures["callattr.receiver"].Text,
 				line:     expr.StartLine + 1,
 				isAttr:   true,
+				expr:     expr.Node,
 			})
 
 		case m.Captures["call.expr"] != nil:
@@ -239,6 +240,21 @@ func (e *PythonExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 			}
 		}
 	}
+
+	// --- Event pub/sub edges ---
+	pubsubImportPaths := importPathValues(imports)
+	var pubsubEvents []pubsubEvent
+	for _, c := range calls {
+		if !c.isAttr || c.expr == nil {
+			continue
+		}
+		if ev, ok := detectPyPubsubCall(c.expr, c.name, src, pubsubImportPaths, c.line); ok {
+			pubsubEvents = append(pubsubEvents, ev)
+		}
+	}
+	emitPubsubEvents(pubsubEvents,
+		func(line int) string { return findEnclosingFunc(funcRanges, line) },
+		filePath, "python", result)
 
 	return result, nil
 }

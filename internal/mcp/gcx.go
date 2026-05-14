@@ -520,6 +520,18 @@ func encodeAnalyze(kind string, payload any) ([]byte, error) {
 			}
 		}
 		return buf.Bytes(), enc.Close()
+	case "pubsub":
+		items, _ := payload.([]pubsubItem)
+		enc := newGCX(&buf, "analyze.pubsub",
+			[]string{"id", "name", "transport", "publishes", "subscribes", "publishers", "subscribers"},
+			"count", fmt.Sprintf("%d", len(items)),
+		)
+		for _, it := range items {
+			if err := enc.WriteRow(it.ID, it.Name, it.Transport, it.Publishes, it.Subscribes, it.Publishers, it.Subscribers); err != nil {
+				return nil, err
+			}
+		}
+		return buf.Bytes(), enc.Close()
 	case "string_emitters":
 		items, _ := payload.([]stringEmitterItem)
 		enc := newGCX(&buf, "analyze.string_emitters",
@@ -638,6 +650,16 @@ type eventEmitterItem struct {
 	Kind     string
 	Emits    int
 	Emitters string
+}
+
+type pubsubItem struct {
+	ID          string
+	Name        string
+	Transport   string
+	Publishes   int
+	Subscribes  int
+	Publishers  string
+	Subscribers string
 }
 
 type errorSurfaceItem struct {

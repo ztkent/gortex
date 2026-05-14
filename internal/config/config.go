@@ -293,6 +293,7 @@ type IndexConfig struct {
 //   - Configs:       false (recognizers per provider; opt-in)
 //   - Flags:         false (auto-on if a provider client is detected)
 //   - Observability: false (logging/metric/trace event names)
+//   - Pubsub:        false (event pub/sub publish/subscribe edges)
 //   - SQL:           false (Phase 3 — noisy and slow)
 //   - Fixtures:      true  (testdata path detection)
 //   - CrossLanguage: false (cgo / wasm-bindgen)
@@ -312,6 +313,7 @@ type CoverageConfig struct {
 	Configs       DomainToggle    `mapstructure:"configs"        yaml:"configs,omitempty"`
 	Flags         FlagConfig      `mapstructure:"flags"          yaml:"flags,omitempty"`
 	Observability DomainToggle    `mapstructure:"observability"  yaml:"observability,omitempty"`
+	Pubsub        DomainToggle    `mapstructure:"pubsub"         yaml:"pubsub,omitempty"`
 	SQL           SQLConfig       `mapstructure:"sql"            yaml:"sql,omitempty"`
 	Fixtures      DomainToggle    `mapstructure:"fixtures"       yaml:"fixtures,omitempty"`
 	CrossLanguage DomainToggle    `mapstructure:"cross_language" yaml:"cross_language,omitempty"`
@@ -412,6 +414,7 @@ var coverageDomainDefault = map[string]bool{
 	"configs":        false,
 	"flags":          false,
 	"observability":  false,
+	"pubsub":         false,
 	"sql":            false,
 	"fixtures":       true,
 	"cross_language": false,
@@ -466,6 +469,8 @@ func (cov CoverageConfig) IsEnabled(domain string) bool {
 		return resolveDomainEnabled(cov.Flags.Enabled, domain)
 	case "observability":
 		return resolveDomainEnabled(cov.Observability.Enabled, domain)
+	case "pubsub":
+		return resolveDomainEnabled(cov.Pubsub.Enabled, domain)
 	case "sql":
 		return resolveDomainEnabled(cov.SQL.Enabled, domain)
 	case "fixtures":

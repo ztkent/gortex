@@ -246,6 +246,7 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 	var fieldValSels []goDeferredValueSel
 	var fieldValIdents []goDeferredValueIdent
 	var observabilityEvents []goObservabilityEvent
+	var pubsubCandidates []goPubsubCandidate
 	var stringEvents []goStringEvent
 	var flagEvents []goFlagEvent
 	var configEvents []goConfigEvent
@@ -312,6 +313,9 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 					name:   name,
 					line:   expr.StartLine + 1,
 				})
+			}
+			if cand, ok := detectGoPubsubCall(expr.Node, method, src); ok {
+				pubsubCandidates = append(pubsubCandidates, cand)
 			}
 			receiverText := m.Captures["callm.receiver"].Text
 			if name, ok := detectGoMetric(expr.Node, method, src); ok {
@@ -606,6 +610,14 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 
 	// --- Observability events ---
 	emitGoObservabilityEvents(observabilityEvents,
+		func(line int) string { return findEnclosingFunc(funcRanges, line) },
+		filePath, result)
+
+	// --- Event pub/sub edges ---
+	// Transport resolution needs the file's full import set, which the
+	// tree walk above finished collecting, so it runs here in the
+	// post-pass alongside the other deferred coverage emitters.
+	emitGoPubsubEvents(pubsubCandidates, importPathValues(imports),
 		func(line int) string { return findEnclosingFunc(funcRanges, line) },
 		filePath, result)
 

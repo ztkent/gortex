@@ -80,6 +80,9 @@ type jsDeferredCall struct {
 	name     string
 	line     int
 	isMember bool
+	// expr is the call_expression node, kept for member calls so the
+	// post-pass can inspect arguments for pub/sub topic detection.
+	expr *sitter.Node
 }
 
 type jsDeferredVar struct {
@@ -111,6 +114,10 @@ func (e *JavaScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 
 	var calls []jsDeferredCall
 	var vars []jsDeferredVar
+	// importPaths collects every imported / required module path so the
+	// post-pass can disambiguate generic pub/sub method names (emit / on
+	// / send) and infer the broker transport.
+	var importPaths []string
 
 	parser.EachMatch(e.qAll, root, src, func(m parser.QueryResult) {
 		switch {
@@ -129,9 +136,17 @@ func (e *JavaScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 
 		case m.Captures["import.def"] != nil:
 			e.emitImport(m, filePath, fileID, result)
+			if p := m.Captures["import.path"]; p != nil {
+				importPaths = append(importPaths, p.Text)
+			}
 
 		case m.Captures["req.def"] != nil:
 			e.emitRequire(m, filePath, fileID, result)
+			if m.Captures["req.name"] != nil && m.Captures["req.name"].Text == "require" {
+				if p := m.Captures["req.path"]; p != nil {
+					importPaths = append(importPaths, p.Text)
+				}
+			}
 
 		case m.Captures["callm.expr"] != nil:
 			expr := m.Captures["callm.expr"]
@@ -139,6 +154,7 @@ func (e *JavaScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 				name:     m.Captures["callm.method"].Text,
 				line:     expr.StartLine + 1,
 				isMember: true,
+				expr:     expr.Node,
 			})
 
 		case m.Captures["call.expr"] != nil:
@@ -211,6 +227,20 @@ func (e *JavaScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 			Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
 		})
 	}
+
+	// --- Event pub/sub edges ---
+	var pubsubEvents []pubsubEvent
+	for _, c := range calls {
+		if !c.isMember || c.expr == nil {
+			continue
+		}
+		if ev, ok := detectJSPubsubCall(c.expr, c.name, src, importPaths, c.line); ok {
+			pubsubEvents = append(pubsubEvents, ev)
+		}
+	}
+	emitPubsubEvents(pubsubEvents,
+		func(line int) string { return findEnclosingFunc(funcRanges, line) },
+		filePath, "javascript", result)
 
 	return result, nil
 }

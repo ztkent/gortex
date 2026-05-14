@@ -692,6 +692,154 @@ func (s *Server) handleAnalyzeEventEmitters(ctx context.Context, req mcp.CallToo
 }
 
 // ---------------------------------------------------------------------------
+// pubsub — event pub/sub topics with their publishers and subscribers.
+// ---------------------------------------------------------------------------
+
+// handleAnalyzePubsub walks the EdgeEmits (publish) and EdgeListensOn
+// (subscribe) edges of the event pub/sub layer and groups them by
+// topic node. Each row is one KindEvent topic (Meta["event_kind"]=
+// "pubsub"): its transport (nats|kafka|rabbitmq|redis|socketio|
+// eventemitter|unknown), the count + symbol list of publishers, and
+// the count + symbol list of subscribers. Lets agents answer "who
+// publishes order.created and who listens for it" with one graph walk,
+// and spot orphan topics — published with no subscriber, or subscribed
+// with no publisher.
+//
+// Filters: `transport` (one broker label), `name` (exact topic name),
+// `role` (publish | subscribe — keep only topics with at least one
+// edge of that side).
+func (s *Server) handleAnalyzePubsub(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := req.GetArguments()
+	transportFilter := strings.ToLower(strings.TrimSpace(stringArg(args, "transport")))
+	nameFilter := strings.ToLower(strings.TrimSpace(stringArg(args, "name")))
+	roleFilter := strings.ToLower(strings.TrimSpace(stringArg(args, "role")))
+
+	type pubsubRow struct {
+		ID          string   `json:"id"`
+		Name        string   `json:"name"`
+		Transport   string   `json:"transport,omitempty"`
+		Publishes   int      `json:"publishes"`
+		Subscribes  int      `json:"subscribes"`
+		Publishers  []string `json:"publishers,omitempty"`
+		Subscribers []string `json:"subscribers,omitempty"`
+	}
+	byTopic := map[string]*pubsubRow{}
+	// rejected caches topic nodes that failed the transport/name
+	// filter (or aren't pub/sub events) so a topic with many edges
+	// isn't re-checked per edge.
+	rejected := map[string]struct{}{}
+
+	ensureRow := func(nodeID string) *pubsubRow {
+		if row, ok := byTopic[nodeID]; ok {
+			return row
+		}
+		if _, ok := rejected[nodeID]; ok {
+			return nil
+		}
+		n := s.graph.GetNode(nodeID)
+		if n == nil || n.Meta == nil {
+			rejected[nodeID] = struct{}{}
+			return nil
+		}
+		if kind, _ := n.Meta["event_kind"].(string); kind != "pubsub" {
+			rejected[nodeID] = struct{}{}
+			return nil
+		}
+		transport, _ := n.Meta["transport"].(string)
+		if transportFilter != "" && strings.ToLower(transport) != transportFilter {
+			rejected[nodeID] = struct{}{}
+			return nil
+		}
+		if nameFilter != "" && strings.ToLower(n.Name) != nameFilter {
+			rejected[nodeID] = struct{}{}
+			return nil
+		}
+		row := &pubsubRow{ID: nodeID, Name: n.Name, Transport: transport}
+		byTopic[nodeID] = row
+		return row
+	}
+
+	for _, e := range s.graph.AllEdges() {
+		switch e.Kind {
+		case graph.EdgeEmits:
+			row := ensureRow(e.To)
+			if row == nil {
+				continue
+			}
+			row.Publishes++
+			row.Publishers = appendUnique(row.Publishers, e.From)
+		case graph.EdgeListensOn:
+			row := ensureRow(e.To)
+			if row == nil {
+				continue
+			}
+			row.Subscribes++
+			row.Subscribers = appendUnique(row.Subscribers, e.From)
+		}
+	}
+
+	rows := make([]*pubsubRow, 0, len(byTopic))
+	for _, r := range byTopic {
+		switch roleFilter {
+		case "publish":
+			if r.Publishes == 0 {
+				continue
+			}
+		case "subscribe":
+			if r.Subscribes == 0 {
+				continue
+			}
+		}
+		sort.Strings(r.Publishers)
+		sort.Strings(r.Subscribers)
+		rows = append(rows, r)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		ti := rows[i].Publishes + rows[i].Subscribes
+		tj := rows[j].Publishes + rows[j].Subscribes
+		if ti != tj {
+			return ti > tj
+		}
+		return rows[i].ID < rows[j].ID
+	})
+
+	if s.isGCX(ctx, req) {
+		items := make([]pubsubItem, 0, len(rows))
+		for _, r := range rows {
+			items = append(items, pubsubItem{
+				ID:          r.ID,
+				Name:        r.Name,
+				Transport:   r.Transport,
+				Publishes:   r.Publishes,
+				Subscribes:  r.Subscribes,
+				Publishers:  strings.Join(r.Publishers, ","),
+				Subscribers: strings.Join(r.Subscribers, ","),
+			})
+		}
+		return s.gcxResponseWithBudget(req)(encodeAnalyze("pubsub", items))
+	}
+
+	if isCompact(req) {
+		var b strings.Builder
+		for _, r := range rows {
+			transport := r.Transport
+			if transport == "" {
+				transport = "?"
+			}
+			fmt.Fprintf(&b, "%dP/%dS [%s] %s\n", r.Publishes, r.Subscribes, transport, r.Name)
+		}
+		if len(rows) == 0 {
+			b.WriteString("no pub/sub topics\n")
+		}
+		return mcp.NewToolResultText(b.String()), nil
+	}
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
+		"topics": rows,
+		"total":  len(rows),
+	})
+}
+
+// ---------------------------------------------------------------------------
 // error_surface — function/method nodes with their EdgeThrows
 // targets.
 // ---------------------------------------------------------------------------

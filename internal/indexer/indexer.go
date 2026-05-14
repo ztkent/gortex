@@ -712,6 +712,9 @@ func (idx *Indexer) applyCoverageDomains(relPath, lang string, src []byte, resul
 	if !idx.config.Coverage.IsEnabled("observability") {
 		stripObservabilityArtifacts(result)
 	}
+	if !idx.config.Coverage.IsEnabled("pubsub") {
+		stripPubsubArtifacts(result)
+	}
 	if !idx.config.Coverage.IsEnabled("flags") {
 		stripFlagArtifacts(result)
 	}
@@ -897,16 +900,28 @@ func stripFlagArtifacts(result *parser.ExtractionResult) {
 	result.Edges = keptEdges
 }
 
-// stripObservabilityArtifacts drops KindEvent nodes and EdgeEmits
-// edges when the observability coverage domain is gated off. Used
-// for the same reason as the function-shape and type-shape strips:
-// the language extractor always emits, and the indexer prunes
-// per-file before applyRepoPrefix so the gate stays a pure-config
-// dial without parser plumbing.
+// stripObservabilityArtifacts drops the log/metric/trace KindEvent
+// nodes and their EdgeEmits edges when the observability coverage
+// domain is gated off. Used for the same reason as the function-shape
+// and type-shape strips: the language extractor always emits, and the
+// indexer prunes per-file before applyRepoPrefix so the gate stays a
+// pure-config dial without parser plumbing.
+//
+// Pub/sub KindEvent nodes (Meta["event_kind"]="pubsub") are a
+// separately-gated domain — they share the KindEvent kind and the
+// EdgeEmits edge (publish side) but belong to the `pubsub` coverage
+// domain, so this pass leaves them and any EdgeEmits/EdgeListensOn
+// edge targeting them untouched. stripPubsubArtifacts owns those.
 func stripObservabilityArtifacts(result *parser.ExtractionResult) {
 	stripped := make(map[string]struct{})
+	pubsubNodes := make(map[string]struct{})
 	keptNodes := result.Nodes[:0]
 	for _, n := range result.Nodes {
+		if isPubsubEventNode(n) {
+			pubsubNodes[n.ID] = struct{}{}
+			keptNodes = append(keptNodes, n)
+			continue
+		}
 		if n.Kind == graph.KindEvent {
 			stripped[n.ID] = struct{}{}
 			continue
@@ -916,7 +931,45 @@ func stripObservabilityArtifacts(result *parser.ExtractionResult) {
 	result.Nodes = keptNodes
 	keptEdges := result.Edges[:0]
 	for _, e := range result.Edges {
+		if _, ok := stripped[e.To]; ok {
+			continue
+		}
+		// The observability gate strips every EdgeEmits — the publish
+		// side of the log/metric/trace layer. The one exception is an
+		// EdgeEmits whose target is a pub/sub topic node: that's the
+		// publish side of the separately-gated pubsub domain, so it
+		// survives here and is owned by stripPubsubArtifacts.
 		if e.Kind == graph.EdgeEmits {
+			if _, ok := pubsubNodes[e.To]; !ok {
+				continue
+			}
+		}
+		keptEdges = append(keptEdges, e)
+	}
+	result.Edges = keptEdges
+}
+
+// stripPubsubArtifacts drops the pub/sub KindEvent topic nodes
+// (Meta["event_kind"]="pubsub"), every EdgeListensOn edge (a
+// pubsub-only edge kind), and any EdgeEmits edge whose target is a
+// pub/sub topic node, when the pubsub coverage domain is gated off.
+// Endpoint-aware so a publish edge into a stripped topic node doesn't
+// dangle. Mirrors stripObservabilityArtifacts — the two domains share
+// KindEvent + EdgeEmits but are toggled independently.
+func stripPubsubArtifacts(result *parser.ExtractionResult) {
+	stripped := make(map[string]struct{})
+	keptNodes := result.Nodes[:0]
+	for _, n := range result.Nodes {
+		if isPubsubEventNode(n) {
+			stripped[n.ID] = struct{}{}
+			continue
+		}
+		keptNodes = append(keptNodes, n)
+	}
+	result.Nodes = keptNodes
+	keptEdges := result.Edges[:0]
+	for _, e := range result.Edges {
+		if e.Kind == graph.EdgeListensOn {
 			continue
 		}
 		if _, ok := stripped[e.To]; ok {
@@ -925,6 +978,18 @@ func stripObservabilityArtifacts(result *parser.ExtractionResult) {
 		keptEdges = append(keptEdges, e)
 	}
 	result.Edges = keptEdges
+}
+
+// isPubsubEventNode reports whether a node is a pub/sub topic node — a
+// KindEvent carrying Meta["event_kind"]="pubsub". Distinguishes the
+// pub/sub domain from observability (log/metric/trace) events, which
+// share KindEvent but are gated separately.
+func isPubsubEventNode(n *graph.Node) bool {
+	if n == nil || n.Kind != graph.KindEvent || n.Meta == nil {
+		return false
+	}
+	kind, _ := n.Meta["event_kind"].(string)
+	return kind == "pubsub"
 }
 
 // applyFixtureClassification reclassifies the language extractor's

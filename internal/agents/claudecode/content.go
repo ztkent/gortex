@@ -246,6 +246,7 @@ Quick reference for all Gortex MCP tools and the knowledge graph schema.
 | analyze kind=annotation_users | EdgeAnnotated rollup; pass ` + "`id`" + ` or ` + "`name`" + ` to scope (e.g. @Deprecated) |
 | analyze kind=config_readers | config_key nodes grouped by EdgeReadsConfig; ` + "`name`" + ` filter |
 | analyze kind=event_emitters | Event/log/metric emit sites grouped by EdgeEmits; ` + "`level`" + `, ` + "`name`" + ` filters |
+| analyze kind=pubsub | Event pub/sub topics with publishers (EdgeEmits) + subscribers (EdgeListensOn) — NATS / Kafka / RabbitMQ / Redis / EventEmitter / Socket.IO; ` + "`transport`" + ` / ` + "`name`" + ` / ` + "`role`" + ` filters |
 | analyze kind=error_surface | Function/method nodes with their EdgeThrows targets — refactor blast radius |
 | analyze kind=external_calls | Stdlib / module-cache attribution — KindModule rollup of call/symbol counts; pass ` + "`id`" + ` for per-symbol detail, ` + "`module_kind`" + ` to filter stdlib vs module_cache |
 | analyze kind=routes | Handler↔route pairs from the EdgeHandlesRoute layer (HTTP/gRPC/WS/GraphQL/topic); ` + "`method`" + ` / ` + "`path`" + ` / ` + "`type`" + ` filters |
@@ -302,7 +303,7 @@ Quick reference for all Gortex MCP tools and the knowledge graph schema.
 - Concurrency: spawns (goroutine/async/promise), sends / recvs (channels)
 - Mutation: reads / writes (fields), reads_config / writes_config
 - Dataflow (CPG-lite, ` + "`flow_between`" + ` / ` + "`taint_paths`" + `): value_flow (intra-procedural assignment / return / range), arg_of (caller arg → callee param), returns_to (callee → assignment LHS)
-- Metadata: annotated (decorators), emits (events), throws (errors), queries (SQL), reads_col / writes_col, toggles_flag, depends_on_module, matches (fixtures), generated_by, tests (test → tested symbol), covered_by, owns (CODEOWNERS), authored, licensed_as
+- Metadata: annotated (decorators), emits (events + pub/sub publish), listens_on (pub/sub subscribe), throws (errors), queries (SQL), reads_col / writes_col, toggles_flag, depends_on_module, matches (fixtures), generated_by, tests (test → tested symbol), covered_by, owns (CODEOWNERS), authored, licensed_as
 - Similarity: similar_to (function/method near-duplicate — MinHash + LSH clone detection, ` + "`find_clones`" + `)
 - Cross-repo: cross_repo_calls / cross_repo_implements / cross_repo_extends (parallel edges materialised when a calls/implements/extends edge crosses a repo boundary, ` + "`analyze kind=cross_repo`" + `)
 `

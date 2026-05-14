@@ -132,7 +132,29 @@ const (
 	EdgeTogglesFlag EdgeKind = "toggles_flag"
 	// EdgeEmits links a function to a log/metric/trace event it emits.
 	// Meta carries level (for logs), unit (for metrics), and label keys.
+	//
+	// EdgeEmits is also the publish side of the event pub/sub layer:
+	// when a function publishes to a message broker (NATS / Kafka /
+	// RabbitMQ / Redis pub-sub) or an in-process EventEmitter / Socket.IO
+	// channel, the edge targets a KindEvent node with
+	// Meta["event_kind"]="pubsub". The subscribe side is EdgeListensOn.
+	// Meta["transport"] (nats|kafka|rabbitmq|redis|socketio|eventemitter|
+	// unknown) and Meta["method"] (the matched call name) ride on the
+	// edge so `analyze kind=pubsub` can group by broker without
+	// re-deriving it.
 	EdgeEmits EdgeKind = "emits"
+	// EdgeListensOn links a subscriber/consumer function to the
+	// KindEvent topic node it listens on — the read side of the event
+	// pub/sub layer that parallels EdgeEmits' publish side. Emitted for
+	// message-broker subscriptions (NATS Subscribe / Kafka consumer
+	// subscribe / RabbitMQ Consume / Redis (P)Subscribe) and in-process
+	// listener registration (EventEmitter.on / Socket.IO socket.on).
+	// The target node always carries Meta["event_kind"]="pubsub";
+	// Meta["transport"] and Meta["method"] ride on the edge. Origin:
+	// ast_inferred — detection is a method-name + string-literal-topic
+	// heuristic, not a type-checked fact, so it shares the tier the
+	// observability extractor uses for EdgeEmits.
+	EdgeListensOn EdgeKind = "listens_on"
 	// EdgeGeneratedBy links a generated file to its schema source
 	// (.proto, .graphql, openapi.yaml, etc.). Detected via comment
 	// markers (// Code generated …), conventional adjacency, or

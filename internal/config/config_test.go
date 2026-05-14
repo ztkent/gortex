@@ -309,6 +309,30 @@ func containsField(yamlContent, field string) bool {
 	return false
 }
 
+func TestPubsubCoverageDomain(t *testing.T) {
+	// Default-off: like observability, the pub/sub extractor is a
+	// heuristic with a non-zero false-positive surface, so it stays
+	// off until a repo opts in.
+	var cov CoverageConfig
+	if cov.IsEnabled("pubsub") {
+		t.Errorf("pubsub coverage domain should default to off")
+	}
+
+	// Explicit enable in YAML flips it on through the tri-state pointer.
+	enabled := true
+	cov.Pubsub.Enabled = &enabled
+	if !cov.IsEnabled("pubsub") {
+		t.Errorf("pubsub coverage domain should be on when explicitly enabled")
+	}
+
+	// Explicit disable is distinguishable from unset.
+	disabled := false
+	cov.Pubsub.Enabled = &disabled
+	if cov.IsEnabled("pubsub") {
+		t.Errorf("pubsub coverage domain should be off when explicitly disabled")
+	}
+}
+
 // splitLines splits a string into lines.
 func splitLines(s string) []string {
 	var lines []string

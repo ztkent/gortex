@@ -73,8 +73,13 @@ const (
 	// unleash|internal|env.
 	KindFlag NodeKind = "flag"
 	// KindEvent represents a log, metric, span, or trace name emitted
-	// from code. ID convention: `event::<kind>::<name>`. Kind ∈
-	// log|metric|trace|span.
+	// from code, or a pub/sub topic/channel/subject. ID convention:
+	// `event::<kind>::<name>` for observability events and
+	// `event::pubsub::<transport>::<name>` for pub/sub topics.
+	// Meta["event_kind"] ∈ log|metric|trace|span|pubsub. For pubsub
+	// events Meta["transport"] ∈ nats|kafka|rabbitmq|redis|socketio|
+	// eventemitter|unknown; publishers link in via EdgeEmits and
+	// subscribers via EdgeListensOn.
 	KindEvent NodeKind = "event"
 	// KindMigration represents a database migration unit. ID
 	// convention: `migration::<dialect>::<id>`. Provides tables/columns

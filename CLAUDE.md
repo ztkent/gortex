@@ -146,6 +146,7 @@ The `analyze` MCP tool is a unified dispatcher. Supported `kind` values:
 | Listing every @Deprecated use         | `analyze` with `kind: "annotation_users"` — pass `id` or `name` for one annotation |
 | Tracing config-key readers            | `analyze` with `kind: "config_readers"` — config_key nodes grouped by EdgeReadsConfig |
 | Tracing event/log emitters            | `analyze` with `kind: "event_emitters"` — events grouped by EdgeEmits, `level` filter optional |
+| Mapping event pub/sub topics          | `analyze` with `kind: "pubsub"` — pub/sub topics with publishers (EdgeEmits) + subscribers (EdgeListensOn) across NATS / Kafka / RabbitMQ / Redis / EventEmitter / Socket.IO; `transport` / `name` / `role` filters |
 | Mapping the error surface             | `analyze` with `kind: "error_surface"` — function/method nodes with their EdgeThrows targets |
 | Surveying stdlib / module-cache reach | `analyze` with `kind: "external_calls"` — KindModule nodes grouped by call/symbol counts; pass `id` for per-symbol detail, `module_kind` for stdlib/module_cache filter |
 | Listing every HTTP/gRPC/WS route      | `analyze` with `kind: "routes"` — handler→route pairs from the EdgeHandlesRoute graph layer; `method`, `path`, `type` filters (`type` ∈ http/grpc/ws/graphql/topic) |
@@ -269,7 +270,7 @@ Analyzer-backed rollups (read-only summaries; the only "argument" is the current
 
 **Node kinds** (filter `search_symbols` with `kind`):
 - Code structure: `file`, `package`, `function`, `method`, `type`, `interface`, `field`, `variable`, `constant`, `import`, `contract`, `param`, `closure`, `enum_member`, `generic_param`
-- Coverage extensions: `module` (ecosystem deps), `table` / `column` (db schema), `config_key` (env/viper/cli), `flag` (feature flags), `event` (logs/metrics/spans), `migration`, `fixture` (test data), `todo` (TODO/FIXME comments), `team` (CODEOWNERS), `license`, `release` (tag boundaries)
+- Coverage extensions: `module` (ecosystem deps), `table` / `column` (db schema), `config_key` (env/viper/cli), `flag` (feature flags), `event` (logs/metrics/spans + pub/sub topics — `Meta["event_kind"]` ∈ log|metric|trace|span|pubsub), `migration`, `fixture` (test data), `todo` (TODO/FIXME comments), `team` (CODEOWNERS), `license`, `release` (tag boundaries)
 - Infrastructure: `resource` (K8s manifest — Deployment/Service/Ingress/ConfigMap/Secret/CronJob/…), `kustomization` (Kustomize overlay), `image` (Dockerfile FROM target or K8s `container.image`)
 
 **Edge kinds** (used internally; many are queryable via `analyze` kinds above):
@@ -277,7 +278,7 @@ Analyzer-backed rollups (read-only summaries; the only "argument" is the current
 - Concurrency: `spawns` (goroutine/async/promise), `sends` / `recvs` (channels)
 - Mutation: `reads` / `writes` (fields), `reads_config` / `writes_config`
 - Dataflow (CPG-lite, `flow_between` / `taint_paths`): `value_flow` (intra-procedural assignment / return / range), `arg_of` (caller arg → callee param), `returns_to` (callee → assignment LHS)
-- Metadata: `annotated` (decorators), `emits` (events), `throws` (errors), `queries` (SQL), `reads_col` / `writes_col`, `toggles_flag`, `depends_on_module`, `matches` (fixtures), `generated_by`, `tests` (test → tested symbol), `covered_by`, `owns` (CODEOWNERS), `authored`, `licensed_as`
+- Metadata: `annotated` (decorators), `emits` (observability events + pub/sub publish), `listens_on` (pub/sub subscribe — NATS/Kafka/RabbitMQ/Redis/EventEmitter/Socket.IO), `throws` (errors), `queries` (SQL), `reads_col` / `writes_col`, `toggles_flag`, `depends_on_module`, `matches` (fixtures), `generated_by`, `tests` (test → tested symbol), `covered_by`, `owns` (CODEOWNERS), `authored`, `licensed_as`
 - Infrastructure (K8s / Kustomize / Dockerfile): `configures` (workload → ConfigMap/Secret via env/envFrom), `mounts` (workload → volume source: ConfigMap/Secret/PVC), `exposes` (Resource/Image → `port::<proto>::<n>`), `depends_on` (Ingress→Service / stage→base image / overlay→base / Resource→Image), `uses_env` (Resource/Image → `cfg::env::<NAME>` config_key — shared ID with `os.Getenv` so cross-ref between infra declaration and code-side reads is automatic)
 - Similarity (`find_clones`): `similar_to` (function/method near-duplicate — MinHash + LSH clone detection; symmetric; `Meta["similarity"]` carries the estimated Jaccard score)
 - Cross-repo (`analyze kind=cross_repo`): `cross_repo_calls` / `cross_repo_implements` / `cross_repo_extends` — parallel edge materialised at resolver time whenever a `calls` / `implements` / `extends` edge's From and To nodes live in different repos; the base edge also gets `Edge.CrossRepo` set
