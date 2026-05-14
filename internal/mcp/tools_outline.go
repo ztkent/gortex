@@ -30,19 +30,42 @@ func (s *Server) handleGetRepoOutline(ctx context.Context, req mcp.CallToolReque
 		topLanguagesN    = 5
 	)
 
-	stats := s.engine.Stats()
+	// scopedNodes confines the whole-repo overview to the session's
+	// workspace — for an unbound session it returns every node, so the
+	// outline is byte-identical to the legacy global view. inScope is
+	// the node-ID set used to bound the edge-driven and analyzer-driven
+	// sections; nil for an unbound session means "no filter".
+	scoped := s.scopedNodes(ctx)
+	_, _, bound := s.sessionScope(ctx)
+	var inScope map[string]bool
+	if bound {
+		inScope = make(map[string]bool, len(scoped))
+		for _, n := range scoped {
+			inScope[n.ID] = true
+		}
+	}
 
-	// Language breakdown — sort by node count, take top N.
+	// Language breakdown — computed from the scoped node set so the
+	// counts reflect only the session's workspace.
 	type langEntry struct {
 		Name  string `json:"name"`
 		Nodes int    `json:"nodes"`
 	}
+	langCounts := make(map[string]int)
+	for _, n := range scoped {
+		if n.Language != "" {
+			langCounts[n.Language]++
+		}
+	}
 	var languages []langEntry
-	for name, n := range stats.ByLanguage {
+	for name, n := range langCounts {
 		languages = append(languages, langEntry{Name: name, Nodes: n})
 	}
 	sort.Slice(languages, func(i, j int) bool {
-		return languages[i].Nodes > languages[j].Nodes
+		if languages[i].Nodes != languages[j].Nodes {
+			return languages[i].Nodes > languages[j].Nodes
+		}
+		return languages[i].Name < languages[j].Name
 	})
 	primaryLang := ""
 	if len(languages) > 0 {
@@ -52,17 +75,39 @@ func (s *Server) handleGetRepoOutline(ctx context.Context, req mcp.CallToolReque
 		languages = languages[:topLanguagesN]
 	}
 
+	// Edge count, bounded to edges whose endpoints are both in scope.
+	totalEdges := 0
+	for _, e := range s.graph.AllEdges() {
+		if inScope != nil && (!inScope[e.From] || !inScope[e.To]) {
+			continue
+		}
+		totalEdges++
+	}
+
 	summary := map[string]any{
-		"total_nodes":      stats.TotalNodes,
-		"total_edges":      stats.TotalEdges,
+		"total_nodes":      len(scoped),
+		"total_edges":      totalEdges,
 		"primary_language": primaryLang,
 		"languages":        languages,
 	}
 
-	// Communities — top N by member count.
+	// Communities — top N by member count, filtered to communities
+	// with at least one member inside the session's workspace.
 	communitiesSection := map[string]any{"count": 0}
 	if comms := s.getCommunities(); comms != nil && len(comms.Communities) > 0 {
-		sorted := append([]analysis.Community(nil), comms.Communities...)
+		sorted := make([]analysis.Community, 0, len(comms.Communities))
+		for _, c := range comms.Communities {
+			if inScope == nil {
+				sorted = append(sorted, c)
+				continue
+			}
+			for _, m := range c.Members {
+				if inScope[m] {
+					sorted = append(sorted, c)
+					break
+				}
+			}
+		}
 		sort.Slice(sorted, func(i, j int) bool {
 			return sorted[i].Size > sorted[j].Size
 		})
@@ -71,7 +116,7 @@ func (s *Server) handleGetRepoOutline(ctx context.Context, req mcp.CallToolReque
 			top = top[:topCommunitiesN]
 		}
 		communitiesSection = map[string]any{
-			"count":      len(comms.Communities),
+			"count":      len(sorted),
 			"modularity": comms.Modularity,
 			"top":        topCommunitiesSummary(top),
 		}
@@ -79,12 +124,16 @@ func (s *Server) handleGetRepoOutline(ctx context.Context, req mcp.CallToolReque
 
 	// Hotspots — load-bearing symbols by fan-in/out/crossings. Use a low
 	// threshold to ensure we get the top N regardless of repo size.
+	// Post-filtered to the session's workspace.
 	hotspotsSection := []map[string]any{}
 	hs := analysis.FindHotspots(s.graph, s.getCommunities(), 0)
-	if len(hs) > topHotspotsN {
-		hs = hs[:topHotspotsN]
-	}
 	for _, h := range hs {
+		if len(hotspotsSection) >= topHotspotsN {
+			break
+		}
+		if inScope != nil && !inScope[h.ID] {
+			continue
+		}
 		hotspotsSection = append(hotspotsSection, map[string]any{
 			"id":               h.ID,
 			"name":             h.Name,
@@ -100,8 +149,8 @@ func (s *Server) handleGetRepoOutline(ctx context.Context, req mcp.CallToolReque
 		"summary":             summary,
 		"communities":         communitiesSection,
 		"hotspots":            hotspotsSection,
-		"most_imported_files": mostImportedFiles(s.graph, topMostImportedN),
-		"entry_points":        entryPoints(s.graph, topEntryPointsN),
+		"most_imported_files": mostImportedFiles(s.graph, inScope, topMostImportedN),
+		"entry_points":        entryPoints(scoped, topEntryPointsN),
 	})
 }
 
@@ -125,7 +174,9 @@ func topCommunitiesSummary(comms []analysis.Community) []map[string]any {
 // mostImportedFiles ranks files by incoming `imports` edges. This surfaces
 // the shared modules — packages everyone reaches for — which is a strong
 // "here's where the gravity lives" signal for newcomers.
-func mostImportedFiles(g *graph.Graph, topN int) []map[string]any {
+// inScope, when non-nil, bounds the ranking to imports whose target
+// node is inside the session's workspace.
+func mostImportedFiles(g *graph.Graph, inScope map[string]bool, topN int) []map[string]any {
 	type fileCount struct {
 		path  string
 		count int
@@ -137,6 +188,9 @@ func mostImportedFiles(g *graph.Graph, topN int) []map[string]any {
 		}
 		target := g.GetNode(e.To)
 		if target == nil {
+			continue
+		}
+		if inScope != nil && !inScope[target.ID] {
 			continue
 		}
 		// Aggregate at the file level. For Import-kind nodes the node's
@@ -177,14 +231,14 @@ func mostImportedFiles(g *graph.Graph, topN int) []map[string]any {
 // (the Go / Rust / C convention) and top-level functions with no callers
 // in files named `main.*` or `cmd/**`. Good enough for the outline; a
 // fuller process-based walk is what `get_processes` does separately.
-func entryPoints(g *graph.Graph, topN int) []map[string]any {
+func entryPoints(nodes []*graph.Node, topN int) []map[string]any {
 	type ep struct {
 		id       string
 		name     string
 		filePath string
 	}
 	var out []ep
-	for _, n := range g.AllNodes() {
+	for _, n := range nodes {
 		if n.Kind != graph.KindFunction && n.Kind != graph.KindMethod {
 			continue
 		}

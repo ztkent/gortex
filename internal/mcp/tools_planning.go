@@ -46,7 +46,7 @@ func (s *Server) handlePlanTurn(ctx context.Context, req mcp.CallToolRequest) (*
 		if len(kw) < 3 {
 			continue
 		}
-		for _, m := range s.engine.SearchSymbols(kw, 10) {
+		for _, m := range s.scopedNodeSlice(ctx, s.engine.SearchSymbols(kw, 10)) {
 			if m.Kind == graph.KindFile || m.Kind == graph.KindImport {
 				continue
 			}

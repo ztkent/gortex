@@ -267,7 +267,7 @@ func (e *Engine) FindUsagesScoped(nodeID string, opts QueryOptions) *SubGraph {
 			edge.Kind == graph.EdgeMounts || edge.Kind == graph.EdgeExposes ||
 			edge.Kind == graph.EdgeDependsOn {
 			from := e.g.GetNode(edge.From)
-			if opts.WorkspaceID != "" && !opts.scopeAllows(from) {
+			if opts.WorkspaceID != "" && !opts.ScopeAllows(from) {
 				continue
 			}
 			if opts.ExcludeTests && isTestSource(from) {
@@ -343,7 +343,7 @@ func (e *Engine) SearchSymbolsScoped(query string, limit int, opts QueryOptions)
 	}
 	out := make([]*graph.Node, 0, limit)
 	for _, n := range raw {
-		if !opts.scopeAllows(n) {
+		if !opts.ScopeAllows(n) {
 			continue
 		}
 		out = append(out, n)
@@ -663,7 +663,7 @@ func (e *Engine) bfs(nodeID string, opts QueryOptions, forward bool, edgeKinds [
 			// acts as the query-time enforcement of "find_usages on a
 			// tuck symbol returns hits only from tuck".
 			if opts.WorkspaceID != "" {
-				if n := e.g.GetNode(neighborID); n != nil && !opts.scopeAllows(n) {
+				if n := e.g.GetNode(neighborID); n != nil && !opts.ScopeAllows(n) {
 					continue
 				}
 			}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"math"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -198,6 +199,22 @@ type sessionState struct {
 	// results can be attributed back to the query — this is the raw input
 	// to the combo tracker. Reset on every search.
 	lastSearch lastSearchState
+
+	// Workspace scope for this session, resolved lazily from the
+	// session cwd on first query and cached here. scopeResolved
+	// guards the one-time resolution. scopeBound is true when the
+	// session has a cwd: query handlers then confine every result to
+	// scopeWorkspaceID — the hard, un-widenable workspace boundary.
+	// When scopeBound is true and scopeWorkspaceID names no real
+	// workspace, the cwd matched no tracked repo and handlers fail
+	// closed rather than widening to the global graph. scopeRepoPrefix
+	// / scopeProjectID feed relevance ranking (same-repo > same-project
+	// > same-workspace); they never relax the boundary.
+	scopeResolved    bool
+	scopeBound       bool
+	scopeWorkspaceID string
+	scopeProjectID   string
+	scopeRepoPrefix  string
 }
 
 type lastSearchState struct {
@@ -597,14 +614,172 @@ func (s *Server) WorkspaceScope() string { return s.scopeWorkspace }
 // when WorkspaceScope() is non-empty.
 func (s *Server) ProjectScope() string { return s.scopeProject }
 
-// resolveQueryScope merges server-level default scope with caller-
-// supplied arg overrides. Caller wins on a per-field basis: a tool
-// call passing `workspace: "tuck"` against a server with
-// `--workspace acme` produces a tuck-scoped query. An empty caller
-// arg falls through to the server default. Used by tool handlers to
-// seed QueryOptions in one place; the "scope overrides" semantics
-// live here.
-func (s *Server) resolveQueryScope(argWorkspace, argProject string) (workspace, project string) {
+// unresolvedWorkspacePrefix marks a session whose cwd is non-empty but
+// resolves to no tracked repo. Used as a QueryOptions.WorkspaceID
+// sentinel: it can never equal a real node's WorkspaceID/RepoPrefix,
+// so every node is rejected and the session fails closed instead of
+// widening to the global graph (SI-3).
+const unresolvedWorkspacePrefix = "\x00gortex-unresolved-workspace:"
+
+// sessionScope resolves the workspace/project boundary for the current
+// request. When bound is true the session is confined to workspaceID
+// and query handlers MUST NOT return data outside it; an empty (or
+// sentinel) workspaceID with bound==true means the cwd resolved to no
+// tracked repo and handlers fail closed. When bound is false the
+// session is unbound (embedded stdio / control client / `gortex
+// server --workspace`) and callers fall back to the server-default
+// scope.
+//
+// Resolution happens once per session — derived from the immutable
+// session cwd — and is cached on sessionState. repoPrefix is the
+// session's home repo, used only for relevance ranking.
+func (s *Server) sessionScope(ctx context.Context) (workspaceID, projectID string, bound bool) {
+	ss := s.sessionFor(ctx)
+	if ss == nil {
+		return "", "", false
+	}
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	if ss.scopeResolved {
+		return ss.scopeWorkspaceID, ss.scopeProjectID, ss.scopeBound
+	}
+	ss.scopeResolved = true
+
+	cwd := SessionCWDFromContext(ctx)
+	if cwd == "" || s.multiIndexer == nil {
+		// No cwd (embedded stdio, control clients) or no multi-repo
+		// indexer: unbound — the server-default scope applies.
+		return "", "", false
+	}
+
+	ss.scopeBound = true
+	ws, proj, repoPrefix, ok := s.multiIndexer.ScopeForCWD(cwd)
+	if ok {
+		ss.scopeWorkspaceID = ws
+		ss.scopeProjectID = proj
+		ss.scopeRepoPrefix = repoPrefix
+	} else {
+		// cwd is non-empty but maps to no tracked repo. The daemon
+		// dispatcher rejects unreachable cwds before dispatch, so
+		// this is defensive: the sentinel matches no node, so the
+		// session sees nothing rather than the whole global graph.
+		ss.scopeWorkspaceID = unresolvedWorkspacePrefix + cwd
+	}
+	return ss.scopeWorkspaceID, ss.scopeProjectID, true
+}
+
+// sessionLocality returns the session's home repo prefix and project
+// slug for relevance ranking — same-repo hits rank above same-project
+// above same-workspace. Both empty for unbound sessions.
+func (s *Server) sessionLocality(ctx context.Context) (repoPrefix, projectID string) {
+	ss := s.sessionFor(ctx)
+	if ss == nil {
+		return "", ""
+	}
+	// Ensure scope is resolved (populates scopeRepoPrefix).
+	s.sessionScope(ctx)
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	return ss.scopeRepoPrefix, ss.scopeProjectID
+}
+
+// sessionWorkspaceRepos returns {name, path} for every repo in the
+// current session's workspace, sorted by name. Empty for an unbound
+// session or when the multi-repo indexer is unavailable. Used by the
+// introspection tools so they report the session's real boundary.
+func (s *Server) sessionWorkspaceRepos(ctx context.Context) []map[string]string {
+	sessWS, _, bound := s.sessionScope(ctx)
+	if !bound || s.multiIndexer == nil {
+		return nil
+	}
+	prefixes := s.multiIndexer.ReposInWorkspace(sessWS)
+	meta := s.multiIndexer.AllMetadata()
+	out := make([]map[string]string, 0, len(prefixes))
+	for p := range prefixes {
+		entry := map[string]string{"name": p}
+		if m := meta[p]; m != nil {
+			entry["path"] = m.RootPath
+		}
+		out = append(out, entry)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i]["name"] < out[j]["name"] })
+	return out
+}
+
+// nodeInSessionScope reports whether a node may be surfaced to the
+// current session. For a workspace-bound session only nodes inside
+// the session's workspace pass; for an unbound session every node
+// passes (the server-default scope applies). This is the universal
+// per-node enforcement of the workspace boundary — used by by-id and
+// whole-graph handlers that don't route through the engine's scoped
+// traversal.
+func (s *Server) nodeInSessionScope(ctx context.Context, n *graph.Node) bool {
+	sessWS, _, bound := s.sessionScope(ctx)
+	if !bound {
+		return true
+	}
+	if n == nil {
+		return false
+	}
+	return query.QueryOptions{WorkspaceID: sessWS}.ScopeAllows(n)
+}
+
+// scopedNodes returns the graph nodes visible to the current session:
+// every node for an unbound session, only the session workspace's
+// nodes for a bound one. Whole-graph handlers (analyze, outline,
+// untested, resource rollups, …) iterate this instead of
+// graph.AllNodes() so a workspace-bound session can never observe
+// another workspace's nodes — not even in aggregate counts.
+func (s *Server) scopedNodes(ctx context.Context) []*graph.Node {
+	all := s.graph.AllNodes()
+	sessWS, _, bound := s.sessionScope(ctx)
+	if !bound {
+		return all
+	}
+	opts := query.QueryOptions{WorkspaceID: sessWS}
+	out := make([]*graph.Node, 0, len(all))
+	for _, n := range all {
+		if opts.ScopeAllows(n) {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// scopedNodeSlice filters an existing node slice to the session's
+// workspace. Convenience for handlers that already hold a node list
+// (engine list methods that don't take QueryOptions).
+func (s *Server) scopedNodeSlice(ctx context.Context, nodes []*graph.Node) []*graph.Node {
+	sessWS, _, bound := s.sessionScope(ctx)
+	if !bound {
+		return nodes
+	}
+	opts := query.QueryOptions{WorkspaceID: sessWS}
+	out := make([]*graph.Node, 0, len(nodes))
+	for _, n := range nodes {
+		if opts.ScopeAllows(n) {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// resolveQueryScope resolves the (workspace, project) scope for a
+// query. For a workspace-bound session the session's workspace is an
+// immovable ceiling: a `workspace` arg can never widen it (cross-
+// workspace values are rejected up front in resolveRepoFilter), while
+// a `project` arg may narrow within it. For an unbound session it
+// merges the server-level default scope with caller-supplied arg
+// overrides — the legacy `gortex server --workspace` behaviour.
+func (s *Server) resolveQueryScope(ctx context.Context, argWorkspace, argProject string) (workspace, project string) {
+	if sessWS, sessProj, bound := s.sessionScope(ctx); bound {
+		workspace = sessWS
+		project = sessProj
+		if argProject != "" {
+			project = argProject
+		}
+		return
+	}
 	workspace = s.scopeWorkspace
 	if argWorkspace != "" {
 		workspace = argWorkspace
@@ -617,11 +792,11 @@ func (s *Server) resolveQueryScope(argWorkspace, argProject string) (workspace, 
 }
 
 // scopeFromRequest pulls `workspace` / `project` arg overrides off
-// the MCP request and merges with the server defaults. Convenience
-// wrapper around resolveQueryScope for handlers that take the
-// request directly.
-func (s *Server) scopeFromRequest(req scopeArgGetter) (workspace, project string) {
-	return s.resolveQueryScope(req.GetString("workspace", ""), req.GetString("project", ""))
+// the MCP request and resolves them against the session boundary.
+// Convenience wrapper around resolveQueryScope for handlers that take
+// the request directly.
+func (s *Server) scopeFromRequest(ctx context.Context, req scopeArgGetter) (workspace, project string) {
+	return s.resolveQueryScope(ctx, req.GetString("workspace", ""), req.GetString("project", ""))
 }
 
 // scopeArgGetter is the minimum interface for reading MCP string

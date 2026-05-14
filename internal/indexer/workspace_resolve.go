@@ -1,6 +1,9 @@
 package indexer
 
 import (
+	"path/filepath"
+	"strings"
+
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/resolver"
@@ -58,6 +61,90 @@ func resolveProjectID(entry *config.RepoEntry, cfg *config.Config, fallbackPrefi
 		return cfg.Project
 	}
 	return fallbackPrefix
+}
+
+// ScopeForCWD resolves a working directory to the (workspace, project)
+// scope of the tracked repo that physically contains it. The longest
+// matching repo root wins so a repo nested inside another resolves to
+// the inner one.
+//
+// ok is false when cwd lies outside every tracked repo — callers MUST
+// fail closed (return no cross-workspace data) rather than widening to
+// the global graph.
+//
+// A repo whose effective WorkspaceID is empty (no `.gortex.yaml::
+// workspace:` and no global-config override) is treated as its own
+// singleton workspace keyed on the repo prefix — the same fallback
+// rule resolveWorkspaceID and QueryOptions.scopeAllows use, so the
+// session boundary stays consistent with the node stamps.
+func (mi *MultiIndexer) ScopeForCWD(cwd string) (workspaceID, projectID, repoPrefix string, ok bool) {
+	if mi == nil || cwd == "" {
+		return "", "", "", false
+	}
+	cwd = filepath.Clean(cwd)
+
+	mi.mu.RLock()
+	defer mi.mu.RUnlock()
+
+	var bestRoot, bestPrefix string
+	for prefix, meta := range mi.repos {
+		if meta == nil {
+			continue
+		}
+		root := filepath.Clean(meta.RootPath)
+		if root == "" || root == "." {
+			continue
+		}
+		if cwd == root || strings.HasPrefix(cwd, root+string(filepath.Separator)) {
+			if len(root) > len(bestRoot) {
+				bestRoot, bestPrefix = root, prefix
+			}
+		}
+	}
+	if bestPrefix == "" {
+		return "", "", "", false
+	}
+
+	ws, proj := bestPrefix, bestPrefix
+	if idx := mi.indexers[bestPrefix]; idx != nil {
+		if v := idx.WorkspaceID(); v != "" {
+			ws = v
+		}
+		if v := idx.ProjectID(); v != "" {
+			proj = v
+		}
+	}
+	return ws, proj, bestPrefix, true
+}
+
+// ReposInWorkspace returns the set of repo prefixes whose effective
+// workspace slug equals workspaceID. It is the complete list of repos
+// a workspace-scoped session is permitted to see — used to bound the
+// query surface for handlers that filter by repo prefix rather than
+// routing through the engine's WorkspaceID-aware traversal.
+//
+// The effective slug follows the same singleton fallback as
+// ScopeForCWD: a repo with no declared workspace is its own workspace
+// keyed on the repo prefix.
+func (mi *MultiIndexer) ReposInWorkspace(workspaceID string) map[string]bool {
+	out := make(map[string]bool)
+	if mi == nil || workspaceID == "" {
+		return out
+	}
+	mi.mu.RLock()
+	defer mi.mu.RUnlock()
+	for prefix := range mi.repos {
+		ws := prefix
+		if idx := mi.indexers[prefix]; idx != nil {
+			if v := idx.WorkspaceID(); v != "" {
+				ws = v
+			}
+		}
+		if ws == workspaceID {
+			out[prefix] = true
+		}
+	}
+	return out
 }
 
 // BackfillWorkspaceSlugs walks every node and contract attached to

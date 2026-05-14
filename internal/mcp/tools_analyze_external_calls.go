@@ -69,7 +69,7 @@ func (s *Server) handleAnalyzeExternalCalls(ctx context.Context, req mcp.CallToo
 func (s *Server) externalCallsRollup(ctx context.Context, req mcp.CallToolRequest, moduleKindFilter, modulePathFilter string) (*mcp.CallToolResult, error) {
 	byModule := map[string]*externalModuleRow{}
 
-	for _, n := range s.graph.AllNodes() {
+	for _, n := range s.scopedNodes(ctx) {
 		if n == nil || n.Kind != graph.KindModule {
 			continue
 		}
@@ -93,7 +93,7 @@ func (s *Server) externalCallsRollup(ctx context.Context, req mcp.CallToolReques
 		return s.emitExternalCallsRollup(ctx, req, nil)
 	}
 
-	for _, n := range s.graph.AllNodes() {
+	for _, n := range s.scopedNodes(ctx) {
 		if n == nil {
 			continue
 		}
@@ -132,7 +132,7 @@ func (s *Server) externalCallsForModule(ctx context.Context, req mcp.CallToolReq
 	mod := s.graph.GetNode(moduleID)
 	rows := []*externalSymbolRow{}
 	if mod != nil && mod.Kind == graph.KindModule {
-		for _, n := range s.graph.AllNodes() {
+		for _, n := range s.scopedNodes(ctx) {
 			if n == nil {
 				continue
 			}

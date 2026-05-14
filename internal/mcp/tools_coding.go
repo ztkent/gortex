@@ -204,6 +204,14 @@ func (s *Server) handleGetEditingContext(ctx context.Context, req mcp.CallToolRe
 	if len(sg.Nodes) == 0 {
 		return mcp.NewToolResultError("no symbols found for file: " + fp), nil
 	}
+	// A file outside the session's workspace is reported as not found
+	// — its symbols all share one repo, so the first node decides.
+	if !s.nodeInSessionScope(ctx, sg.Nodes[0]) {
+		return mcp.NewToolResultError("no symbols found for file: " + fp), nil
+	}
+	// Confine the caller/callee neighbourhoods below to the session
+	// workspace so editing context never reaches across the boundary.
+	sessWS, _, _ := s.sessionScope(ctx)
 	// Frecency: a file-level editing context is effectively an access to
 	// every symbol defined in that file. Credit each of them — this is
 	// the signal that "the agent is working in this area right now."
@@ -256,7 +264,7 @@ func (s *Server) handleGetEditingContext(ctx context.Context, req mcp.CallToolRe
 	callerSeen := make(map[string]bool)
 	for _, n := range sg.Nodes {
 		if n.Kind == graph.KindFunction || n.Kind == graph.KindMethod {
-			callers := s.engine.GetCallers(n.ID, query.QueryOptions{Depth: 1, Limit: 20, Detail: "brief"})
+			callers := s.engine.GetCallers(n.ID, query.QueryOptions{Depth: 1, Limit: 20, Detail: "brief", WorkspaceID: sessWS})
 			for _, cn := range callers.Nodes {
 				if cn.FilePath != fp && !callerSeen[cn.ID] {
 					callerSeen[cn.ID] = true
@@ -275,7 +283,7 @@ func (s *Server) handleGetEditingContext(ctx context.Context, req mcp.CallToolRe
 	callSeen := make(map[string]bool)
 	for _, n := range sg.Nodes {
 		if n.Kind == graph.KindFunction || n.Kind == graph.KindMethod {
-			chain := s.engine.GetCallChain(n.ID, query.QueryOptions{Depth: 1, Limit: 20, Detail: "brief"})
+			chain := s.engine.GetCallChain(n.ID, query.QueryOptions{Depth: 1, Limit: 20, Detail: "brief", WorkspaceID: sessWS})
 			for _, cn := range chain.Nodes {
 				if cn.FilePath != fp && !callSeen[cn.ID] {
 					callSeen[cn.ID] = true
@@ -325,7 +333,7 @@ func (s *Server) handleFindImportPath(ctx context.Context, req mcp.CallToolReque
 		return mcp.NewToolResultError("path is required"), nil
 	}
 
-	candidates := s.engine.FindSymbols(symbolName)
+	candidates := s.scopedNodeSlice(ctx, s.engine.FindSymbols(symbolName))
 	if len(candidates) == 0 {
 		return mcp.NewToolResultError("symbol not found: " + symbolName), nil
 	}
@@ -354,10 +362,15 @@ func (s *Server) handleFindImportPath(ctx context.Context, req mcp.CallToolReque
 	// Check if already imported.
 	alreadyImported := false
 	fileSymbols := s.engine.GetFileSymbols(targetFile)
-	for _, e := range fileSymbols.Edges {
-		if e.Kind == graph.EdgeImports && strings.Contains(e.To, filepath.Dir(best.FilePath)) {
-			alreadyImported = true
-			break
+	if len(fileSymbols.Nodes) > 0 && !s.nodeInSessionScope(ctx, fileSymbols.Nodes[0]) {
+		fileSymbols = nil
+	}
+	if fileSymbols != nil {
+		for _, e := range fileSymbols.Edges {
+			if e.Kind == graph.EdgeImports && strings.Contains(e.To, filepath.Dir(best.FilePath)) {
+				alreadyImported = true
+				break
+			}
 		}
 	}
 
@@ -431,6 +444,12 @@ func (s *Server) handleGetSymbolSource(ctx context.Context, req mcp.CallToolRequ
 
 	node := s.engine.GetSymbol(id)
 	if node == nil {
+		return mcp.NewToolResultError("symbol not found: " + id), nil
+	}
+	// A by-id fetch must not cross the session's workspace boundary —
+	// reported the same as a genuine miss so the boundary isn't
+	// probeable.
+	if !s.nodeInSessionScope(ctx, node) {
 		return mcp.NewToolResultError("symbol not found: " + id), nil
 	}
 	sess := s.sessionFor(ctx)
@@ -559,11 +578,17 @@ func (s *Server) handleBatchSymbols(ctx context.Context, req mcp.CallToolRequest
 		includeSource = v
 	}
 	contextLines := req.GetInt("context_lines", 3)
+	// Confine the caller/callee neighbourhoods below to the session
+	// workspace.
+	sessWS, _, _ := s.sessionScope(ctx)
 
 	var results []map[string]any
 	for _, id := range ids {
 		node := s.engine.GetSymbol(id)
-		if node == nil {
+		// A node outside the session's workspace is reported as a
+		// miss — identical to a genuinely absent ID so the boundary
+		// stays opaque.
+		if node == nil || !s.nodeInSessionScope(ctx, node) {
 			results = append(results, map[string]any{
 				"id":    id,
 				"error": "symbol not found",
@@ -585,7 +610,7 @@ func (s *Server) handleBatchSymbols(ctx context.Context, req mcp.CallToolRequest
 
 		// Callers (depth 1).
 		if node.Kind == graph.KindFunction || node.Kind == graph.KindMethod {
-			callers := s.engine.GetCallers(node.ID, query.QueryOptions{Depth: 1, Limit: 10, Detail: "brief"})
+			callers := s.engine.GetCallers(node.ID, query.QueryOptions{Depth: 1, Limit: 10, Detail: "brief", WorkspaceID: sessWS})
 			var callerIDs []string
 			for _, cn := range callers.Nodes {
 				if cn.ID != node.ID {
@@ -597,7 +622,7 @@ func (s *Server) handleBatchSymbols(ctx context.Context, req mcp.CallToolRequest
 			}
 
 			// Callees (depth 1).
-			callees := s.engine.GetCallChain(node.ID, query.QueryOptions{Depth: 1, Limit: 10, Detail: "brief"})
+			callees := s.engine.GetCallChain(node.ID, query.QueryOptions{Depth: 1, Limit: 10, Detail: "brief", WorkspaceID: sessWS})
 			var calleeIDs []string
 			for _, cn := range callees.Nodes {
 				if cn.ID != node.ID {
@@ -835,6 +860,9 @@ func (s *Server) handleSuggestPattern(ctx context.Context, req mcp.CallToolReque
 
 	// 2. Find siblings — same kind, same file, similar naming pattern.
 	fileSymbols := s.engine.GetFileSymbols(node.FilePath)
+	if len(fileSymbols.Nodes) > 0 && !s.nodeInSessionScope(ctx, fileSymbols.Nodes[0]) {
+		fileSymbols = &query.SubGraph{}
+	}
 	var siblings []map[string]any
 	prefix := extractPrefix(node.Name)
 	for _, sn := range fileSymbols.Nodes {
@@ -882,7 +910,7 @@ func (s *Server) handleSuggestPattern(ctx context.Context, req mcp.CallToolReque
 	var testPatterns []map[string]any
 	if prefix != "" {
 		// Search for test functions that match the example name.
-		testSearch := s.engine.SearchSymbols(node.Name, 20)
+		testSearch := s.scopedNodeSlice(ctx, s.engine.SearchSymbols(node.Name, 20))
 		for _, tn := range testSearch {
 			if !isTestFile(tn.FilePath) {
 				continue
@@ -996,7 +1024,7 @@ func (s *Server) handleGetEditPlan(ctx context.Context, req mcp.CallToolRequest)
 
 		// Check if symbol is an interface — implementations need updating.
 		if node.Kind == graph.KindInterface {
-			impls := s.engine.FindImplementations(id)
+			impls := s.scopedNodeSlice(ctx, s.engine.FindImplementations(id))
 			for _, impl := range impls {
 				addFile(impl.FilePath, impl.Name, "implements "+node.Name+" — must conform to changes", 1)
 			}
@@ -1124,7 +1152,7 @@ func (s *Server) handleSmartContext(ctx context.Context, req mcp.CallToolRequest
 		if len(kw) < 3 {
 			continue
 		}
-		matches := s.engine.SearchSymbols(kw, 10)
+		matches := s.scopedNodeSlice(ctx, s.engine.SearchSymbols(kw, 10))
 		for _, m := range matches {
 			if m.Kind == graph.KindFile || m.Kind == graph.KindImport {
 				continue
@@ -1144,6 +1172,9 @@ func (s *Server) handleSmartContext(ctx context.Context, req mcp.CallToolRequest
 		if entryNode == nil {
 			// Try as file path — get the most important symbol in the file.
 			fileSym := s.engine.GetFileSymbols(entryPoint)
+			if len(fileSym.Nodes) > 0 && !s.nodeInSessionScope(ctx, fileSym.Nodes[0]) {
+				fileSym = &query.SubGraph{}
+			}
 			if len(fileSym.Nodes) > 0 {
 				for _, n := range fileSym.Nodes {
 					if n.Kind != graph.KindFile {
@@ -1160,7 +1191,7 @@ func (s *Server) handleSmartContext(ctx context.Context, req mcp.CallToolRequest
 	}
 
 	// 3b. Apply repo/project filter to relevant symbols.
-	allowed, filterErr := s.resolveRepoFilter(req)
+	allowed, filterErr := s.resolveRepoFilter(ctx, req)
 	if filterErr != nil {
 		return mcp.NewToolResultError(filterErr.Error()), nil
 	}
@@ -1292,6 +1323,9 @@ func (s *Server) handleSmartContext(ctx context.Context, req mcp.CallToolRequest
 	if entryNode != nil {
 		// File context: imports and structure.
 		fileCtx := s.engine.GetFileSymbols(entryNode.FilePath)
+		if len(fileCtx.Nodes) > 0 && !s.nodeInSessionScope(ctx, fileCtx.Nodes[0]) {
+			fileCtx = &query.SubGraph{}
+		}
 		var fileSymbols []string
 		for _, n := range fileCtx.Nodes {
 			if n.Kind != graph.KindFile {

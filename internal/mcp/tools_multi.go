@@ -191,12 +191,26 @@ func (s *Server) handleSetActiveProject(ctx context.Context, req mcp.CallToolReq
 
 // handleGetActiveProject returns the current active project name and its repo list.
 func (s *Server) handleGetActiveProject(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	return s.respondJSONOrTOON(ctx, req, s.buildActiveProjectPayload())
+	return s.respondJSONOrTOON(ctx, req, s.buildActiveProjectPayload(ctx))
 }
 
 // buildActiveProjectPayload returns the same data the `get_active_project`
 // tool emits. Shared with the `gortex://active-project` resource.
-func (s *Server) buildActiveProjectPayload() map[string]any {
+//
+// For a workspace-bound session it reports the session's own resolved
+// scope — the boundary the query tools actually enforce — rather than
+// the process-global config default, which would mask whether scoping
+// is in effect.
+func (s *Server) buildActiveProjectPayload(ctx context.Context) map[string]any {
+	if sessWS, sessProj, bound := s.sessionScope(ctx); bound {
+		return map[string]any{
+			"workspace": sessWS,
+			"project":   sessProj,
+			"bound":     true,
+			"repos":     s.sessionWorkspaceRepos(ctx),
+		}
+	}
+
 	if s.configManager == nil {
 		return map[string]any{
 			"project": "",

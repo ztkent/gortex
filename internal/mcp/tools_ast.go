@@ -105,7 +105,7 @@ func (s *Server) handleSearchAST(ctx context.Context, req mcp.CallToolRequest) (
 		return mcp.NewToolResultError("search_ast: `language` is required when using a raw `pattern`"), nil
 	}
 
-	allowedRepos, err := s.resolveRepoFilter(req)
+	allowedRepos, err := s.resolveRepoFilter(ctx, req)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}

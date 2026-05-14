@@ -73,46 +73,95 @@ func (s *Server) registerAnalyzerResources() {
 	)
 }
 
-func (s *Server) handleResourceReport(_ context.Context, req mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
-	stats := s.engine.Stats()
-
-	topLangs := topNFromCountMap(stats.ByLanguage, 5)
-	topKinds := topNFromCountMap(stats.ByKind, 5)
-
-	var hotspotCount int
-	if s.graph.NodeCount() >= 10 {
-		hotspotCount = len(analysis.FindHotspots(s.graph, s.getCommunities(), 0))
+func (s *Server) handleResourceReport(ctx context.Context, req mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+	// scopedNodes confines the report to the session's workspace; for
+	// an unbound session it is every node, so the rollup matches the
+	// legacy global view. inScope bounds the analyzer- and edge-driven
+	// counts; nil for an unbound session.
+	scoped := s.scopedNodes(ctx)
+	_, _, bound := s.sessionScope(ctx)
+	var inScope map[string]bool
+	if bound {
+		inScope = make(map[string]bool, len(scoped))
+		for _, n := range scoped {
+			inScope[n.ID] = true
+		}
 	}
 
-	deadCount := len(analysis.FindDeadCode(s.graph, s.getProcesses(), nil))
-
+	byLang := make(map[string]int)
+	byKind := make(map[string]int)
 	var todoCount int
-	for _, n := range s.graph.AllNodes() {
+	for _, n := range scoped {
+		if n.Language != "" {
+			byLang[n.Language]++
+		}
+		byKind[string(n.Kind)]++
 		if n.Kind == graph.KindTodo {
 			todoCount++
+		}
+	}
+	totalEdges := 0
+	for _, e := range s.graph.AllEdges() {
+		if inScope != nil && (!inScope[e.From] || !inScope[e.To]) {
+			continue
+		}
+		totalEdges++
+	}
+
+	topLangs := topNFromCountMap(byLang, 5)
+	topKinds := topNFromCountMap(byKind, 5)
+
+	var hotspotCount int
+	if len(scoped) >= 10 {
+		for _, h := range analysis.FindHotspots(s.graph, s.getCommunities(), 0) {
+			if inScope == nil || inScope[h.ID] {
+				hotspotCount++
+			}
+		}
+	}
+
+	deadCount := 0
+	for _, d := range analysis.FindDeadCode(s.graph, s.getProcesses(), nil) {
+		if inScope == nil || inScope[d.ID] {
+			deadCount++
 		}
 	}
 
 	commCount := 0
 	if c := s.getCommunities(); c != nil {
-		commCount = len(c.Communities)
+		for _, com := range c.Communities {
+			if inScope == nil {
+				commCount++
+				continue
+			}
+			for _, m := range com.Members {
+				if inScope[m] {
+					commCount++
+					break
+				}
+			}
+		}
 	}
 
 	procCount := 0
 	if p := s.getProcesses(); p != nil {
-		procCount = len(p.Processes)
+		for _, proc := range p.Processes {
+			if inScope == nil || inScope[proc.EntryPoint] {
+				procCount++
+			}
+		}
 	}
 
 	return jsonResource(req.Params.URI, map[string]any{
-		"total_nodes":     stats.TotalNodes,
-		"total_edges":     stats.TotalEdges,
-		"top_languages":   topLangs,
-		"top_kinds":       topKinds,
-		"communities":     commCount,
-		"processes":       procCount,
-		"hotspots":        hotspotCount,
-		"dead_code":       deadCount,
-		"open_todos":      todoCount,
+		"total_nodes":   len(scoped),
+		"total_edges":   totalEdges,
+		"top_languages": topLangs,
+		"top_kinds":     topKinds,
+		"communities":   commCount,
+		"processes":     procCount,
+		"hotspots":      hotspotCount,
+		"dead_code":     deadCount,
+		"open_todos":    todoCount,
 	})
 }
 
@@ -206,7 +255,7 @@ func (s *Server) handleResourceAudit(_ context.Context, req mcp.ReadResourceRequ
 	return jsonResource(req.Params.URI, audit.Audit(s.graph, root, files))
 }
 
-func (s *Server) handleResourceQuestions(_ context.Context, req mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+func (s *Server) handleResourceQuestions(ctx context.Context, req mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
 	type questionRow struct {
 		ID       string `json:"id"`
 		Tag      string `json:"tag"`
@@ -221,7 +270,8 @@ func (s *Server) handleResourceQuestions(_ context.Context, req mcp.ReadResource
 	var rows []questionRow
 	byTag := make(map[string]int)
 	withAssignee := 0
-	for _, n := range s.graph.AllNodes() {
+	// scopedNodes confines the TODO rollup to the session's workspace.
+	for _, n := range s.scopedNodes(ctx) {
 		if n.Kind != graph.KindTodo {
 			continue
 		}

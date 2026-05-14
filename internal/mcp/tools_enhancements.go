@@ -452,7 +452,7 @@ func (s *Server) handlePrefetchContext(ctx context.Context, req mcp.CallToolRequ
 
 	// 1. BM25 search on task description (weight 0.4)
 	if task != "" {
-		searchResults := s.engine.SearchSymbols(task, 30)
+		searchResults := s.scopedNodeSlice(ctx, s.engine.SearchSymbols(task, 30))
 		maxScore := 1.0
 		for i, n := range searchResults {
 			if n.Kind == graph.KindFile || n.Kind == graph.KindImport {
@@ -773,7 +773,7 @@ func (s *Server) handleAnalyzeTodos(ctx context.Context, req mcp.CallToolRequest
 	}
 
 	var rows []todoRow
-	for _, n := range s.graph.AllNodes() {
+	for _, n := range s.scopedNodes(ctx) {
 		if n.Kind != graph.KindTodo {
 			continue
 		}
@@ -932,7 +932,7 @@ func (s *Server) handleAnalyzeStaleCode(ctx context.Context, req mcp.CallToolReq
 		AgeDays   int    `json:"age_days"`
 	}
 	var rows []staleRow
-	for _, n := range s.graph.AllNodes() {
+	for _, n := range s.scopedNodes(ctx) {
 		if _, ok := allowedKinds[n.Kind]; !ok {
 			continue
 		}
@@ -1070,7 +1070,7 @@ func (s *Server) handleAnalyzeOwnership(ctx context.Context, req mcp.CallToolReq
 	}
 	byEmail := map[string]*ownerStats{}
 
-	for _, n := range s.graph.AllNodes() {
+	for _, n := range s.scopedNodes(ctx) {
 		if _, ok := allowedKinds[n.Kind]; !ok {
 			continue
 		}
@@ -1212,7 +1212,7 @@ func (s *Server) handleAnalyzeCoverageGaps(ctx context.Context, req mcp.CallTool
 		Hit     int     `json:"hit"`
 	}
 	var rows []gapRow
-	for _, n := range s.graph.AllNodes() {
+	for _, n := range s.scopedNodes(ctx) {
 		if _, ok := allowedKinds[n.Kind]; !ok {
 			continue
 		}
@@ -1327,7 +1327,7 @@ func (s *Server) handleAnalyzeStaleFlags(ctx context.Context, req mcp.CallToolRe
 	var rows []staleFlag
 	unscored := 0
 
-	for _, n := range s.graph.AllNodes() {
+	for _, n := range s.scopedNodes(ctx) {
 		if n.Kind != graph.KindFlag {
 			continue
 		}
@@ -1462,7 +1462,7 @@ func (s *Server) handleAnalyzeOrphanTables(ctx context.Context, req mcp.CallTool
 		QueryCount int    `json:"query_count"`
 	}
 	var rows []orphanRow
-	for _, n := range s.graph.AllNodes() {
+	for _, n := range s.scopedNodes(ctx) {
 		if n.Kind != graph.KindTable {
 			continue
 		}
@@ -1543,7 +1543,7 @@ func (s *Server) handleAnalyzeUnreferencedTables(ctx context.Context, req mcp.Ca
 		ProviderCount int    `json:"provider_count"`
 	}
 	var rows []unrefRow
-	for _, n := range s.graph.AllNodes() {
+	for _, n := range s.scopedNodes(ctx) {
 		if n.Kind != graph.KindTable {
 			continue
 		}
@@ -1630,7 +1630,7 @@ func (s *Server) handleAnalyzeCoverageSummary(ctx context.Context, req mcp.CallT
 	}
 	byDir := map[string]*dirStats{}
 
-	for _, n := range s.graph.AllNodes() {
+	for _, n := range s.scopedNodes(ctx) {
 		if _, ok := allowedKinds[n.Kind]; !ok {
 			continue
 		}
@@ -1723,7 +1723,7 @@ func (s *Server) handleAnalyzeInteropUsers(ctx context.Context, req mcp.CallTool
 		ID   string `json:"id"`
 	}
 	var rows []interopFile
-	for _, n := range s.graph.AllNodes() {
+	for _, n := range s.scopedNodes(ctx) {
 		if n.Kind != graph.KindFile {
 			continue
 		}
@@ -2876,7 +2876,7 @@ func (s *Server) handleGetContracts(ctx context.Context, req mcp.CallToolRequest
 	var allowed map[string]bool
 	if !allRepos {
 		var err error
-		allowed, err = s.resolveRepoFilter(req)
+		allowed, err = s.resolveRepoFilter(ctx, req)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -3046,7 +3046,7 @@ func (s *Server) handleCheckContracts(ctx context.Context, req mcp.CallToolReque
 	// caller having to list its repos by hand. A nil allow-set means
 	// "all tracked repos" and keeps the original single-registry fast
 	// path — avoids a pointless copy of the full registry.
-	allowed, err := s.resolveRepoFilter(req)
+	allowed, err := s.resolveRepoFilter(ctx, req)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -3138,7 +3138,7 @@ func (s *Server) handleValidateContracts(ctx context.Context, req mcp.CallToolRe
 		return mcp.NewToolResultError("no contract registry available — index a repository first"), nil
 	}
 
-	allowed, err := s.resolveRepoFilter(req)
+	allowed, err := s.resolveRepoFilter(ctx, req)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}

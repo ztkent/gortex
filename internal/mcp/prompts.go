@@ -124,24 +124,53 @@ func (s *Server) handlePromptPreCommit(_ context.Context, req mcp.GetPromptReque
 	return promptResult("Pre-commit review: "+string(impact.Risk), b.String()), nil
 }
 
-func (s *Server) handlePromptOrientation(_ context.Context, _ mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
-	stats := s.engine.Stats()
+func (s *Server) handlePromptOrientation(ctx context.Context, _ mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+	// Confine the orientation to the session's workspace. scopedNodes
+	// returns every node for an unbound session, so the prompt is
+	// byte-identical to the legacy global view there. inScope is the
+	// node-ID set used to bound the analyzer-driven sections; nil for
+	// an unbound session.
+	scoped := s.scopedNodes(ctx)
+	_, _, bound := s.sessionScope(ctx)
+	var inScope map[string]bool
+	if bound {
+		inScope = make(map[string]bool, len(scoped))
+		for _, n := range scoped {
+			inScope[n.ID] = true
+		}
+	}
+
+	byLang := make(map[string]int)
+	byKind := make(map[graph.NodeKind]int)
+	for _, n := range scoped {
+		if n.Language != "" {
+			byLang[n.Language]++
+		}
+		byKind[n.Kind]++
+	}
+	totalEdges := 0
+	for _, e := range s.graph.AllEdges() {
+		if inScope != nil && (!inScope[e.From] || !inScope[e.To]) {
+			continue
+		}
+		totalEdges++
+	}
 
 	var b strings.Builder
 	b.WriteString("## Codebase Orientation\n\n")
-	fmt.Fprintf(&b, "**%d nodes, %d edges**\n\n", stats.TotalNodes, stats.TotalEdges)
+	fmt.Fprintf(&b, "**%d nodes, %d edges**\n\n", len(scoped), totalEdges)
 
-	if len(stats.ByLanguage) > 0 {
+	if len(byLang) > 0 {
 		b.WriteString("### Languages\n")
-		for lang, count := range stats.ByLanguage {
+		for lang, count := range byLang {
 			fmt.Fprintf(&b, "- %s: %d nodes\n", lang, count)
 		}
 		b.WriteString("\n")
 	}
 
-	if len(stats.ByKind) > 0 {
+	if len(byKind) > 0 {
 		b.WriteString("### Symbol Breakdown\n")
-		for kind, count := range stats.ByKind {
+		for kind, count := range byKind {
 			fmt.Fprintf(&b, "- %s: %d\n", kind, count)
 		}
 		b.WriteString("\n")
@@ -149,32 +178,57 @@ func (s *Server) handlePromptOrientation(_ context.Context, _ mcp.GetPromptReque
 
 	comms := s.getCommunities()
 	if comms != nil && len(comms.Communities) > 0 {
-		b.WriteString("### Functional Areas (Communities)\n")
+		var shown []analysis.Community
 		for _, c := range comms.Communities {
-			fmt.Fprintf(&b, "- **%s** — %d symbols, %d files (cohesion: %.2f)\n",
-				c.Label, c.Size, len(c.Files), c.Cohesion)
+			if inScope == nil {
+				shown = append(shown, c)
+				continue
+			}
+			for _, m := range c.Members {
+				if inScope[m] {
+					shown = append(shown, c)
+					break
+				}
+			}
 		}
-		b.WriteString("\n")
+		if len(shown) > 0 {
+			b.WriteString("### Functional Areas (Communities)\n")
+			for _, c := range shown {
+				fmt.Fprintf(&b, "- **%s** — %d symbols, %d files (cohesion: %.2f)\n",
+					c.Label, c.Size, len(c.Files), c.Cohesion)
+			}
+			b.WriteString("\n")
+		}
 	}
 
 	procs := s.getProcesses()
 	if procs != nil && len(procs.Processes) > 0 {
-		b.WriteString("### Execution Flows (Processes)\n")
-		limit := len(procs.Processes)
-		if limit > 10 {
-			limit = 10
+		// A process is in scope when its entry point is — entry points
+		// are real symbol IDs and must not leak across the boundary.
+		var shown []analysis.Process
+		for _, p := range procs.Processes {
+			if inScope == nil || inScope[p.EntryPoint] {
+				shown = append(shown, p)
+			}
 		}
-		for _, p := range procs.Processes[:limit] {
-			fmt.Fprintf(&b, "- **%s** — %d steps, entry: `%s`\n",
-				p.Name, p.StepCount, p.EntryPoint)
+		if len(shown) > 0 {
+			b.WriteString("### Execution Flows (Processes)\n")
+			limit := len(shown)
+			if limit > 10 {
+				limit = 10
+			}
+			for _, p := range shown[:limit] {
+				fmt.Fprintf(&b, "- **%s** — %d steps, entry: `%s`\n",
+					p.Name, p.StepCount, p.EntryPoint)
+			}
+			if len(shown) > 10 {
+				fmt.Fprintf(&b, "- ... and %d more\n", len(shown)-10)
+			}
+			b.WriteString("\n")
 		}
-		if len(procs.Processes) > 10 {
-			fmt.Fprintf(&b, "- ... and %d more\n", len(procs.Processes)-10)
-		}
-		b.WriteString("\n")
 	}
 
-	topRefs := s.findTopReferenced(10)
+	topRefs := s.findTopReferenced(ctx, 10)
 	if len(topRefs) > 0 {
 		b.WriteString("### Most-Referenced Symbols\n")
 		for _, r := range topRefs {
@@ -188,7 +242,7 @@ func (s *Server) handlePromptOrientation(_ context.Context, _ mcp.GetPromptReque
 	return promptResult("Codebase orientation", b.String()), nil
 }
 
-func (s *Server) handlePromptSafeToChange(_ context.Context, req mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+func (s *Server) handlePromptSafeToChange(ctx context.Context, req mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
 	idsStr := req.Params.Arguments["ids"]
 	if idsStr == "" {
 		return promptError("ids argument is required"), nil
@@ -199,9 +253,13 @@ func (s *Server) handlePromptSafeToChange(_ context.Context, req mcp.GetPromptRe
 		ids[i] = strings.TrimSpace(ids[i])
 	}
 
+	sessWS, _, _ := s.sessionScope(ctx)
+
+	// A symbol outside the session's workspace is treated as not found
+	// — the prompt must not reveal cross-workspace symbols.
 	var validIDs, notFound []string
 	for _, id := range ids {
-		if s.engine.GetSymbol(id) != nil {
+		if n := s.engine.GetSymbol(id); n != nil && s.nodeInSessionScope(ctx, n) {
 			validIDs = append(validIDs, id)
 		} else {
 			notFound = append(notFound, id)
@@ -252,13 +310,13 @@ func (s *Server) handlePromptSafeToChange(_ context.Context, req mcp.GetPromptRe
 		fmt.Fprintf(&b, "1. `%s` — definition\n", node.FilePath)
 
 		if node.Kind == graph.KindInterface {
-			impls := s.engine.FindImplementations(id)
+			impls := s.scopedNodeSlice(ctx, s.engine.FindImplementations(id))
 			for _, impl := range impls {
 				fmt.Fprintf(&b, "2. `%s` — implements %s\n", impl.FilePath, node.Name)
 			}
 		}
 
-		dependents := s.engine.GetDependents(id, query.QueryOptions{Depth: 2, Limit: 20, Detail: "brief"})
+		dependents := s.engine.GetDependents(id, query.QueryOptions{Depth: 2, Limit: 20, Detail: "brief", WorkspaceID: sessWS})
 		depFiles := make(map[string]bool)
 		for _, dn := range dependents.Nodes {
 			if dn.Kind != graph.KindFile && dn.FilePath != node.FilePath && !isTestFile(dn.FilePath) && !depFiles[dn.FilePath] {
@@ -320,9 +378,10 @@ type refEntry struct {
 	count int
 }
 
-// findTopReferenced returns the most-referenced symbols.
-func (s *Server) findTopReferenced(limit int) []refEntry {
-	allNodes := s.engine.AllNodes()
+// findTopReferenced returns the most-referenced symbols, confined to
+// the current session's workspace.
+func (s *Server) findTopReferenced(ctx context.Context, limit int) []refEntry {
+	allNodes := s.scopedNodes(ctx)
 	var refs []refEntry
 	for _, n := range allNodes {
 		if n.Kind == graph.KindFile || n.Kind == graph.KindImport || n.Kind == graph.KindVariable {

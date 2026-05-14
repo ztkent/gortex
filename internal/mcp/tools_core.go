@@ -250,25 +250,91 @@ func subGraphToTOON(sg *query.SubGraph) (*mcp.CallToolResult, error) {
 	return mcp.NewToolResultText(string(data)), nil
 }
 
-// resolveRepoFilter resolves the optional repo/project/ref params into a set
-// of allowed repo prefixes. Returns nil when no filtering is needed (all repos).
-// When an active project is set and no explicit filter is provided, the active
-// project scope is applied as the default. If the active project cannot be
-// resolved (typically a stale name in config, no matching projects map), the
-// fallback degrades to "no filter" with a warning log instead of a hard error,
-// mirroring ConfigManager.ActiveRepos so tool calls stay usable.
-func (s *Server) resolveRepoFilter(req mcp.CallToolRequest) (map[string]bool, error) {
+// resolveRepoFilter resolves the optional repo/project/ref params into
+// a set of allowed repo prefixes, enforced against the session's
+// workspace boundary.
+//
+// For a workspace-bound session (the daemon socket path) the boundary
+// is mandatory and cannot be widened by args: a `workspace` arg may
+// only name the session's own workspace, and `repo`/`project`/`ref`
+// args are intersected with the workspace so they can only ever
+// narrow. With no explicit narrowing the allow-set is every repo in
+// the session's workspace — not "all repos".
+//
+// For an unbound session (embedded stdio / `gortex server
+// --workspace` / legacy) it falls back to resolveRepoFilterArgs with
+// the active-project default applied. A nil result there still means
+// "no filter — all repos".
+func (s *Server) resolveRepoFilter(ctx context.Context, req mcp.CallToolRequest) (map[string]bool, error) {
 	repo := req.GetString("repo", "")
 	project := req.GetString("project", "")
 	ref := req.GetString("ref", "")
+	workspaceArg := req.GetString("workspace", "")
 
-	// Track whether `project` was set by the caller (explicit) or by the
-	// active-project default. An explicit unknown project is still a hard
-	// error (the caller asked for X by name, deserves to know X is wrong);
-	// a stale active-project default falls back to "all repos" so a single
-	// misconfigured config line does not break every per-repo MCP call.
+	sessWS, _, bound := s.sessionScope(ctx)
+	if !bound {
+		// Unbound — legacy behaviour, incl. the active-project default.
+		return s.resolveRepoFilterArgs(repo, project, ref, true)
+	}
+
+	// A `workspace` arg may only name the session's own workspace. Any
+	// other value is a cross-workspace escape attempt — reject it
+	// outright rather than silently honouring the boundary and
+	// returning a confusing empty result.
+	if workspaceArg != "" && workspaceArg != sessWS {
+		return nil, fmt.Errorf(
+			"workspace %q is outside the active workspace %q; cross-workspace queries are not permitted",
+			workspaceArg, sessWS)
+	}
+
+	wsRepos := map[string]bool{}
+	if s.multiIndexer != nil {
+		wsRepos = s.multiIndexer.ReposInWorkspace(sessWS)
+	}
+
+	// No explicit narrowing — the allow-set is the whole workspace.
+	if repo == "" && project == "" && ref == "" {
+		return wsRepos, nil
+	}
+
+	// Explicit narrowing: resolve the args, then intersect with the
+	// workspace so a repo/project/ref arg can never escape it.
+	narrowed, err := s.resolveRepoFilterArgs(repo, project, ref, false)
+	if err != nil {
+		return nil, err
+	}
+	if narrowed == nil {
+		// Args resolved to "all" — clamp to the workspace.
+		return wsRepos, nil
+	}
+	intersected := make(map[string]bool)
+	for p := range narrowed {
+		if wsRepos[p] {
+			intersected[p] = true
+		}
+	}
+	if len(intersected) == 0 {
+		return nil, fmt.Errorf(
+			"repo/project/ref filter resolves to nothing inside the active workspace %q; cross-workspace queries are not permitted",
+			sessWS)
+	}
+	return intersected, nil
+}
+
+// resolveRepoFilterArgs folds explicit repo/project/ref args into a
+// single allow-set of repo prefixes. A nil map means "no filter — all
+// repos". When useActiveProjectDefault is true and no axis is given,
+// the server's active project is applied as the default scope (the
+// legacy single-tenant behaviour); workspace-bound callers pass false
+// because their boundary is supplied separately.
+//
+// An explicit unknown project is a hard error (the caller asked for X
+// by name, deserves to know X is wrong); a stale active-project
+// default degrades to "no filter" with a warning log instead, so a
+// single misconfigured config line does not break every MCP call.
+func (s *Server) resolveRepoFilterArgs(repo, project, ref string, useActiveProjectDefault bool) (map[string]bool, error) {
 	projectFromActive := false
-	if repo == "" && project == "" && ref == "" && s.activeProject != "" {
+	if useActiveProjectDefault && repo == "" && project == "" && ref == "" && s.activeProject != "" {
 		project = s.activeProject
 		projectFromActive = true
 	}
@@ -713,7 +779,7 @@ func (s *Server) handleGetSymbol(ctx context.Context, req mcp.CallToolRequest) (
 	}
 
 	// Apply repo/project/ref filter.
-	allowed, filterErr := s.resolveRepoFilter(req)
+	allowed, filterErr := s.resolveRepoFilter(ctx, req)
 	if filterErr != nil {
 		return mcp.NewToolResultError(filterErr.Error()), nil
 	}
@@ -757,12 +823,12 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 	// + 10) so the post-filter slack still leaves a full page.
 	workspaceArg := req.GetString("workspace", "")
 	projectArg := req.GetString("project", "")
-	scopeWS, scopeProj := s.resolveQueryScope(workspaceArg, projectArg)
+	scopeWS, scopeProj := s.resolveQueryScope(ctx, workspaceArg, projectArg)
 	scope := query.QueryOptions{WorkspaceID: scopeWS, ProjectID: scopeProj}
 	nodes := s.engine.SearchSymbolsScoped(q, offset+limit+10, scope)
 
 	// Apply repo/project/ref filter.
-	allowed, filterErr := s.resolveRepoFilter(req)
+	allowed, filterErr := s.resolveRepoFilter(ctx, req)
 	if filterErr != nil {
 		return mcp.NewToolResultError(filterErr.Error()), nil
 	}
@@ -776,10 +842,13 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 		nodes = filterNodesByKind(nodes, kindArg)
 	}
 
-	// Rerank: fold combo + frecency signals over the backend's BM25 order.
-	// Both signals are per-repo and zero-valued until the agent has spent
-	// some time in the codebase, so cold queries return BM25 order verbatim.
-	nodes = applyRerankBoosts(nodes, s.combo, s.frecency, q)
+	// Rerank: fold locality + combo + frecency signals over the backend's
+	// BM25 order. Locality ranks the session's home repo / project above
+	// the rest of its workspace; combo + frecency are per-repo and
+	// zero-valued until the agent has spent time in the codebase, so cold
+	// queries return BM25 order with only the locality tier applied.
+	rerankRepo, rerankProject := s.sessionLocality(ctx)
+	nodes = applyRerankBoosts(nodes, s.combo, s.frecency, q, rerankRepo, rerankProject)
 
 	// Remember the returned IDs for attribution on later consume calls.
 	// Cap at top limit so unseen "overflow" results don't get credited.
@@ -851,7 +920,7 @@ func (s *Server) handleGetFileSummary(ctx context.Context, req mcp.CallToolReque
 	}
 
 	// Apply repo/project/ref filter.
-	allowed, filterErr := s.resolveRepoFilter(req)
+	allowed, filterErr := s.resolveRepoFilter(ctx, req)
 	if filterErr != nil {
 		return mcp.NewToolResultError(filterErr.Error()), nil
 	}
@@ -895,7 +964,7 @@ func (s *Server) handleGetDependencies(ctx context.Context, req mcp.CallToolRequ
 		return mcp.NewToolResultError("id is required"), nil
 	}
 	minTier := req.GetString("min_tier", "")
-	scopeWS, scopeProj := s.scopeFromRequest(&req)
+	scopeWS, scopeProj := s.scopeFromRequest(ctx, &req)
 	opts := query.QueryOptions{
 		Depth:       req.GetInt("depth", 2),
 		Limit:       req.GetInt("limit", 50),
@@ -916,7 +985,7 @@ func (s *Server) handleGetDependents(ctx context.Context, req mcp.CallToolReques
 		return mcp.NewToolResultError("id is required"), nil
 	}
 	minTier := req.GetString("min_tier", "")
-	scopeWS, scopeProj := s.scopeFromRequest(&req)
+	scopeWS, scopeProj := s.scopeFromRequest(ctx, &req)
 	opts := query.QueryOptions{
 		Depth:       req.GetInt("depth", 3),
 		Limit:       req.GetInt("limit", 50),
@@ -937,7 +1006,7 @@ func (s *Server) handleGetCallChain(ctx context.Context, req mcp.CallToolRequest
 		return mcp.NewToolResultError("id is required"), nil
 	}
 	minTier := req.GetString("min_tier", "")
-	scopeWS, scopeProj := s.scopeFromRequest(&req)
+	scopeWS, scopeProj := s.scopeFromRequest(ctx, &req)
 	opts := query.QueryOptions{
 		Depth:       req.GetInt("depth", 4),
 		Limit:       req.GetInt("limit", 50),
@@ -949,7 +1018,7 @@ func (s *Server) handleGetCallChain(ctx context.Context, req mcp.CallToolRequest
 	sg := s.engine.GetCallChain(id, opts)
 
 	// Apply repo/project/ref filter.
-	allowed, filterErr := s.resolveRepoFilter(req)
+	allowed, filterErr := s.resolveRepoFilter(ctx, req)
 	if filterErr != nil {
 		return mcp.NewToolResultError(filterErr.Error()), nil
 	}
@@ -965,7 +1034,7 @@ func (s *Server) handleGetCallers(ctx context.Context, req mcp.CallToolRequest) 
 		return mcp.NewToolResultError("id is required"), nil
 	}
 	minTier := req.GetString("min_tier", "")
-	scopeWS, scopeProj := s.scopeFromRequest(&req)
+	scopeWS, scopeProj := s.scopeFromRequest(ctx, &req)
 	opts := query.QueryOptions{
 		Depth:        req.GetInt("depth", 2),
 		Limit:        req.GetInt("limit", 50),
@@ -995,6 +1064,10 @@ func (s *Server) handleFindOverrides(ctx context.Context, req mcp.CallToolReques
 	default:
 		nodes = s.engine.FindOverridesMinTier(id, minTier)
 	}
+	// Confine results to the session's workspace — these engine
+	// methods don't take QueryOptions, so the boundary is enforced
+	// here.
+	nodes = s.scopedNodeSlice(ctx, nodes)
 
 	if s.isGCX(ctx, req) {
 		sg := &query.SubGraph{Nodes: nodes, TotalNodes: len(nodes)}
@@ -1030,6 +1103,9 @@ func (s *Server) handleFindImplementations(ctx context.Context, req mcp.CallTool
 	}
 	minTier := req.GetString("min_tier", "")
 	impls := s.engine.FindImplementationsMinTier(id, minTier)
+	// Confine results to the session's workspace — FindImplementations
+	// doesn't take QueryOptions, so the boundary is enforced here.
+	impls = s.scopedNodeSlice(ctx, impls)
 
 	if s.isGCX(ctx, req) {
 		sg := &query.SubGraph{Nodes: impls, TotalNodes: len(impls)}
@@ -1071,7 +1147,7 @@ func (s *Server) handleFindUsages(ctx context.Context, req mcp.CallToolRequest) 
 	// same way as on search_symbols.
 	workspaceArg := req.GetString("workspace", "")
 	projectArg := req.GetString("project", "")
-	scopeWS, scopeProj := s.resolveQueryScope(workspaceArg, projectArg)
+	scopeWS, scopeProj := s.resolveQueryScope(ctx, workspaceArg, projectArg)
 	sg := s.engine.FindUsagesScoped(id, query.QueryOptions{
 		WorkspaceID:  scopeWS,
 		ProjectID:    scopeProj,
@@ -1079,7 +1155,7 @@ func (s *Server) handleFindUsages(ctx context.Context, req mcp.CallToolRequest) 
 	})
 
 	// Apply repo/project/ref filter.
-	allowed, filterErr := s.resolveRepoFilter(req)
+	allowed, filterErr := s.resolveRepoFilter(ctx, req)
 	if filterErr != nil {
 		return mcp.NewToolResultError(filterErr.Error()), nil
 	}
@@ -1097,7 +1173,7 @@ func (s *Server) handleGetCluster(ctx context.Context, req mcp.CallToolRequest) 
 	if err != nil {
 		return mcp.NewToolResultError("id is required"), nil
 	}
-	scopeWS, scopeProj := s.scopeFromRequest(&req)
+	scopeWS, scopeProj := s.scopeFromRequest(ctx, &req)
 	opts := query.QueryOptions{
 		Depth:       req.GetInt("radius", 2),
 		Limit:       req.GetInt("limit", 50),

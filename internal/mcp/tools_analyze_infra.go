@@ -76,7 +76,7 @@ func (s *Server) handleAnalyzeK8sResources(ctx context.Context, req mcp.CallTool
 	}
 
 	var rows []*resourceRow
-	for _, n := range s.graph.AllNodes() {
+	for _, n := range s.scopedNodes(ctx) {
 		if n.Kind != graph.KindResource {
 			continue
 		}
@@ -156,7 +156,7 @@ func (s *Server) handleAnalyzeImages(ctx context.Context, req mcp.CallToolReques
 	}
 
 	var rows []*imageRow
-	for _, n := range s.graph.AllNodes() {
+	for _, n := range s.scopedNodes(ctx) {
 		if n.Kind != graph.KindImage {
 			continue
 		}
@@ -235,7 +235,7 @@ func (s *Server) handleAnalyzeKustomize(ctx context.Context, req mcp.CallToolReq
 	}
 
 	var rows []*overlayRow
-	for _, n := range s.graph.AllNodes() {
+	for _, n := range s.scopedNodes(ctx) {
 		if n.Kind != graph.KindKustomization {
 			continue
 		}

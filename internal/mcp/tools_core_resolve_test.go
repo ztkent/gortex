@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 
@@ -55,7 +56,7 @@ func TestResolveRepoFilterStaleActiveProject(t *testing.T) {
 	req := mcplib.CallToolRequest{}
 	req.Params.Arguments = map[string]any{}
 
-	allowed, err := srv.resolveRepoFilter(req)
+	allowed, err := srv.resolveRepoFilter(context.Background(), req)
 	require.NoError(t, err, "stale active_project must not produce an error")
 	require.Nil(t, allowed, "stale active_project must fall back to nil filter (all repos)")
 }
@@ -87,7 +88,7 @@ func TestResolveRepoFilterExplicitUnknownProject(t *testing.T) {
 	req := mcplib.CallToolRequest{}
 	req.Params.Arguments = map[string]any{"project": "does-not-exist"}
 
-	_, err = srv.resolveRepoFilter(req)
+	_, err = srv.resolveRepoFilter(context.Background(), req)
 	require.Error(t, err, "explicit unknown project must still surface as error")
 	assert.Contains(t, err.Error(), "does-not-exist")
 }

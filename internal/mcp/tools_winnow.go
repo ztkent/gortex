@@ -122,7 +122,7 @@ func (s *Server) handleWinnowSymbols(ctx context.Context, req mcp.CallToolReques
 		s.sessionFor(ctx).recordSearch(c.TextMatch)
 	}
 
-	allowed, filterErr := s.resolveRepoFilter(req)
+	allowed, filterErr := s.resolveRepoFilter(ctx, req)
 	if filterErr != nil {
 		return mcp.NewToolResultError(filterErr.Error()), nil
 	}

@@ -70,6 +70,11 @@ func (d *mcpDispatcher) Dispatch(ctx context.Context, sess *daemon.Session, fram
 	}
 
 	ctx = gortexmcp.WithSessionID(ctx, sess.ID)
+	// Carry the session's cwd so MCP tool handlers can resolve — and
+	// enforce — the workspace boundary for this session. Without this
+	// every query runs against the whole multi-workspace graph and a
+	// session in workspace A can see workspace B's nodes.
+	ctx = gortexmcp.WithSessionCWD(ctx, sess.CWD)
 
 	// Identify the MCP client. The handshake's ClientName is the
 	// proxy's env-var-based guess (often "unknown" when no known env

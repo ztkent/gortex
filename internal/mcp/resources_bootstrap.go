@@ -68,16 +68,16 @@ func (s *Server) handleResourceIndexHealth(_ context.Context, req mcp.ReadResour
 	return jsonResource(req.Params.URI, payload)
 }
 
-func (s *Server) handleResourceWorkspace(_ context.Context, req mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
-	return jsonResource(req.Params.URI, s.buildWorkspaceInfoPayload())
+func (s *Server) handleResourceWorkspace(ctx context.Context, req mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+	return jsonResource(req.Params.URI, s.buildWorkspaceInfoPayload(ctx))
 }
 
-func (s *Server) handleResourceRepos(_ context.Context, req mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
-	return jsonResource(req.Params.URI, s.buildListReposPayload())
+func (s *Server) handleResourceRepos(ctx context.Context, req mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+	return jsonResource(req.Params.URI, s.buildListReposPayload(ctx))
 }
 
-func (s *Server) handleResourceActiveProject(_ context.Context, req mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
-	return jsonResource(req.Params.URI, s.buildActiveProjectPayload())
+func (s *Server) handleResourceActiveProject(ctx context.Context, req mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+	return jsonResource(req.Params.URI, s.buildActiveProjectPayload(ctx))
 }
 
 // bootstrapResourceURIs lists the resources whose payloads change when

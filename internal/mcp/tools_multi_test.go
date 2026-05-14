@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -201,7 +202,7 @@ func TestPropertyQueryScopingByRepoProjectRef(t *testing.T) {
 		targetPrefix := rapid.SampledFrom(prefixes).Draw(rt, "targetRepo")
 		req1 := mcplib.CallToolRequest{}
 		req1.Params.Arguments = map[string]any{"repo": targetPrefix}
-		allowed1, err := srv.resolveRepoFilter(req1)
+		allowed1, err := srv.resolveRepoFilter(context.Background(), req1)
 		require.NoError(t, err)
 		require.NotNil(t, allowed1, "repo filter should return non-nil allowed set")
 		assert.True(t, allowed1[targetPrefix], "target repo should be in allowed set")
@@ -219,7 +220,7 @@ func TestPropertyQueryScopingByRepoProjectRef(t *testing.T) {
 		targetProject := rapid.SampledFrom([]string{"alpha", "beta"}).Draw(rt, "targetProject")
 		req2 := mcplib.CallToolRequest{}
 		req2.Params.Arguments = map[string]any{"project": targetProject}
-		allowed2, err := srv.resolveRepoFilter(req2)
+		allowed2, err := srv.resolveRepoFilter(context.Background(), req2)
 		require.NoError(t, err)
 		require.NotNil(t, allowed2)
 
@@ -243,7 +244,7 @@ func TestPropertyQueryScopingByRepoProjectRef(t *testing.T) {
 		// --- Test 3: project + ref filter ---
 		req3 := mcplib.CallToolRequest{}
 		req3.Params.Arguments = map[string]any{"project": "alpha", "ref": "work"}
-		allowed3, err := srv.resolveRepoFilter(req3)
+		allowed3, err := srv.resolveRepoFilter(context.Background(), req3)
 		require.NoError(t, err)
 		require.NotNil(t, allowed3)
 		for _, p := range alphaRepos {
@@ -259,7 +260,7 @@ func TestPropertyQueryScopingByRepoProjectRef(t *testing.T) {
 		// --- Test 4: ref without project ---
 		req4 := mcplib.CallToolRequest{}
 		req4.Params.Arguments = map[string]any{"ref": "opensource"}
-		allowed4, err := srv.resolveRepoFilter(req4)
+		allowed4, err := srv.resolveRepoFilter(context.Background(), req4)
 		require.NoError(t, err)
 		require.NotNil(t, allowed4)
 		for _, p := range betaRepos {
@@ -274,7 +275,7 @@ func TestPropertyQueryScopingByRepoProjectRef(t *testing.T) {
 		// --- Test 5: no filter → nil (all repos) ---
 		req5 := mcplib.CallToolRequest{}
 		req5.Params.Arguments = map[string]any{}
-		allowed5, err := srv.resolveRepoFilter(req5)
+		allowed5, err := srv.resolveRepoFilter(context.Background(), req5)
 		require.NoError(t, err)
 		assert.Nil(t, allowed5, "no filter should return nil (all repos)")
 	})
@@ -373,7 +374,7 @@ func TestPropertyActiveProjectDefaultScoping(t *testing.T) {
 		// Call resolveRepoFilter with empty params — should scope to projA.
 		reqEmpty := mcplib.CallToolRequest{}
 		reqEmpty.Params.Arguments = map[string]any{}
-		allowed, err := srv.resolveRepoFilter(reqEmpty)
+		allowed, err := srv.resolveRepoFilter(context.Background(), reqEmpty)
 		require.NoError(t, err)
 		require.NotNil(t, allowed, "active project should produce non-nil filter")
 
@@ -397,7 +398,7 @@ func TestPropertyActiveProjectDefaultScoping(t *testing.T) {
 		// --- Phase 2: Switch active project to projB ---
 		srv.activeProject = "projB"
 
-		allowed2, err := srv.resolveRepoFilter(reqEmpty)
+		allowed2, err := srv.resolveRepoFilter(context.Background(), reqEmpty)
 		require.NoError(t, err)
 		require.NotNil(t, allowed2, "active project projB should produce non-nil filter")
 
@@ -413,7 +414,7 @@ func TestPropertyActiveProjectDefaultScoping(t *testing.T) {
 		// --- Phase 3: Explicit project param overrides active project ---
 		reqExplicit := mcplib.CallToolRequest{}
 		reqExplicit.Params.Arguments = map[string]any{"project": "projA"}
-		allowed3, err := srv.resolveRepoFilter(reqExplicit)
+		allowed3, err := srv.resolveRepoFilter(context.Background(), reqExplicit)
 		require.NoError(t, err)
 		require.NotNil(t, allowed3)
 

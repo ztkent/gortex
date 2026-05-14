@@ -44,6 +44,40 @@ func SessionIDFromContext(ctx context.Context) string {
 	return ""
 }
 
+// sessionCWDCtxKey carries the session's working directory. The
+// daemon's MCP dispatcher stashes it alongside the session ID so tool
+// handlers can resolve — and enforce — the workspace boundary for the
+// session (Server.sessionScope). Unexported: external packages must
+// use WithSessionCWD / SessionCWDFromContext.
+type sessionCWDCtxKey struct{}
+
+// WithSessionCWD returns a context carrying the session's working
+// directory. The daemon dispatcher wraps each inbound frame with this
+// before calling MCPServer.HandleMessage, giving every tool handler
+// the cwd needed to resolve the session's workspace scope.
+//
+// An empty cwd returns ctx unchanged — that's the embedded stdio path
+// (one implicit session, no cwd) and control clients; both fall back
+// to the server-default scope.
+func WithSessionCWD(ctx context.Context, cwd string) context.Context {
+	if cwd == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, sessionCWDCtxKey{}, cwd)
+}
+
+// SessionCWDFromContext returns the session cwd attached via
+// WithSessionCWD, or "" when none is present.
+func SessionCWDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if cwd, ok := ctx.Value(sessionCWDCtxKey{}).(string); ok {
+		return cwd
+	}
+	return ""
+}
+
 // sessionLocal bundles the per-client state that should not aggregate
 // across sessions: recent agent activity (viewed/modified files and
 // symbols), and session-scoped token-savings counters. Shared pieces —

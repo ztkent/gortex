@@ -51,7 +51,7 @@ func (s *Server) handleGetUntestedSymbols(ctx context.Context, req mcp.CallToolR
 
 	var entries []untestedEntry
 	totalCandidates := 0
-	for _, n := range s.graph.AllNodes() {
+	for _, n := range s.scopedNodes(ctx) {
 		if n.Kind != graph.KindFunction && n.Kind != graph.KindMethod {
 			continue
 		}

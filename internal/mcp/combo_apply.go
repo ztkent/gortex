@@ -6,12 +6,22 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 )
 
-// applyRerankBoosts reorders nodes by combining combo + frecency signals
-// on top of the backend's original BM25-like order. Both inputs may be
-// nil; if both produce unit multipliers, the stable sort is a no-op and
-// the input order is preserved byte-for-byte. Kept in one pass so the
-// comparator sees the final combined multiplier per node.
-func applyRerankBoosts(nodes []*graph.Node, cm *comboManager, ft *frecencyTracker, query string) []*graph.Node {
+// applyRerankBoosts reorders nodes by combining locality + combo +
+// frecency signals on top of the backend's original BM25-like order.
+//
+// Locality is the workspace-isolation relevance tier: results are
+// already confined to the session's workspace, so within that set a
+// same-repo hit outranks a same-project hit, which outranks the rest
+// of the workspace. The agent never has to ask for a scope — it gets
+// the whole legal workspace, ordered closest-to-home first.
+// repoPrefix / projectID are the session's home repo and project;
+// both empty (unbound session) disables the locality tier.
+//
+// All inputs may be inert; if every signal produces a unit multiplier
+// the stable sort is a no-op and input order is preserved byte-for-
+// byte. Kept in one pass so the comparator sees the final combined
+// multiplier per node.
+func applyRerankBoosts(nodes []*graph.Node, cm *comboManager, ft *frecencyTracker, query, repoPrefix, projectID string) []*graph.Node {
 	if len(nodes) < 2 {
 		return nodes
 	}
@@ -19,24 +29,44 @@ func applyRerankBoosts(nodes []*graph.Node, cm *comboManager, ft *frecencyTracke
 	if cm != nil {
 		comboBoosts = cm.BoostMap(query)
 	}
+	hasLocality := repoPrefix != "" || projectID != ""
 	// Only sort when at least one signal has something to say.
-	if len(comboBoosts) == 0 && (ft == nil || !ft.HasData()) {
+	if len(comboBoosts) == 0 && (ft == nil || !ft.HasData()) && !hasLocality {
 		return nodes
 	}
 
-	multiplier := func(id string) float64 {
-		m := 1.0
-		if b, ok := comboBoosts[id]; ok {
+	// localityBoost ranks same-repo above same-project above the rest
+	// of the workspace (the multiplicative baseline, since results are
+	// already workspace-bounded).
+	localityBoost := func(n *graph.Node) float64 {
+		if repoPrefix != "" && n.RepoPrefix == repoPrefix {
+			return 3.0
+		}
+		if projectID != "" {
+			proj := n.ProjectID
+			if proj == "" {
+				proj = n.RepoPrefix
+			}
+			if proj == projectID {
+				return 2.0
+			}
+		}
+		return 1.0
+	}
+
+	multiplier := func(n *graph.Node) float64 {
+		m := localityBoost(n)
+		if b, ok := comboBoosts[n.ID]; ok {
 			m *= b
 		}
 		if ft != nil {
-			m *= ft.BoostFor(id)
+			m *= ft.BoostFor(n.ID)
 		}
 		return m
 	}
 
 	sort.SliceStable(nodes, func(i, j int) bool {
-		return multiplier(nodes[i].ID) > multiplier(nodes[j].ID)
+		return multiplier(nodes[i]) > multiplier(nodes[j])
 	})
 	return nodes
 }

@@ -55,12 +55,28 @@ func (s *Server) handleListRepos(ctx context.Context, req mcp.CallToolRequest) (
 		return errResult, nil
 	}
 
-	return s.respondJSONOrTOON(ctx, req, s.buildListReposPayload())
+	return s.respondJSONOrTOON(ctx, req, s.buildListReposPayload(ctx))
 }
 
 // buildListReposPayload returns the same data the `list_repos` tool
 // emits. Shared with the `gortex://repos` resource.
-func (s *Server) buildListReposPayload() map[string]any {
+//
+// A workspace-bound session (daemon socket path) reports the repos in
+// its own resolved workspace; an unbound session falls back to the
+// process-global bind.
+func (s *Server) buildListReposPayload(ctx context.Context) map[string]any {
+	if sessWS, _, bound := s.sessionScope(ctx); bound {
+		repos := s.sessionWorkspaceRepos(ctx)
+		names := make([]string, 0, len(repos))
+		for _, r := range repos {
+			names = append(names, r["name"])
+		}
+		return map[string]any{
+			"mode":      "workspace",
+			"workspace": sessWS,
+			"repos":     names,
+		}
+	}
 	bind := s.bind
 	out := map[string]any{}
 	if bind == nil {
@@ -82,12 +98,25 @@ func (s *Server) handleWorkspaceInfo(ctx context.Context, req mcp.CallToolReques
 	if _, errResult := s.ResolveToolScope("workspace_info", req.GetArguments()["repo"]); errResult != nil {
 		return errResult, nil
 	}
-	return s.respondJSONOrTOON(ctx, req, s.buildWorkspaceInfoPayload())
+	return s.respondJSONOrTOON(ctx, req, s.buildWorkspaceInfoPayload(ctx))
 }
 
 // buildWorkspaceInfoPayload returns the same data the `workspace_info`
 // tool emits. Shared with the `gortex://workspace` resource.
-func (s *Server) buildWorkspaceInfoPayload() map[string]any {
+//
+// A workspace-bound session (daemon socket path) reports its own
+// resolved workspace — the boundary the query tools enforce — instead
+// of the process-global bind, which is nil on the daemon.
+func (s *Server) buildWorkspaceInfoPayload(ctx context.Context) map[string]any {
+	if sessWS, sessProj, bound := s.sessionScope(ctx); bound {
+		return map[string]any{
+			"mode":             "workspace",
+			"workspace":        sessWS,
+			"project":          sessProj,
+			"members":          s.sessionWorkspaceRepos(ctx),
+			"isolation_bounds": sessWS,
+		}
+	}
 	bind := s.bind
 	if bind == nil {
 		return map[string]any{

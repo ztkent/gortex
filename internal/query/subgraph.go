@@ -40,11 +40,15 @@ type QueryOptions struct {
 	ExcludeTests bool `json:"exclude_tests,omitempty"`
 }
 
-// scopeAllows reports whether a node passes the workspace/project
+// ScopeAllows reports whether a node passes the workspace/project
 // scope expressed in opts. Empty WorkspaceID means "no scope" — every
 // node passes. Same effective-fallback rule as the matcher: missing
 // WorkspaceID on the node falls back to its RepoPrefix.
-func (o QueryOptions) scopeAllows(n *graph.Node) bool {
+//
+// Exported so the MCP layer can enforce the session's workspace
+// boundary on by-id and whole-graph handlers that don't route through
+// the engine's scoped traversal.
+func (o QueryOptions) ScopeAllows(n *graph.Node) bool {
 	if o.WorkspaceID == "" || n == nil {
 		return true
 	}
