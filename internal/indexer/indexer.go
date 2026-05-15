@@ -1976,17 +1976,53 @@ func (idx *Indexer) IncrementalReindex(root string) (*IndexResult, error) {
 		return nil, err
 	}
 
-	// Detect deleted files: in fileMtimes but not on disk.
+	// Detect deleted files. A file that's tracked in fileMtimes but
+	// absent from the current discovery walk is a candidate, but
+	// "absent from discovery" is not the same as "absent from disk":
+	//
+	//   - The exclude list (.gortex.yaml, builtin, workspace) may have
+	//     grown since the last index — every newly-excluded file would
+	//     be classified as deleted.
+	//   - A language extractor's Extensions() may have changed across
+	//     versions — files whose ext is no longer detected would be
+	//     classified as deleted.
+	//   - WalkDir swallowed a transient error (EACCES, EIO, NFS hiccup,
+	//     ELOOP) — the file is unreachable this pass but still on disk.
+	//
+	// All three would purge legitimate graph state on every daemon
+	// restart. Stat the candidate first: only treat ENOENT/ENOTDIR as
+	// deletion; preserve on success (file exists, just not discovered)
+	// and on transient errors. The cost is one extra stat per
+	// previously-indexed-but-not-discovered file, which is bounded by
+	// the size of the exclusion delta.
 	idx.mtimeMu.RLock()
-	var deletedFiles []string
+	var candidates []string
 	for relPath := range idx.fileMtimes {
 		if !diskFiles[relPath] {
-			deletedFiles = append(deletedFiles, relPath)
+			candidates = append(candidates, relPath)
 		}
 	}
 	idx.mtimeMu.RUnlock()
 
-	// Evict deleted files.
+	var deletedFiles []string
+	for _, relPath := range candidates {
+		absPath := filepath.Join(absRoot, relPath)
+		_, err := os.Stat(absPath)
+		if err == nil {
+			// File exists on disk; it was excluded or its extension is
+			// no longer detected. Preserve.
+			continue
+		}
+		if errors.Is(err, os.ErrNotExist) {
+			deletedFiles = append(deletedFiles, relPath)
+			continue
+		}
+		// Transient error — preserve to be safe.
+		idx.logger.Warn("incremental reindex: stat failed during deletion detection, preserving",
+			zap.String("rel", relPath), zap.Error(err))
+	}
+
+	// Evict only files that are truly absent from disk.
 	for _, relPath := range deletedFiles {
 		graphPath := idx.prefixPath(relPath)
 		idx.graph.EvictFile(graphPath)
