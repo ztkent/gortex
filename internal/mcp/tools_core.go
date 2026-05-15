@@ -13,6 +13,7 @@ import (
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/query"
+	"github.com/zzet/gortex/internal/search/rerank"
 )
 
 // minTierParamDescription is the `min_tier` parameter description shared by
@@ -577,6 +578,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithString("ref", mcp.Description("Filter results to repositories with a specific reference tag")),
 			mcp.WithString("kind", mcp.Description("Filter to one or more node kinds (comma-separated). Standard kinds: function, method, type, interface, variable, constant, field, file, package, import, contract. Coverage kinds: param, closure, enum_member, generic_param, module, table, column, config_key, flag, event, migration, fixture, todo, team, license, release.")),
 			mcp.WithString("assist", mcp.Description("LLM assist mode: \"auto\" (default — engages on natural-language queries, skips identifier lookups), \"on\" (force engage), \"off\" (bypass), \"deep\" (on + a body-grounded verification pass that reads candidate code and HONESTLY drops irrelevant matches — slower, may return empty results when nothing genuinely matches). Requires an LLM provider configured via `llm.provider` (local / anthropic / openai / ollama); behaves as \"off\" when none is available.")),
+			mcp.WithBoolean("debug", mcp.Description("When true, attach a `rerank` block to the response carrying per-candidate scores and per-signal contributions from the 11-signal rerank pipeline (bm25, semantic, fan_in, fan_out, churn, community, minhash, api_signature, type_signature, recency, feedback) plus the active per-signal weight map. Off by default; enable to inspect ranking decisions or tune `.gortex.yaml::search::weights`.")),
 		),
 		s.handleSearchSymbols,
 	)
@@ -902,13 +904,17 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 		}
 	}
 
-	// Rerank: fold locality + combo + frecency signals over the backend's
-	// BM25 order. Locality ranks the session's home repo / project above
-	// the rest of its workspace; combo + frecency are per-repo and
-	// zero-valued until the agent has spent time in the codebase, so cold
-	// queries return BM25 order with only the locality tier applied.
-	rerankRepo, rerankProject := s.sessionLocality(ctx)
-	nodes = applyRerankBoosts(nodes, s.combo, s.frecency, q, rerankRepo, rerankProject)
+	// Rerank: run the I13 11-signal pipeline over the candidate set
+	// with the session-aware Context wired in. Structural signals
+	// (BM25 rank, fan-in / fan-out, MinHash similarity, signature
+	// match, recency, community) discriminate within the backend's
+	// BM25 order; session signals (locality, combo, frecency,
+	// feedback, churn) layer on top once the agent has spent time
+	// in the codebase. Cold queries with no session data fall back
+	// to a structural-only pass.
+	rctx := s.buildRerankContext(ctx, q)
+	var rerankBreakdown []*rerank.Candidate
+	nodes = applyRerankBoosts(s, nodes, q, rctx, &rerankBreakdown)
 
 	// Remember the returned IDs for attribution on later consume calls.
 	// Cap at top limit so unseen "overflow" results don't get credited.
@@ -984,7 +990,73 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 		}
 		resp["assist"] = assistDebug
 	}
+	// Surface the 11-signal rerank breakdown when the caller asked
+	// for it via debug=true. Page-sliced to match the rows in
+	// `results`. Keeps the common-path response shape unchanged.
+	if req.GetBool("debug", false) && len(rerankBreakdown) > 0 {
+		pageBreakdown := rerankBreakdown
+		if offset < len(pageBreakdown) {
+			pageBreakdown = pageBreakdown[offset:]
+		} else {
+			pageBreakdown = nil
+		}
+		if len(pageBreakdown) > limit {
+			pageBreakdown = pageBreakdown[:limit]
+		}
+		resp["rerank"] = encodeRerankBreakdown(pageBreakdown, s.engine.Rerank())
+	}
 	return s.respondJSONOrTOON(ctx, req, resp)
+}
+
+// encodeRerankBreakdown converts a candidate slice into a JSON-ready
+// breakdown — one row per candidate carrying its final score and the
+// per-signal contributions in the canonical order.
+func encodeRerankBreakdown(cands []*rerank.Candidate, pipeline *rerank.Pipeline) []map[string]any {
+	if len(cands) == 0 {
+		return nil
+	}
+	weights := map[string]float64{}
+	if pipeline != nil {
+		weights = pipeline.Weights()
+	}
+	out := make([]map[string]any, 0, len(cands))
+	for _, c := range cands {
+		row := map[string]any{
+			"id":    c.Node.ID,
+			"score": roundTo(c.Score, 4),
+		}
+		if c.TextRank >= 0 {
+			row["text_rank"] = c.TextRank
+		}
+		if c.VectorRank >= 0 {
+			row["vector_rank"] = c.VectorRank
+		}
+		if len(c.Signals) > 0 {
+			sigs := make(map[string]float64, len(c.Signals))
+			for _, name := range rerank.AllSignalNames() {
+				if v, ok := c.Signals[name]; ok {
+					sigs[name] = roundTo(v, 4)
+				}
+			}
+			row["signals"] = sigs
+		}
+		if len(weights) > 0 {
+			row["weights"] = weights
+		}
+		out = append(out, row)
+	}
+	return out
+}
+
+func roundTo(v float64, places int) float64 {
+	if v == 0 {
+		return 0
+	}
+	pow := 1.0
+	for range places {
+		pow *= 10
+	}
+	return float64(int64(v*pow+0.5)) / pow
 }
 
 func (s *Server) handleGetFileSummary(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

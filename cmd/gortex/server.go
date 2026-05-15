@@ -324,6 +324,7 @@ func runServer(_ *cobra.Command, _ []string) error {
 
 	eng := query.NewEngine(g)
 	eng.SetSearchProvider(idx.Search)
+	eng.ApplyRerankWeights(cfg.Search.Weights)
 	gortexmcp.Version = version
 	srv := gortexmcp.NewServer(eng, g, idx, nil, logger, cfg.Guards.Rules, multiOpts...)
 

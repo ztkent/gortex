@@ -32,6 +32,16 @@ type Backend interface {
 	Close()
 }
 
+// ChannelSearcher is an optional interface a Backend can implement to
+// expose its per-channel raw retrieval output. The rerank pipeline
+// queries it so BM25 and semantic (vector) ranks can contribute as
+// separate signals instead of being collapsed via RRF before scoring.
+// Backends that only do text search (BM25 / Bleve) don't satisfy this
+// interface; callers fall through to plain Search().
+type ChannelSearcher interface {
+	SearchChannels(query string, limit int) (textResults []SearchResult, vectorIDs []string)
+}
+
 // Sizer is an optional interface a Backend can implement to report its
 // approximate in-memory footprint. Used by `gortex daemon status` to
 // break down per-repo memory; callers should type-assert and treat a

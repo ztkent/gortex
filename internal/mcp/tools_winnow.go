@@ -8,6 +8,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/search/rerank"
 )
 
 // WinnowForEval is a thin, exported wrapper around winnowSymbols for the
@@ -144,7 +145,11 @@ func (s *Server) handleWinnowSymbols(ctx context.Context, req mcp.CallToolReques
 	}
 
 	if s.isGCX(ctx, req) {
-		return s.gcxResponseWithBudget(req)(encodeWinnowSymbols(results, total, c.Limit))
+		var weights map[string]float64
+		if pipeline := s.engine.Rerank(); pipeline != nil {
+			weights = pipeline.Weights()
+		}
+		return s.gcxResponseWithBudget(req)(encodeWinnowSymbols(results, total, c.Limit, weights))
 	}
 
 	if isCompact(req) {
@@ -298,6 +303,55 @@ func (s *Server) winnowSymbols(c winnowConstraints, allowed map[string]bool) []w
 		})
 	}
 
+	// Delegate scoring to the I13 11-signal rerank pipeline so winnow
+	// surfaces the same Contributions map as search_symbols. The
+	// pre-filtering above (kind / path / community / min-counts) stays
+	// intact — winnow is a constraint chain that hands its kept rows
+	// to the pipeline for ranking.
+	pipeline := s.engine.Rerank()
+	if pipeline != nil && len(rows) > 0 {
+		cands := make([]*rerank.Candidate, len(rows))
+		idxByID := make(map[string]int, len(rows))
+		var textOrder []*winnowResult
+		if c.TextMatch != "" {
+			textOrder = make([]*winnowResult, 0, len(rows))
+			for i := range rows {
+				if rows[i].TextScore > 0 {
+					textOrder = append(textOrder, &rows[i])
+				}
+			}
+			sort.SliceStable(textOrder, func(i, j int) bool {
+				return textOrder[i].TextScore > textOrder[j].TextScore
+			})
+		}
+		textRankByID := make(map[string]int, len(textOrder))
+		for rank, r := range textOrder {
+			textRankByID[r.Node.ID] = rank
+		}
+		for i, r := range rows {
+			tr := -1
+			if rk, ok := textRankByID[r.Node.ID]; ok {
+				tr = rk
+			}
+			cands[i] = &rerank.Candidate{Node: r.Node, TextRank: tr, VectorRank: -1}
+			idxByID[r.Node.ID] = i
+		}
+		rctx := s.buildRerankContext(context.Background(), c.TextMatch)
+		pipeline.Rerank(c.TextMatch, cands, rctx)
+
+		ordered := make([]winnowResult, 0, len(cands))
+		for _, cand := range cands {
+			origIdx := idxByID[cand.Node.ID]
+			row := rows[origIdx]
+			row.Score = cand.Score
+			row.Contributions = floatMapRound(cand.Signals)
+			ordered = append(ordered, row)
+		}
+		return ordered
+	}
+
+	// No pipeline (e.g. test harness with Rerank disabled) — fall
+	// back to the legacy 4-axis local scoring so winnow still works.
 	maxFanIn, maxFanOut, maxChurn := 0, 0, 0
 	var maxText float64
 	for _, r := range rows {

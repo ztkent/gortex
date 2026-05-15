@@ -6,6 +6,7 @@ import (
 
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/search"
+	"github.com/zzet/gortex/internal/search/rerank"
 )
 
 // SearchProvider is a function that returns the current search backend.
@@ -17,11 +18,35 @@ type SearchProvider func() search.Backend
 type Engine struct {
 	g              *graph.Graph
 	searchProvider SearchProvider
+	rerank         *rerank.Pipeline
 }
 
-// NewEngine creates a query engine wrapping the given graph.
+// NewEngine creates a query engine wrapping the given graph. The
+// default 11-signal rerank.Pipeline is wired in; callers wanting a
+// custom signal set / weights override via SetRerank.
 func NewEngine(g *graph.Graph) *Engine {
-	return &Engine{g: g}
+	return &Engine{g: g, rerank: rerank.NewDefault()}
+}
+
+// SetRerank installs a custom rerank pipeline. Pass nil to disable
+// the 11-signal pass and fall back to the BM25-rank-only ordering.
+func (e *Engine) SetRerank(p *rerank.Pipeline) { e.rerank = p }
+
+// Rerank returns the installed pipeline. May be nil.
+func (e *Engine) Rerank() *rerank.Pipeline { return e.rerank }
+
+// ApplyRerankWeights overlays a per-signal weight map (typically
+// loaded from `.gortex.yaml::search::weights`) onto the engine's
+// rerank pipeline. Keys not present in the map keep their default
+// weight; setting a key to 0 disables that signal. No-op when the
+// engine has no pipeline or the map is empty.
+func (e *Engine) ApplyRerankWeights(weights map[string]float64) {
+	if e.rerank == nil || len(weights) == 0 {
+		return
+	}
+	for name, w := range weights {
+		e.rerank.SetWeight(name, w)
+	}
 }
 
 // SetSearch sets a static search backend (for backward compatibility).
@@ -305,24 +330,16 @@ func (e *Engine) SearchSymbols(query string, limit int) []*graph.Node {
 	return e.SearchSymbolsScoped(query, limit, QueryOptions{})
 }
 
-// SearchSymbolsScoped is SearchSymbols with the optional
-// workspace/project scope. When opts.WorkspaceID is set, results
-// outside that scope are filtered out and the search re-fetches as
-// needed to fill the requested limit. Empty scope preserves the
-// legacy global behaviour.
-func (e *Engine) SearchSymbolsScoped(query string, limit int, opts QueryOptions) []*graph.Node {
+// SearchSymbolsRanked is SearchSymbolsScoped that returns the full
+// rerank.Candidate slice instead of just the nodes — callers can read
+// the per-signal contributions and the final score off each candidate.
+// rctx is optional session context (frecency / combo / feedback /
+// repo + project locality); pass nil to score with structural signals
+// only.
+func (e *Engine) SearchSymbolsRanked(query string, limit int, opts QueryOptions, rctx *rerank.Context) []*rerank.Candidate {
 	if limit <= 0 {
 		limit = 20
 	}
-
-	// Workspace-scoped searches need to over-fetch from the backend
-	// because the BM25 / substring layers don't know about the
-	// workspace boundary; we filter post-hoc and may need to keep
-	// going to fill
-	// `limit`. The 4× factor is a heuristic — most workspace-bounded
-	// users have an ~all-mine result distribution and so the first
-	// page is usually enough; the extras get truncated cheaply. We
-	// cap at 200 to keep the BM25 walk bounded.
 	fetchLimit := limit
 	if opts.WorkspaceID != "" {
 		fetchLimit = limit * 4
@@ -331,116 +348,182 @@ func (e *Engine) SearchSymbolsScoped(query string, limit int, opts QueryOptions)
 		}
 	}
 
-	var raw []*graph.Node
+	var cands []*rerank.Candidate
 	if s := e.getSearch(); s != nil && s.Count() > 0 {
-		raw = e.searchWithBackend(query, fetchLimit)
+		cands = e.gatherBackendCandidates(query, fetchLimit)
 	} else {
-		raw = e.searchSubstring(query, fetchLimit)
+		nodes := e.searchSubstring(query, fetchLimit)
+		cands = make([]*rerank.Candidate, 0, len(nodes))
+		for i, n := range nodes {
+			cands = append(cands, &rerank.Candidate{Node: n, TextRank: i, VectorRank: -1})
+		}
 	}
 
-	if opts.WorkspaceID == "" {
-		return raw
+	if opts.WorkspaceID != "" {
+		kept := cands[:0]
+		for _, c := range cands {
+			if !opts.ScopeAllows(c.Node) {
+				continue
+			}
+			kept = append(kept, c)
+		}
+		cands = kept
 	}
-	out := make([]*graph.Node, 0, limit)
-	for _, n := range raw {
-		if !opts.ScopeAllows(n) {
-			continue
+
+	if e.rerank != nil {
+		ctx := rctx
+		if ctx == nil {
+			ctx = &rerank.Context{}
 		}
-		out = append(out, n)
-		if len(out) >= limit {
-			break
-		}
+		ctx.Graph = e.g
+		e.rerank.Rerank(query, cands, ctx)
+	}
+
+	if len(cands) > limit {
+		cands = cands[:limit]
+	}
+	return cands
+}
+
+// SearchSymbolsScoped is SearchSymbols with the optional
+// workspace/project scope. When opts.WorkspaceID is set, results
+// outside that scope are filtered out and the search re-fetches as
+// needed to fill the requested limit. Empty scope preserves the
+// legacy global behaviour.
+func (e *Engine) SearchSymbolsScoped(query string, limit int, opts QueryOptions) []*graph.Node {
+	cands := e.SearchSymbolsRanked(query, limit, opts, nil)
+	out := make([]*graph.Node, 0, len(cands))
+	for _, c := range cands {
+		out = append(out, c.Node)
 	}
 	return out
 }
 
-func (e *Engine) searchWithBackend(query string, limit int) []*graph.Node {
-	// Get BM25/Bleve results.
-	results := e.getSearch().Search(query, limit*2) // fetch extra for dedup/filtering
+// gatherBackendCandidates fetches BM25 + (optional) vector results,
+// dedups them across channels, and supplements with exact-name /
+// substring / bigram-rescue matches. Each candidate carries its
+// 0-based TextRank and VectorRank (or -1 when the channel didn't
+// return it) so the rerank pipeline can score per channel.
+func (e *Engine) gatherBackendCandidates(query string, limit int) []*rerank.Candidate {
+	backend := e.getSearch()
 
-	seen := make(map[string]bool)
-	var out []*graph.Node
+	// Pull text + vector channels separately when the backend exposes
+	// them (HybridBackend). Otherwise treat plain Search() output as
+	// text-only.
+	var (
+		textResults []search.SearchResult
+		vectorIDs   []string
+	)
+	if cs, ok := backend.(search.ChannelSearcher); ok {
+		textResults, vectorIDs = cs.SearchChannels(query, limit*2)
+	} else {
+		textResults = backend.Search(query, limit*2)
+	}
 
-	// BM25 results first (ranked by relevance).
-	for _, r := range results {
-		node := e.g.GetNode(r.ID)
+	idx := make(map[string]int) // node ID → slice index for dedup
+	cands := make([]*rerank.Candidate, 0, len(textResults)+len(vectorIDs))
+
+	insert := func(id string, textRank, vectorRank int) {
+		if id == "" {
+			return
+		}
+		node := e.g.GetNode(id)
 		if node == nil || node.Kind == graph.KindFile || node.Kind == graph.KindImport {
-			continue
+			return
 		}
-		if seen[node.ID] {
-			continue
+		if pos, ok := idx[id]; ok {
+			c := cands[pos]
+			if textRank >= 0 && (c.TextRank < 0 || textRank < c.TextRank) {
+				c.TextRank = textRank
+			}
+			if vectorRank >= 0 && (c.VectorRank < 0 || vectorRank < c.VectorRank) {
+				c.VectorRank = vectorRank
+			}
+			return
 		}
-		seen[node.ID] = true
-		out = append(out, node)
-		if len(out) >= limit {
-			return out
-		}
+		idx[id] = len(cands)
+		cands = append(cands, &rerank.Candidate{
+			Node: node, TextRank: textRank, VectorRank: vectorRank,
+		})
 	}
 
-	// If BM25 didn't fill the limit, supplement with substring matches.
-	// This catches exact name matches that BM25 might rank lower.
-	lower := strings.ToLower(query)
-	exact := e.g.FindNodesByName(query)
-	for _, n := range exact {
-		if n.Kind == graph.KindFile || n.Kind == graph.KindImport || seen[n.ID] {
-			continue
-		}
-		seen[n.ID] = true
-		out = append(out, n)
-		if len(out) >= limit {
-			return out
-		}
+	for rank, r := range textResults {
+		insert(r.ID, rank, -1)
+	}
+	for rank, id := range vectorIDs {
+		insert(id, -1, rank)
 	}
 
-	// Substring fallback for remaining slots.
-	allNodes := e.g.AllNodes()
-	for _, n := range allNodes {
-		if seen[n.ID] || n.Kind == graph.KindFile || n.Kind == graph.KindImport {
+	// Stop early when the BM25 + vector union has already exceeded the
+	// requested width; the supplementary tiers below are a fill, not a
+	// boost.
+	if len(cands) >= limit*2 {
+		return cands
+	}
+
+	// Exact-name matches that BM25 might rank low — splice them in at
+	// the tail of the text channel so they're still text-ranked.
+	for _, n := range e.g.FindNodesByName(query) {
+		if n.Kind == graph.KindFile || n.Kind == graph.KindImport {
 			continue
 		}
-		nameLower := strings.ToLower(n.Name)
-		if strings.Contains(nameLower, lower) {
-			seen[n.ID] = true
-			out = append(out, n)
-			if len(out) >= limit {
-				return out
+		if _, seen := idx[n.ID]; seen {
+			continue
+		}
+		idx[n.ID] = len(cands)
+		cands = append(cands, &rerank.Candidate{Node: n, TextRank: len(textResults), VectorRank: -1})
+	}
+
+	// Substring fallback for remaining slots — strictly TextRank=-1
+	// (the rerank pipeline still considers them via signature/recency
+	// signals, but BM25 can't speak to them).
+	if len(cands) < limit {
+		lower := strings.ToLower(query)
+		for _, n := range e.g.AllNodes() {
+			if n.Kind == graph.KindFile || n.Kind == graph.KindImport {
+				continue
+			}
+			if _, seen := idx[n.ID]; seen {
+				continue
+			}
+			if strings.Contains(strings.ToLower(n.Name), lower) {
+				idx[n.ID] = len(cands)
+				cands = append(cands, &rerank.Candidate{Node: n, TextRank: -1, VectorRank: -1})
+				if len(cands) >= limit {
+					break
+				}
 			}
 		}
 	}
 
-	// Final tier — bigram-overlap typo rescue. Strictly gated: the
-	// preceding tiers must have produced ZERO results (true "nothing
-	// plausibly matches"), the query must be a single indivisible word
-	// of at least 4 chars (the shape of a typo), and a bigram-providing
-	// backend must be available. Anything else (partial BM25 hits, short
-	// queries, compound queries) skips straight past — bigram scanning
-	// is expensive and noisy, so we pay for it only when we'd otherwise
-	// return nothing at all.
-	if len(out) == 0 && len(query) >= 4 && !strings.ContainsAny(query, " /.:_-") {
-		if bg, ok := e.getSearch().(bigramProvider); ok {
+	// Bigram-overlap typo rescue. Same gates as the legacy path:
+	// nothing else surfaced, query is one indivisible 4+ char token,
+	// backend can provide candidates.
+	if len(cands) == 0 && len(query) >= 4 && !strings.ContainsAny(query, " /.:_-") {
+		if bg, ok := backend.(bigramProvider); ok {
 			keys := len(query) - 1
 			minOverlap := (keys + 1) / 2
 			if minOverlap < 3 {
 				minOverlap = 3
 			}
 			for _, id := range bg.BigramCandidates(query, minOverlap) {
-				if seen[id] {
+				if _, seen := idx[id]; seen {
 					continue
 				}
 				node := e.g.GetNode(id)
 				if node == nil || node.Kind == graph.KindFile || node.Kind == graph.KindImport {
 					continue
 				}
-				seen[id] = true
-				out = append(out, node)
-				if len(out) >= limit {
-					return out
+				idx[id] = len(cands)
+				cands = append(cands, &rerank.Candidate{Node: node, TextRank: -1, VectorRank: -1})
+				if len(cands) >= limit {
+					break
 				}
 			}
 		}
 	}
 
-	return out
+	return cands
 }
 
 // bigramProvider is satisfied by backends that expose a typo-tolerant

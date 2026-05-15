@@ -47,10 +47,28 @@ func (h *HybridBackend) Remove(id string) {
 
 // Search runs both text and vector search, fuses results with RRF.
 func (h *HybridBackend) Search(query string, limit int) []SearchResult {
-	// Text search (BM25/Bleve).
+	textResults, vecIDs := h.searchChannels(query, limit)
+	if len(vecIDs) == 0 {
+		if len(textResults) > limit {
+			return textResults[:limit]
+		}
+		return textResults
+	}
+	return rrfFuse(textResults, vecIDs, h.k, limit)
+}
+
+// SearchChannels returns the raw per-channel results — BM25 ranks
+// (with scores) and the parallel vector-search ID list — without
+// RRF fusion. The rerank pipeline calls this so each channel can
+// contribute as a separate Signal instead of being collapsed into a
+// single RRF score upstream of the rerank.
+func (h *HybridBackend) SearchChannels(query string, limit int) (textResults []SearchResult, vectorIDs []string) {
+	return h.searchChannels(query, limit)
+}
+
+func (h *HybridBackend) searchChannels(query string, limit int) ([]SearchResult, []string) {
 	textResults := h.text.Search(query, limit*2)
 
-	// Vector search — embed the query and search HNSW.
 	var vecIDs []string
 	if h.vector.Count() > 0 {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -60,17 +78,7 @@ func (h *HybridBackend) Search(query string, limit int) []SearchResult {
 			vecIDs = h.vector.Search(queryVec, limit*2)
 		}
 	}
-
-	// If no vector results, return text results only.
-	if len(vecIDs) == 0 {
-		if len(textResults) > limit {
-			return textResults[:limit]
-		}
-		return textResults
-	}
-
-	// RRF fusion.
-	return rrfFuse(textResults, vecIDs, h.k, limit)
+	return textResults, vecIDs
 }
 
 // Count returns the text backend document count.

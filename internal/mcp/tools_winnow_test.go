@@ -244,7 +244,7 @@ func TestEncodeWinnowSymbols_EmptyContributionsOk(t *testing.T) {
 			},
 		},
 	}
-	payload, err := encodeWinnowSymbols(rows, 1, 10)
+	payload, err := encodeWinnowSymbols(rows, 1, 10, nil)
 	require.NoError(t, err)
 	dec := wire.NewDecoder(strings.NewReader(string(payload)))
 	h, err := dec.Header()

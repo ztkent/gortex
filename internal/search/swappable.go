@@ -69,6 +69,18 @@ func (s *Swappable) Search(query string, limit int) []SearchResult {
 	return s.inner.Search(query, limit)
 }
 
+// SearchChannels delegates to the inner backend when it implements
+// ChannelSearcher, so a HybridBackend wrapped in a Swappable still
+// exposes per-channel rank data to the rerank pipeline.
+func (s *Swappable) SearchChannels(query string, limit int) (textResults []SearchResult, vectorIDs []string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if cs, ok := s.inner.(ChannelSearcher); ok {
+		return cs.SearchChannels(query, limit)
+	}
+	return s.inner.Search(query, limit), nil
+}
+
 func (s *Swappable) Count() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

@@ -226,6 +226,7 @@ type Config struct {
 	Index    IndexConfig     `mapstructure:"index"    yaml:"index,omitempty"`
 	Watch    WatchConfig     `mapstructure:"watch"    yaml:"watch,omitempty"`
 	Query    QueryConfig     `mapstructure:"query"    yaml:"query,omitempty"`
+	Search   SearchConfig    `mapstructure:"search"   yaml:"search,omitempty"`
 	MCP      MCPConfig       `mapstructure:"mcp"      yaml:"mcp,omitempty"`
 	Guards   GuardsConfig    `mapstructure:"guards"   yaml:"guards,omitempty"`
 	Multi    MultiRepoConfig `mapstructure:"multi"    yaml:"multi,omitempty"`
@@ -544,6 +545,19 @@ type WatchConfig struct {
 type QueryConfig struct {
 	DefaultDepth int `mapstructure:"default_depth" yaml:"default_depth,omitempty"`
 	MaxDepth     int `mapstructure:"max_depth"     yaml:"max_depth,omitempty"`
+}
+
+// SearchConfig configures the I13 11-signal rerank pipeline that
+// orders `search_symbols` / `winnow_symbols` results. The Weights
+// map is keyed by canonical signal name (rerank.SignalBM25,
+// rerank.SignalSemantic, …) and overrides the tuned defaults
+// returned by rerank.DefaultWeights(). Missing keys keep the
+// default weight; setting a key to 0 disables that signal.
+type SearchConfig struct {
+	// Weights overrides per-signal scoring weights. Canonical names:
+	// bm25, semantic, fan_in, fan_out, churn, community, minhash,
+	// api_signature, type_signature, recency, feedback.
+	Weights map[string]float64 `mapstructure:"weights" yaml:"weights,omitempty"`
 }
 
 type MCPConfig struct {

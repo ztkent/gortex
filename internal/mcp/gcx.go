@@ -144,14 +144,17 @@ func shouldSkipGraphNode(n *graph.Node) bool {
 // contributions. The contributions column is a pipe-separated list of
 // `axis=value` pairs so decoders can recover the attribution without a
 // nested structure.
-func encodeWinnowSymbols(rows []winnowResult, total, limit int) ([]byte, error) {
+func encodeWinnowSymbols(rows []winnowResult, total, limit int, weights map[string]float64) ([]byte, error) {
 	truncated := total > limit
+	if weights == nil {
+		weights = winnowAxisWeights
+	}
 	var buf bytes.Buffer
 	enc := newGCX(&buf, "winnow_symbols",
 		[]string{"id", "kind", "name", "path", "line", "sig", "score", "fan_in", "fan_out", "churn", "community", "contributions", "is_test", "test_role"},
 		"total", fmt.Sprintf("%d", total),
 		"truncated", boolString(truncated),
-		"weights", formatAxisWeights(winnowAxisWeights),
+		"weights", formatAxisWeights(weights),
 	)
 	if err := enc.WriteComment(fmt.Sprintf("%d result(s)", len(rows))); err != nil {
 		return nil, err
