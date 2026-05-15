@@ -40,6 +40,7 @@ func init() {
 	registerDegradeShape("get_dependents", subGraphShape)
 	registerDegradeShape("find_implementations", subGraphShape)
 	registerDegradeShape("find_overrides", subGraphShape)
+	registerDegradeShape("get_class_hierarchy", subGraphShape)
 	registerDegradeShape("get_cluster", subGraphShape)
 
 	// search_symbols / winnow_symbols: ranked lists, every row has a

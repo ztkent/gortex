@@ -55,6 +55,7 @@ var defaultToolScopes = map[string]ToolScope{
 	"find_usages":          ScopeRepo,
 	"find_implementations": ScopeRepo,
 	"find_overrides":       ScopeRepo,
+	"get_class_hierarchy":  ScopeRepo,
 	"get_diagnostics":      ScopeRepo,
 	"get_code_actions":     ScopeRepo,
 	"apply_code_action":    ScopeRepo,

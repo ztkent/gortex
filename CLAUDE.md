@@ -70,6 +70,7 @@ The response gains an `assist` debug block when an active mode engaged: `terms` 
 | Filtering `search_symbols` by hand    | `winnow_symbols` — structured constraint chain (kind, language, community, path_prefix, min_fan_in, min_fan_out, min_churn, text_match) with per-axis score contributions |
 | `Read` to understand a file           | `get_file_summary` or `get_editing_context` |
 | `Read` multiple files to trace calls  | `get_call_chain` / `get_callers`         |
+| Walking up/down an inheritance chain  | `get_class_hierarchy` — multi-hop EdgeExtends + EdgeImplements + EdgeComposes (type nodes) and EdgeOverrides (method nodes); `direction` ∈ up/down/both, `include_methods` pulls members + their override chain |
 | Guessing an import path               | `find_import_path`                       |
 | `Read` to check a function signature  | `get_symbol` (signature is in `meta.signature`) |
 | 5-10 calls to explore for a task      | `smart_context` (one call)               |
@@ -80,7 +81,7 @@ Order of preference: **gcx > toon > json**. For known clients (claude-code, curs
 
 | Instead of...                         | You MUST use...                          |
 |---------------------------------------|------------------------------------------|
-| Default JSON on multi-row responses   | Rely on the per-session default (gcx) for known clients, or pass `format: "gcx"` explicitly on `search_symbols`, `find_usages`, `analyze`, `contracts`, `batch_symbols`, `get_callers` / `get_call_chain` / `get_dependencies` / `get_dependents` / `find_implementations`, `get_file_summary`, `get_editing_context`, `smart_context` |
+| Default JSON on multi-row responses   | Rely on the per-session default (gcx) for known clients, or pass `format: "gcx"` explicitly on `search_symbols`, `find_usages`, `analyze`, `contracts`, `batch_symbols`, `get_callers` / `get_call_chain` / `get_dependencies` / `get_dependents` / `find_implementations` / `find_overrides` / `get_class_hierarchy`, `get_file_summary`, `get_editing_context`, `smart_context` |
 | GCX-blind tooling needing tabular text| Pass `format: "toon"` — TOON is the second-tier fallback (lossy but ~10–15% smaller than JSON) |
 | Parsing compact text output           | Use `@gortex/wire` (npm) or the Go `github.com/gortexhq/gcx-go` package (MIT) — both decode GCX back to structured rows |
 | Reading `compact: true` output        | Prefer `format: "gcx"` — lossy text is being phased out; GCX is round-trippable and tokenizer-optimised |

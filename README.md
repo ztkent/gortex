@@ -347,6 +347,7 @@ All query commands support `--format text|json|dot` (DOT output for Graphviz vis
 | `find_usages` | Every reference to a symbol |
 | `find_implementations` | Types implementing an interface |
 | `find_overrides` | Methods that override (children) or are overridden by (parents) a method — backed by `EdgeOverrides` |
+| `get_class_hierarchy` | Multi-hop inheritance subgraph around a type, interface, or method — walks `EdgeExtends` + `EdgeImplements` + `EdgeComposes` (type nodes) and `EdgeOverrides` (method nodes); `direction` ∈ up / down / both, `include_methods` pulls members + their override chain |
 | `get_cluster` | Bidirectional neighborhood |
 
 ### Dataflow (CPG-lite)

@@ -680,6 +680,20 @@ func (s *Server) registerCoreTools() {
 	)
 
 	s.mcpServer.AddTool(
+		mcp.NewTool("get_class_hierarchy",
+			mcp.WithDescription("Returns the inheritance subgraph around a type, interface, or method. Walks EdgeExtends + EdgeImplements + EdgeComposes for type nodes and EdgeOverrides for method nodes — the same graph data find_implementations and find_overrides expose, but as a multi-hop tree so an agent gets the whole chain (parents → root, children → leaves) in one call. Use before refactoring an OO hierarchy or to answer 'what does this class inherit from / who subclasses it'."),
+			mcp.WithString("id", mcp.Required(), mcp.Description("Seed node ID — a type, interface, or method")),
+			mcp.WithString("direction", mcp.Description("'up' (parents/interfaces this extends or implements; methods this overrides), 'down' (subtypes / implementers / overriders), or 'both' (default)")),
+			mcp.WithNumber("depth", mcp.Description("Max hops to walk in each direction (default: 5, hard cap: 64)")),
+			mcp.WithBoolean("include_methods", mcp.Description("When true and the seed/visited node is a type or interface, also include its methods (via EdgeMemberOf) and walk the EdgeOverrides chain rooted at each method.")),
+			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
+			mcp.WithNumber("max_bytes", mcp.Description("Cap the marshaled response at this many bytes. The longest list is trimmed; truncation metadata rides on the response. Omit for no cap.")),
+			mcp.WithString("min_tier", mcp.Description(minTierParamDescription)),
+		),
+		s.handleGetClassHierarchy,
+	)
+
+	s.mcpServer.AddTool(
 		mcp.NewTool("find_usages",
 			mcp.WithDescription("Use instead of Grep to find every reference to a symbol across the codebase. Returns precise locations with zero false positives."),
 			mcp.WithString("id", mcp.Required(), mcp.Description("Node ID")),
@@ -1201,6 +1215,33 @@ func (s *Server) handleFindImplementations(ctx context.Context, req mcp.CallTool
 		"implementations": results,
 		"total":           len(results),
 	})
+}
+
+func (s *Server) handleGetClassHierarchy(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	id, err := req.RequireString("id")
+	if err != nil {
+		return mcp.NewToolResultError("id is required"), nil
+	}
+	direction := query.HierarchyDirection(req.GetString("direction", string(query.HierarchyBoth)))
+	switch direction {
+	case query.HierarchyUp, query.HierarchyDown, query.HierarchyBoth:
+		// ok
+	default:
+		return mcp.NewToolResultError("direction must be one of: up, down, both"), nil
+	}
+	depth := req.GetInt("depth", 5)
+	includeMethods := req.GetBool("include_methods", false)
+	minTier := req.GetString("min_tier", "")
+
+	scopeWS, scopeProj := s.scopeFromRequest(ctx, &req)
+	opts := query.QueryOptions{
+		WorkspaceID: scopeWS,
+		ProjectID:   scopeProj,
+		MinTier:     minTier,
+	}
+	sg := s.engine.ClassHierarchy(id, direction, depth, includeMethods, opts)
+	enrichSubGraphEdges(sg)
+	return s.returnSubGraph(ctx, req, sg)
 }
 
 func (s *Server) handleFindUsages(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
