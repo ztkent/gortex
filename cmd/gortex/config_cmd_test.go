@@ -48,7 +48,7 @@ func TestNormalizePattern_ExistingDir(t *testing.T) {
 	nested := filepath.Join(root, "pkg", "generated")
 	require.NoError(t, os.MkdirAll(nested, 0755))
 
-	require.NoError(t, os.Chdir(root))
+	t.Chdir(root)
 	p, err := normalizePattern("pkg/generated", root)
 	require.NoError(t, err)
 	assert.Equal(t, "pkg/generated/", p)
@@ -59,7 +59,7 @@ func TestNormalizePattern_ExistingFile(t *testing.T) {
 	f := filepath.Join(root, "notes.txt")
 	require.NoError(t, os.WriteFile(f, []byte(""), 0644))
 
-	require.NoError(t, os.Chdir(root))
+	t.Chdir(root)
 	p, err := normalizePattern("notes.txt", root)
 	require.NoError(t, err)
 	assert.Equal(t, "notes.txt", p)
@@ -68,7 +68,7 @@ func TestNormalizePattern_ExistingFile(t *testing.T) {
 func TestNormalizePattern_OutsideRepoRejected(t *testing.T) {
 	root := resolvePath(t, t.TempDir())
 	outside := resolvePath(t, t.TempDir())
-	require.NoError(t, os.Chdir(outside))
+	t.Chdir(outside)
 	// Pass an absolute path under 'outside', matched against 'root'.
 	_, err := normalizePattern(outside, root)
 	require.Error(t, err)
@@ -76,7 +76,7 @@ func TestNormalizePattern_OutsideRepoRejected(t *testing.T) {
 
 func TestNormalizePattern_RepoRootItselfRejected(t *testing.T) {
 	root := resolvePath(t, t.TempDir())
-	require.NoError(t, os.Chdir(root))
+	t.Chdir(root)
 	_, err := normalizePattern(".", root)
 	require.Error(t, err)
 }
@@ -97,7 +97,7 @@ func TestFindWorkspaceConfigPath_ExistingFile(t *testing.T) {
 
 	sub := filepath.Join(root, "pkg", "deep")
 	require.NoError(t, os.MkdirAll(sub, 0755))
-	require.NoError(t, os.Chdir(sub))
+	t.Chdir(sub)
 
 	path, wsRoot, err := findWorkspaceConfigPath()
 	require.NoError(t, err)
@@ -110,7 +110,7 @@ func TestFindWorkspaceConfigPath_GitRootFallback(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(root, ".git"), 0755))
 	sub := filepath.Join(root, "pkg", "deep")
 	require.NoError(t, os.MkdirAll(sub, 0755))
-	require.NoError(t, os.Chdir(sub))
+	t.Chdir(sub)
 
 	path, wsRoot, err := findWorkspaceConfigPath()
 	require.NoError(t, err)
@@ -122,7 +122,7 @@ func TestFindWorkspaceConfigPath_GitRootFallback(t *testing.T) {
 func TestWorkspaceTarget_AddRemove(t *testing.T) {
 	root := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(root, ".git"), 0755))
-	require.NoError(t, os.Chdir(root))
+	t.Chdir(root)
 
 	tgt, err := newWorkspaceTarget()
 	require.NoError(t, err)
@@ -149,7 +149,7 @@ func TestWorkspaceTarget_AddRemove(t *testing.T) {
 func TestWorkspaceTarget_LegacyFallback(t *testing.T) {
 	root := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(root, ".git"), 0755))
-	require.NoError(t, os.Chdir(root))
+	t.Chdir(root)
 
 	// Simulate an existing legacy-shape .gortex.yaml.
 	legacyYAML := "index:\n  exclude:\n    - legacy-pat/**\n"
