@@ -80,6 +80,14 @@ type Env struct {
 	// currently honours it.
 	InstallHooks bool
 
+	// HookMode is the posture for the PreToolUse / PostToolUse hook
+	// integration: "deny" (default — redirect by deny on the
+	// PreToolUse side, no PostToolUse) or "enrich" (never deny,
+	// install PostToolUse that augments tool output with graph
+	// context). Empty falls back to "deny". Only the Claude Code
+	// adapter currently honours it; other adapters ignore the field.
+	HookMode string
+
 	// InstallGlobalInstructions toggles whether `gortex install`
 	// merges the rule block into ~/.claude/CLAUDE.md. Only honoured
 	// in ModeGlobal; ignored elsewhere. Default true so a fresh

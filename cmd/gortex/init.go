@@ -48,6 +48,7 @@ var (
 	initInstallHooks = true
 	initNoHooks      bool
 	initHooksOnly    bool
+	initHookMode     string
 
 	// Community skills generation (replaces the old `gortex skills`).
 	initSkills          = true
@@ -82,6 +83,9 @@ func init() {
 	initCmd.Flags().BoolVar(&initInstallHooks, "hooks", true, "install Claude Code hooks (PreToolUse + PreCompact + Stop); use --no-hooks to skip")
 	initCmd.Flags().BoolVar(&initNoHooks, "no-hooks", false, "skip installing Claude Code hooks (inverse of --hooks)")
 	initCmd.Flags().BoolVar(&initHooksOnly, "hooks-only", false, "only install/update Claude Code hooks in .claude/settings.local.json, skip everything else")
+	initCmd.Flags().StringVar(&initHookMode, "hook-mode", "deny",
+		"hook posture: 'deny' (PreToolUse redirects Grep/Glob/Read of indexed source) or 'enrich' "+
+			"(PreToolUse never denies; PostToolUse appends graph context after the tool runs)")
 
 	initCmd.Flags().BoolVar(&initSkills, "skills", true, "generate per-community routing + SKILL.md files; use --no-skills to skip")
 	initCmd.Flags().BoolVar(&initNoSkills, "no-skills", false, "skip community-skill generation (inverse of --skills)")
@@ -169,7 +173,7 @@ func runInit(cmd *cobra.Command, args []string) (err error) {
 		if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
 			return err
 		}
-		action, err := claudecode.InstallHook(cmd.ErrOrStderr(), settingsPath, agents.ApplyOpts{DryRun: initDryRun, Force: initForce})
+		action, err := claudecode.InstallHookWithMode(cmd.ErrOrStderr(), settingsPath, initHookMode, agents.ApplyOpts{DryRun: initDryRun, Force: initForce})
 		if err != nil {
 			return err
 		}
@@ -205,6 +209,7 @@ func runInit(cmd *cobra.Command, args []string) (err error) {
 		HookCommand:  claudecode.ResolveHookCommand(cmd.ErrOrStderr()),
 		Mode:         agents.ModeProject,
 		InstallHooks: initInstallHooks,
+		HookMode:     initHookMode,
 		AnalyzeRepo:  initAnalyze,
 		Stderr:       cmd.ErrOrStderr(),
 	}

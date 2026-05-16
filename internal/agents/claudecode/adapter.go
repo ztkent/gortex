@@ -121,7 +121,7 @@ func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, 
 
 	// 3. Hooks in .claude/settings.local.json — merge with healing.
 	if env.InstallHooks {
-		hookAction, err := InstallHook(w, filepath.Join(env.Root, ".claude", "settings.local.json"), opts)
+		hookAction, err := InstallHookWithMode(w, filepath.Join(env.Root, ".claude", "settings.local.json"), env.HookMode, opts)
 		if err != nil {
 			logWarn(w, "could not install hook: %v", err)
 		}
@@ -207,7 +207,7 @@ func (a *Adapter) applyGlobal(env agents.Env, opts agents.ApplyOpts, res *agents
 
 	// 3. ~/.claude/settings.local.json — user-level hooks.
 	if env.InstallHooks {
-		hookAction, err := InstallHook(w, userSettingsLocalPath(env.Home), opts)
+		hookAction, err := InstallHookWithMode(w, userSettingsLocalPath(env.Home), env.HookMode, opts)
 		if err != nil {
 			return fmt.Errorf("global hooks: %w", err)
 		}

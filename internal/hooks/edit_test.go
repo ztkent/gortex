@@ -151,7 +151,7 @@ func TestEnrichEdit_ReturnsValidJSONWhenWrappedByDispatcher(t *testing.T) {
 	port := fakeIndexedBridge(t, map[string]bool{"/repo/handler.go": true})
 
 	payload := []byte(`{"hook_event_name":"PreToolUse","tool_name":"Edit","tool_input":{"file_path":"/repo/handler.go"}}`)
-	out := captureStdout(t, func() { runPreToolUse(payload, port) })
+	out := captureStdout(t, func() { runPreToolUse(payload, port, ModeDeny) })
 	if out == "" {
 		t.Fatal("expected JSON output for deny path")
 	}

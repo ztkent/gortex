@@ -135,7 +135,7 @@ func TestPreToolUse_RoutesTask(t *testing.T) {
 	}
 	data, _ := json.Marshal(payload)
 
-	out := captureStdout(t, func() { runPreToolUse(data, port) })
+	out := captureStdout(t, func() { runPreToolUse(data, port, ModeDeny) })
 	if out == "" {
 		t.Fatal("expected hook output for Task")
 	}

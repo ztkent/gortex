@@ -23,6 +23,45 @@ import (
 // tools (gated by GORTEX_HOOK_BLOCK_EDIT in the hook itself).
 const CurrentPreToolUseMatcher = "Read|Grep|Glob|Task|Bash|Edit|Write"
 
+// CurrentPostToolUseMatcher names the tools whose response the
+// PostToolUse hook augments. Only the read-shaped tools have an obvious
+// "enrich this output with graph context" payload — Bash / Edit / Write
+// don't benefit from a post-call graph snapshot, so they're omitted.
+const CurrentPostToolUseMatcher = "Read|Grep|Glob"
+
+// HookModeDeny / HookModeEnrich are the two posture strings the
+// installer accepts. They mirror hooks.Mode without importing it (the
+// claudecode package is a leaf of the agents adapter tree and must stay
+// import-free of hooks).
+const (
+	HookModeDeny   = "deny"
+	HookModeEnrich = "enrich"
+)
+
+// normalizeHookMode maps user input to a canonical mode. Empty or
+// unknown values fall through to deny so existing installs and shell
+// typos preserve the original behavior.
+func normalizeHookMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case HookModeEnrich:
+		return HookModeEnrich
+	default:
+		return HookModeDeny
+	}
+}
+
+// hookCommandWithMode appends `--mode=<mode>` to the base hook command
+// when mode is non-default. The deny mode is the historical default —
+// emitting it bare keeps existing settings.json diffs minimal during an
+// upgrade. Enrich mode is always emitted explicitly so the installed
+// command unambiguously declares its posture.
+func hookCommandWithMode(base, mode string) string {
+	if normalizeHookMode(mode) == HookModeEnrich {
+		return base + " --mode=enrich"
+	}
+	return base
+}
+
 // ResolveHookCommand returns the shell command to bake into Claude
 // Code's hook config. It prefers the `gortex` binary on PATH so
 // installers (brew, `go install`) get a stable absolute path; falls
@@ -220,6 +259,82 @@ func commandInvokesGortexHook(cmd string) bool {
 	return slices.Contains(fields[1:], "hook")
 }
 
+// rewriteGortexHookMode rewrites every Gortex hook entry's command
+// across all events so it matches newCommand. Used when the install
+// posture changes (deny ↔ enrich) — the existing entries already
+// invoke `gortex hook` but with the wrong `--mode=...` suffix; we
+// re-stamp them in place instead of removing + re-adding so user-added
+// fields (timeout, statusMessage) are preserved. Returns the count of
+// rewritten entries.
+func rewriteGortexHookMode(hooks map[string]any, newCommand string) int {
+	rewritten := 0
+	for _, event := range []string{"PreToolUse", "PostToolUse", "PreCompact", "Stop", "SessionStart"} {
+		list, ok := hooks[event].([]any)
+		if !ok {
+			continue
+		}
+		for _, h := range list {
+			hm, ok := h.(map[string]any)
+			if !ok {
+				continue
+			}
+			inner, ok := hm["hooks"].([]any)
+			if !ok {
+				continue
+			}
+			for _, e := range inner {
+				em, ok := e.(map[string]any)
+				if !ok {
+					continue
+				}
+				cmd, _ := em["command"].(string)
+				if !commandInvokesGortexHook(cmd) {
+					continue
+				}
+				if cmd == newCommand {
+					continue
+				}
+				em["command"] = newCommand
+				rewritten++
+			}
+		}
+	}
+	return rewritten
+}
+
+// removeGortexHookEntries drops every entry under hooks[event] that
+// invokes `gortex hook`, preserving entries owned by other tools.
+// Returns the number of entries removed. Used to clean up PostToolUse
+// when the installer switches back from enrich to deny mode.
+func removeGortexHookEntries(hooks map[string]any, event string) int {
+	list, ok := hooks[event].([]any)
+	if !ok {
+		return 0
+	}
+	removed := 0
+	kept := make([]any, 0, len(list))
+	for _, h := range list {
+		hm, ok := h.(map[string]any)
+		if !ok {
+			kept = append(kept, h)
+			continue
+		}
+		if entryInvokesGortexHook(hm) {
+			removed++
+			continue
+		}
+		kept = append(kept, h)
+	}
+	if removed > 0 {
+		if len(kept) == 0 {
+			delete(hooks, event)
+		} else {
+			hooks[event] = kept
+		}
+	}
+	return removed
+}
+
 // hasGortexHookEntry returns true when the given event already has a
 // hook entry that invokes `gortex hook`.
 func hasGortexHookEntry(hooks map[string]any, event string) bool {
@@ -243,12 +358,28 @@ func hasGortexHookEntry(hooks map[string]any, event string) bool {
 // match the current Gortex config" operation. It reads the file,
 // heals stale commands, upgrades old matchers, dedupes repeat
 // entries, then installs any missing Gortex hooks (PreToolUse,
-// PreCompact, Stop). Writes back atomically via the shared helper.
+// PreCompact, Stop, SessionStart, and — in enrich mode — PostToolUse).
+// Writes back atomically via the shared helper.
 //
 // This function intentionally accepts a plain filesystem path
 // rather than an Env — the same helper is used for project-level
 // (.claude/settings.local.json) and user-level (~/.claude/…) files.
+//
+// Delegates to InstallHookWithMode with the deny posture for callers
+// that don't care about hook mode (mostly tests and back-compat paths).
 func InstallHook(w io.Writer, settingsPath string, opts agents.ApplyOpts) (agents.FileAction, error) {
+	return InstallHookWithMode(w, settingsPath, HookModeDeny, opts)
+}
+
+// InstallHookWithMode is the mode-aware variant. mode is one of
+// HookModeDeny (default — install PreToolUse with deny behavior, no
+// PostToolUse) or HookModeEnrich (install PreToolUse in soft-context
+// mode plus a PostToolUse entry that augments tool output with graph
+// context). Switching modes between installs rewrites the existing
+// Gortex hook command in place and adds or removes the PostToolUse
+// entry to match.
+func InstallHookWithMode(w io.Writer, settingsPath string, mode string, opts agents.ApplyOpts) (agents.FileAction, error) {
+	mode = normalizeHookMode(mode)
 	var settings map[string]any
 	existed := false
 	if data, err := os.ReadFile(settingsPath); err == nil {
@@ -262,7 +393,8 @@ func InstallHook(w io.Writer, settingsPath string, opts agents.ApplyOpts) (agent
 		settings = make(map[string]any)
 	}
 
-	hookCommand := ResolveHookCommand(w)
+	baseCommand := ResolveHookCommand(w)
+	hookCommand := hookCommandWithMode(baseCommand, mode)
 
 	if _, ok := settings["hooks"]; !ok {
 		settings["hooks"] = make(map[string]any)
@@ -271,15 +403,26 @@ func InstallHook(w io.Writer, settingsPath string, opts agents.ApplyOpts) (agent
 
 	healedCount := healStaleHookCommands(hooks, hookCommand)
 	matcherUpgraded := upgradeGortexMatcher(hooks)
+	modeRewriteCount := rewriteGortexHookMode(hooks, hookCommand)
 	dedupedCount := dedupGortexEntries(hooks, "PreToolUse") +
 		dedupGortexEntries(hooks, "PreCompact") +
+		dedupGortexEntries(hooks, "PostToolUse") +
 		dedupGortexEntries(hooks, "Stop") +
 		dedupGortexEntries(hooks, "SessionStart")
+
+	// PostToolUse is only present when mode=enrich. Removing it on a
+	// switch back to deny keeps settings.json clean — agents won't
+	// fire a no-op hook on every Read/Grep response.
+	postToolUseRemoved := 0
+	if mode == HookModeDeny {
+		postToolUseRemoved = removeGortexHookEntries(hooks, "PostToolUse")
+	}
 
 	preToolUseInstalled := hasGortexHookEntry(hooks, "PreToolUse")
 	preCompactInstalled := hasGortexHookEntry(hooks, "PreCompact")
 	stopInstalled := hasGortexHookEntry(hooks, "Stop")
 	sessionStartInstalled := hasGortexHookEntry(hooks, "SessionStart")
+	postToolUseInstalled := hasGortexHookEntry(hooks, "PostToolUse")
 
 	if !preToolUseInstalled {
 		appendHookEntry(hooks, "PreToolUse", map[string]any{
@@ -334,9 +477,30 @@ func InstallHook(w io.Writer, settingsPath string, opts agents.ApplyOpts) (agent
 			},
 		})
 	}
+	// PostToolUse is only installed in enrich mode. It augments
+	// Grep / Glob / Read responses with graph context (enclosing
+	// symbols, file footprints) so the agent sees the graph value
+	// adjacent to the raw output instead of via a deny redirect.
+	postToolUseAdded := false
+	if mode == HookModeEnrich && !postToolUseInstalled {
+		appendHookEntry(hooks, "PostToolUse", map[string]any{
+			"matcher": CurrentPostToolUseMatcher,
+			"hooks": []any{
+				map[string]any{
+					"type":          "command",
+					"command":       hookCommand,
+					"timeout":       3000,
+					"statusMessage": "Layering Gortex graph context onto tool output...",
+				},
+			},
+		})
+		postToolUseAdded = true
+	}
 
-	allPresent := preToolUseInstalled && preCompactInstalled && stopInstalled && sessionStartInstalled
-	noChanges := allPresent && !matcherUpgraded && dedupedCount == 0 && healedCount == 0
+	allPresent := preToolUseInstalled && preCompactInstalled && stopInstalled && sessionStartInstalled &&
+		(mode != HookModeEnrich || postToolUseInstalled)
+	noChanges := allPresent && !matcherUpgraded && dedupedCount == 0 && healedCount == 0 &&
+		modeRewriteCount == 0 && postToolUseRemoved == 0 && !postToolUseAdded
 	if noChanges {
 		if w != nil {
 			_, _ = fmt.Fprintf(w, "[gortex init] all hooks already present in %s\n", settingsPath)
@@ -383,6 +547,15 @@ func InstallHook(w io.Writer, settingsPath string, opts agents.ApplyOpts) (agent
 	}
 	if !sessionStartInstalled {
 		changes = append(changes, "installed SessionStart")
+	}
+	if postToolUseAdded {
+		changes = append(changes, "installed PostToolUse (enrich mode)")
+	}
+	if postToolUseRemoved > 0 {
+		changes = append(changes, "removed PostToolUse (switched to deny mode)")
+	}
+	if modeRewriteCount > 0 {
+		changes = append(changes, fmt.Sprintf("rewrote %d hook command(s) for mode=%s", modeRewriteCount, mode))
 	}
 	if w != nil {
 		_, _ = fmt.Fprintf(w, "[gortex init] %s in %s\n", strings.Join(changes, ", "), settingsPath)

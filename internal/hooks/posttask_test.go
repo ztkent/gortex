@@ -144,5 +144,5 @@ func TestDispatch_RoutesStop(t *testing.T) {
 // runFromBytes feeds raw bytes into Run() by temporarily swapping stdin.
 func runFromBytes(t *testing.T, data []byte, port int) {
 	t.Helper()
-	withStdin(t, data, func() { Run(port) })
+	withStdin(t, data, func() { Run(port, ModeDeny) })
 }

@@ -198,7 +198,7 @@ func TestDispatch_RoutesSessionStart(t *testing.T) {
 
 	data := []byte(`{"hook_event_name":"SessionStart","cwd":"/tmp"}`)
 	withStdin(t, data, func() {
-		out := captureStdout(t, func() { Run(0) })
+		out := captureStdout(t, func() { Run(0, ModeDeny) })
 		if !strings.Contains(out, "Gortex Session Orientation") {
 			t.Errorf("Run did not route SessionStart:\n%s", out)
 		}

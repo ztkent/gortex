@@ -99,7 +99,7 @@ func TestDispatch_RoutesPreCompact(t *testing.T) {
 	}()
 	os.Stdin = r
 
-	out := captureStdout(t, func() { Run(port) })
+	out := captureStdout(t, func() { Run(port, ModeDeny) })
 	if !strings.Contains(out, "Gortex PreCompact Snapshot") {
 		t.Errorf("Run did not route to PreCompact handler:\n%s", out)
 	}
@@ -120,7 +120,7 @@ func TestDispatch_UnknownEventSilent(t *testing.T) {
 	}()
 	os.Stdin = r
 
-	out := captureStdout(t, func() { Run(1) })
+	out := captureStdout(t, func() { Run(1, ModeDeny) })
 	if out != "" {
 		t.Errorf("expected silent no-op for unknown event, got: %q", out)
 	}

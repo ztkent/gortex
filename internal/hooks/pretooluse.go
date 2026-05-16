@@ -43,20 +43,24 @@ type enrichResult struct {
 	reason  string
 }
 
-// RunPreToolUse reads a PreToolUse hook payload from stdin and handles it.
-// Kept as a public entry point for backward compatibility; new callers should
-// use Run which dispatches based on hook_event_name.
+// RunPreToolUse reads a PreToolUse hook payload from stdin and handles it
+// in the legacy deny posture. Kept as a public entry point for
+// backward compatibility; new callers should use Run which dispatches
+// based on hook_event_name and respects the configured Mode.
 func RunPreToolUse(gortexPort int) {
 	data, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		return
 	}
-	runPreToolUse(data, gortexPort)
+	runPreToolUse(data, gortexPort, ModeDeny)
 }
 
 // runPreToolUse is the bytes-accepting helper used by both RunPreToolUse and
-// the generic Run dispatcher.
-func runPreToolUse(data []byte, gortexPort int) {
+// the generic Run dispatcher. In ModeEnrich the deny branch is downgraded
+// to an additionalContext message — the agent is informed about the graph
+// alternative but the original call still runs and PostToolUse can layer
+// graph context on the actual output.
+func runPreToolUse(data []byte, gortexPort int, mode Mode) {
 	var input HookInput
 	if err := json.Unmarshal(data, &input); err != nil {
 		return
@@ -67,6 +71,20 @@ func runPreToolUse(data []byte, gortexPort int) {
 	}
 
 	result := enrich(input, gortexPort)
+
+	// In enrich mode no PreToolUse call is ever denied. The agent
+	// keeps making whatever tool call it intended; the deny rationale
+	// becomes a soft tip surfaced via additionalContext, and the
+	// actual graph value lands in the PostToolUse handler that sees
+	// the tool's response.
+	if mode == ModeEnrich && result.deny {
+		downgraded := result.reason
+		if downgraded == "" {
+			downgraded = result.context
+		}
+		result = enrichResult{context: downgraded}
+	}
+
 	if result.context == "" && !result.deny {
 		return
 	}
