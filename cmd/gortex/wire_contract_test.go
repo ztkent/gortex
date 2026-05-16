@@ -140,7 +140,11 @@ func wireContractGolden(name string) string {
 		// from config.
 		return "5783f7ad776535db819402df2b60328dcb8f813d8999b97554e6a484d25db792"
 	case "graph.Edge":
-		return "6a543f0f3f663587fc6011ab641bbd91fe66bfc70f87fe548974411e89e871de"
+		// Bumped when Tier was added — the coarse provenance label
+		// (ast / lsp / heuristic) derived from Origin and surfaced to
+		// agents. Additive: gob decodes older snapshots with Tier blank,
+		// and the enrich passes restamp it on next response.
+		return "954c994407f745b921ace19ab999d620f2e1aa071d177722a176f635ae7746dc"
 	case "snapshotHeader":
 		// Bumped when ContractCount was added (additive — gob decodes
 		// unknown fields as zero, so older snapshots still load with

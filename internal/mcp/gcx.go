@@ -314,7 +314,7 @@ func encodeBatchSymbols(rows []map[string]any, includeSource bool) ([]byte, erro
 func encodeFindUsages(sg *query.SubGraph) ([]byte, error) {
 	var buf bytes.Buffer
 	enc := newGCX(&buf, "find_usages",
-		[]string{"from", "to", "edge_kind", "origin", "confidence", "from_name", "from_path", "from_line", "from_is_test", "from_test_role"},
+		[]string{"from", "to", "edge_kind", "origin", "tier", "confidence", "from_name", "from_path", "from_line", "from_is_test", "from_test_role"},
 		"edges", fmt.Sprintf("%d", len(sg.Edges)),
 	)
 	nodeIdx := indexNodes(sg.Nodes)
@@ -327,8 +327,12 @@ func encodeFindUsages(sg *query.SubGraph) ([]byte, error) {
 			fpath = fn.FilePath
 			fline = fn.StartLine
 		}
+		tier := e.Tier
+		if tier == "" {
+			tier = graph.ResolvedBy(e.Origin)
+		}
 		if err := enc.WriteRow(
-			e.From, e.To, string(e.Kind), e.Origin, e.Confidence,
+			e.From, e.To, string(e.Kind), e.Origin, tier, e.Confidence,
 			fname, fpath, fline, nodeIsTest(fn), nodeTestRole(fn),
 		); err != nil {
 			return nil, err
@@ -363,7 +367,7 @@ func encodeSubGraph(tool string, sg *query.SubGraph) ([]byte, error) {
 		return nil, err
 	}
 	edgeEnc := newGCX(&buf, tool+".edges",
-		[]string{"from", "to", "kind", "origin", "confidence", "label"},
+		[]string{"from", "to", "kind", "origin", "tier", "confidence", "label"},
 		"count", fmt.Sprintf("%d", len(sg.Edges)),
 	)
 	for _, e := range sg.Edges {
@@ -371,7 +375,11 @@ func encodeSubGraph(tool string, sg *query.SubGraph) ([]byte, error) {
 		if label == "" {
 			label = graph.ConfidenceLabelFor(e.Kind, e.Confidence)
 		}
-		if err := edgeEnc.WriteRow(e.From, e.To, string(e.Kind), e.Origin, e.Confidence, label); err != nil {
+		tier := e.Tier
+		if tier == "" {
+			tier = graph.ResolvedBy(e.Origin)
+		}
+		if err := edgeEnc.WriteRow(e.From, e.To, string(e.Kind), e.Origin, tier, e.Confidence, label); err != nil {
 			return nil, err
 		}
 	}

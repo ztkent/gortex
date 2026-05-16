@@ -91,3 +91,66 @@ func TestMinTier_EmptyTierIsNoOp(t *testing.T) {
 	assert.Equal(t, len(sgOmitted.Edges), len(sgEmpty.Edges),
 		"empty min_tier must match omitting the param")
 }
+
+// TestTier_SurfacedOnFindUsages asserts that every edge returned by
+// find_usages carries the coarse Tier label (ast / lsp / heuristic) in
+// addition to the raw Origin tier. N1 contract: agents must be able to
+// filter or group by tier without recomputing the Origin → tier mapping.
+func TestTier_SurfacedOnFindUsages(t *testing.T) {
+	srv, _ := setupTestServer(t)
+
+	result := callTool(t, srv, "find_usages", map[string]any{"id": "main.go::helper"})
+	require.False(t, result.IsError)
+
+	var sg query.SubGraph
+	require.NoError(t, json.Unmarshal([]byte(result.Content[0].(mcplib.TextContent).Text), &sg))
+	require.Greater(t, len(sg.Edges), 0)
+
+	validTiers := []string{"lsp", "ast", "heuristic"}
+	for _, e := range sg.Edges {
+		assert.NotEmpty(t, e.Tier, "edge %s→%s must carry Tier", e.From, e.To)
+		assert.Contains(t, validTiers, e.Tier, "tier must be one of lsp/ast/heuristic")
+		assert.Equal(t, graph.ResolvedBy(e.Origin), e.Tier,
+			"tier must equal ResolvedBy(origin) for edge %s→%s", e.From, e.To)
+	}
+}
+
+// TestTier_SurfacedOnGetCallers asserts that get_callers also stamps the
+// coarse Tier label on every edge.
+func TestTier_SurfacedOnGetCallers(t *testing.T) {
+	srv, _ := setupTestServer(t)
+
+	result := callTool(t, srv, "get_callers", map[string]any{"id": "main.go::helper"})
+	require.False(t, result.IsError)
+
+	var sg query.SubGraph
+	require.NoError(t, json.Unmarshal([]byte(result.Content[0].(mcplib.TextContent).Text), &sg))
+	require.Greater(t, len(sg.Edges), 0)
+
+	for _, e := range sg.Edges {
+		assert.NotEmpty(t, e.Tier, "edge %s→%s must carry Tier", e.From, e.To)
+		assert.Equal(t, graph.ResolvedBy(e.Origin), e.Tier,
+			"tier must equal ResolvedBy(origin) for edge %s→%s", e.From, e.To)
+	}
+}
+
+// TestTier_GCXEncoderEmitsTierColumn asserts that the GCX1 wire format
+// for find_usages and get_callers (encodeSubGraph) includes the new
+// `tier` column in the header. Round-trip clients (gcx-go / gcx-ts)
+// rely on the header to know which fields to decode.
+func TestTier_GCXEncoderEmitsTierColumn(t *testing.T) {
+	srv, _ := setupTestServer(t)
+
+	for _, tool := range []string{"find_usages", "get_callers"} {
+		t.Run(tool, func(t *testing.T) {
+			result := callTool(t, srv, tool, map[string]any{
+				"id":     "main.go::helper",
+				"format": "gcx",
+			})
+			require.False(t, result.IsError)
+			text := result.Content[0].(mcplib.TextContent).Text
+			assert.Contains(t, text, "tier",
+				"%s GCX output must include a tier column", tool)
+		})
+	}
+}

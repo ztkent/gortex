@@ -71,6 +71,8 @@ type toonEdgeRow struct {
 	From       string  `toon:"from"`
 	To         string  `toon:"to"`
 	Kind       string  `toon:"kind"`
+	Origin     string  `toon:"origin,omitempty"`
+	Tier       string  `toon:"tier,omitempty"`
 	Confidence float64 `toon:"confidence"`
 	Label      string  `toon:"label"`
 }
@@ -234,10 +236,16 @@ func subGraphToTOON(sg *query.SubGraph) (*mcp.CallToolResult, error) {
 		if label == "" {
 			label = graph.ConfidenceLabelFor(e.Kind, e.Confidence)
 		}
+		tier := e.Tier
+		if tier == "" {
+			tier = graph.ResolvedBy(e.Origin)
+		}
 		edgeRows = append(edgeRows, toonEdgeRow{
 			From:       e.From,
 			To:         e.To,
 			Kind:       string(e.Kind),
+			Origin:     e.Origin,
+			Tier:       tier,
 			Confidence: e.Confidence,
 			Label:      label,
 		})
@@ -499,9 +507,11 @@ func qualifiedName(n *graph.Node) string {
 	return n.Name
 }
 
-// enrichSubGraphEdges populates ConfidenceLabel and Origin on every edge in
-// a SubGraph. Origin is backfilled from kind + confidence + semantic_source
-// meta when unset so clients see a tier on every edge.
+// enrichSubGraphEdges populates ConfidenceLabel, Origin, and Tier on every
+// edge in a SubGraph. Origin is backfilled from kind + confidence +
+// semantic_source meta when unset; Tier is the coarse (ast / lsp /
+// heuristic) provenance label derived from Origin so clients can filter
+// or group without recomputing the mapping.
 func enrichSubGraphEdges(sg *query.SubGraph) {
 	for _, e := range sg.Edges {
 		e.ConfidenceLabel = graph.ConfidenceLabelFor(e.Kind, e.Confidence)
@@ -509,6 +519,7 @@ func enrichSubGraphEdges(sg *query.SubGraph) {
 			src, _ := e.Meta["semantic_source"].(string)
 			e.Origin = graph.DefaultOriginFor(e.Kind, e.Confidence, src)
 		}
+		e.Tier = graph.ResolvedBy(e.Origin)
 	}
 }
 

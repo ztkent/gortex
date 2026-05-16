@@ -51,14 +51,16 @@ const DefaultMaxDepth = 8
 // the most plausible paths first.
 const DefaultMaxPaths = 10
 
-// EdgeStep is one hop along a flow path. It carries the edge kind
-// and origin so the caller can distinguish a strong intra-procedural
-// chain from a heuristic inter-procedural binding.
+// EdgeStep is one hop along a flow path. It carries the edge kind,
+// origin tier, and coarse tier label so the caller can distinguish a
+// strong intra-procedural chain from a heuristic inter-procedural
+// binding without recomputing the origin → tier mapping.
 type EdgeStep struct {
 	From   string `json:"from"`
 	To     string `json:"to"`
 	Kind   string `json:"kind"`
 	Origin string `json:"origin,omitempty"`
+	Tier   string `json:"tier,omitempty"`
 }
 
 // Path is an ordered sequence of edge hops from a source node to
@@ -101,6 +103,16 @@ func IsDataflowKind(k graph.EdgeKind) bool {
 //
 // maxDepth and maxPaths are clamped to safe defaults when zero.
 func (e *Engine) FlowBetween(sourceID, sinkID string, maxDepth, maxPaths int) []Path {
+	return e.FlowBetweenWithTier(sourceID, sinkID, maxDepth, maxPaths, "")
+}
+
+// FlowBetweenWithTier is FlowBetween with an additional provenance
+// filter: edges whose backfilled Origin tier ranks below minTier are
+// skipped during traversal, pruning entire branches that cannot
+// produce a fully-resolved path. Empty minTier disables the filter
+// (identical to FlowBetween). The per-step Tier label is stamped on
+// every retained EdgeStep so callers do not need to recompute it.
+func (e *Engine) FlowBetweenWithTier(sourceID, sinkID string, maxDepth, maxPaths int, minTier string) []Path {
 	if e == nil || e.g == nil || sourceID == "" || sinkID == "" {
 		return nil
 	}
@@ -142,7 +154,17 @@ func (e *Engine) FlowBetween(sourceID, sinkID string, maxDepth, maxPaths int) []
 			if visited[ed.To] {
 				continue
 			}
-			step := EdgeStep{From: ed.From, To: ed.To, Kind: string(ed.Kind), Origin: ed.Origin}
+			origin := edgeOrigin(ed)
+			if minTier != "" && !graph.MeetsMinTier(origin, minTier) {
+				continue
+			}
+			step := EdgeStep{
+				From:   ed.From,
+				To:     ed.To,
+				Kind:   string(ed.Kind),
+				Origin: origin,
+				Tier:   graph.ResolvedBy(origin),
+			}
 			if ed.To == sinkID {
 				ids := append([]string(nil), stack...)
 				ids = append(ids, ed.To)
@@ -174,6 +196,18 @@ func (e *Engine) FlowBetween(sourceID, sinkID string, maxDepth, maxPaths int) []
 		paths = paths[:maxPaths]
 	}
 	return paths
+}
+
+// edgeOrigin returns the stamped Origin on an edge, falling back to
+// DefaultOriginFor when the field is empty so back-compat graphs
+// (produced before Origin was a first-class field) still classify
+// cleanly for filtering and tier surfacing.
+func edgeOrigin(e *graph.Edge) string {
+	if e.Origin != "" {
+		return e.Origin
+	}
+	src, _ := e.Meta["semantic_source"].(string)
+	return graph.DefaultOriginFor(e.Kind, e.Confidence, src)
 }
 
 // rankPaths sorts in-place by length asc, then by confidence desc.
@@ -404,6 +438,13 @@ type TaintFinding struct {
 // that lands in any argument of DBQuery", not the function
 // itself (which has no incoming dataflow).
 func (e *Engine) TaintPaths(sourcePattern, sinkPattern TaintPattern, maxDepth, limit int) []TaintFinding {
+	return e.TaintPathsWithTier(sourcePattern, sinkPattern, maxDepth, limit, "")
+}
+
+// TaintPathsWithTier is TaintPaths with the same per-edge provenance
+// filter as FlowBetweenWithTier; empty minTier preserves the legacy
+// behavior.
+func (e *Engine) TaintPathsWithTier(sourcePattern, sinkPattern TaintPattern, maxDepth, limit int, minTier string) []TaintFinding {
 	if e == nil || e.g == nil {
 		return nil
 	}
@@ -425,7 +466,7 @@ func (e *Engine) TaintPaths(sourcePattern, sinkPattern TaintPattern, maxDepth, l
 			if src.ID == sink.ID {
 				continue
 			}
-			paths := e.FlowBetween(src.ID, sink.ID, maxDepth, DefaultMaxPaths)
+			paths := e.FlowBetweenWithTier(src.ID, sink.ID, maxDepth, DefaultMaxPaths, minTier)
 			if len(paths) == 0 {
 				continue
 			}

@@ -409,7 +409,13 @@ type Edge struct {
 	Confidence      float64 `json:"-"`
 	ConfidenceLabel string  `json:"confidence_label,omitempty"`
 	Origin          string  `json:"origin,omitempty"`
-	CrossRepo       bool    `json:"cross_repo,omitempty"`
+	// Tier is the coarse provenance label derived from Origin
+	// (ast / lsp / heuristic). It is the agent-facing summary used by
+	// retrieval UIs and competitor-parity columns (tokensave's
+	// edges.resolved_by). Populated by enrichSubGraphEdges and the
+	// dataflow encoders; empty by default on the in-memory edge.
+	Tier      string `json:"tier,omitempty"`
+	CrossRepo bool   `json:"cross_repo,omitempty"`
 	// Meta is intentionally excluded from JSON. It holds internal
 	// instrumentation (semantic_source, provider hints, etc.) that agents
 	// don't consume but that adds measurable bytes to every edge in
