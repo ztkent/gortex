@@ -511,7 +511,23 @@ func (r *Resolver) resolveEdge(e *graph.Edge, stats *ResolveStats) (oldTo string
 		if e.Kind == graph.EdgeInstantiates || e.Kind == graph.EdgeReferences {
 			r.resolveTypeOrFunc(e, target, stats)
 		} else {
+			before := e.To
 			r.resolveFunctionCall(e, target, stats)
+			// Promote EdgeReads → EdgeReferences when the resolved
+			// target is a function or method. The extractor emits
+			// EdgeReads for "bare identifier as value" (e.g. a cobra
+			// command's `RunE: runClean` or `&Command{RunE: runFoo}`),
+			// because at parse time it can't tell a function pointer
+			// from a variable read. Now that we know the target is a
+			// function, treat it as a reference so get_callers /
+			// find_usages surface the wire-up site. Without this,
+			// every CLI-wired command and command-table entry looks
+			// like dead code.
+			if e.Kind == graph.EdgeReads && e.To != before {
+				if n := r.graph.GetNode(e.To); n != nil && (n.Kind == graph.KindFunction || n.Kind == graph.KindMethod) {
+					e.Kind = graph.EdgeReferences
+				}
+			}
 		}
 	}
 

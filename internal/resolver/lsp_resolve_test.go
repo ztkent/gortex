@@ -311,6 +311,46 @@ func TestLSPHotPath_MethodValueReadPromotesToReferences(t *testing.T) {
 		"LSP-bound EdgeReads on a KindMethod must be promoted so get_callers surfaces it")
 }
 
+// TestLSPHotPath_FunctionValueReadPromotesToReferences — companion
+// to the method-value test above. The cobra/CLI pattern
+// `&cobra.Command{RunE: runClean}` emits EdgeReads with To=
+// "unresolved::runClean", and the LSP helper happily binds it to
+// the runClean function. Without promotion the wire-up site is
+// invisible to get_callers, so every cobra subcommand looked dead.
+func TestLSPHotPath_FunctionValueReadPromotesToReferences(t *testing.T) {
+	g := graph.New()
+	g.AddNode(&graph.Node{ID: "cmd/x/main.go", Kind: graph.KindFile, Name: "main.go", FilePath: "cmd/x/main.go", Language: "go"})
+	g.AddNode(&graph.Node{ID: "cmd/x/clean.go", Kind: graph.KindFile, Name: "clean.go", FilePath: "cmd/x/clean.go", Language: "go"})
+	g.AddNode(&graph.Node{ID: "cmd/x/main.go::init", Kind: graph.KindFunction, Name: "init", FilePath: "cmd/x/main.go", Language: "go"})
+	g.AddNode(&graph.Node{
+		ID: "cmd/x/clean.go::runClean", Kind: graph.KindFunction, Name: "runClean",
+		FilePath: "cmd/x/clean.go", StartLine: 20, EndLine: 30, Language: "go",
+	})
+
+	readEdge := &graph.Edge{
+		From: "cmd/x/main.go::init", To: "unresolved::runClean",
+		Kind: graph.EdgeReads, FilePath: "cmd/x/main.go", Line: 13,
+	}
+	g.AddEdge(readEdge)
+
+	helper := &fakeLSPHelper{
+		exts: []string{".go"},
+		defs: map[lspKey]lspAnswer{
+			{path: "cmd/x/main.go", line: 13, name: "runClean"}: {defPath: "cmd/x/clean.go", defLine: 20},
+		},
+	}
+
+	r := New(g)
+	r.SetLSPHelper(helper)
+	stats := r.ResolveAll()
+
+	require.Equal(t, 1, stats.Resolved)
+	assert.Equal(t, "cmd/x/clean.go::runClean", readEdge.To)
+	assert.Equal(t, graph.OriginLSPResolved, readEdge.Origin)
+	assert.Equal(t, graph.EdgeReferences, readEdge.Kind,
+		"LSP-bound EdgeReads on a KindFunction must promote to References")
+}
+
 // TestLSPHotPath_NilHelper — when no helper is installed, the
 // resolver runs heuristic-only as in the pre-N5 world.
 func TestLSPHotPath_NilHelper(t *testing.T) {

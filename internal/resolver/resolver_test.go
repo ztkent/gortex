@@ -398,6 +398,40 @@ func TestResolveAll_MethodValuePromotesReadToReferences(t *testing.T) {
 		"kind should be promoted Reads→References so get_callers/find_usages surface it")
 }
 
+// Regression: a *bare* function name passed as a value (e.g.
+// `&cobra.Command{RunE: runClean}`) is extracted as EdgeReads with
+// To=`unresolved::runClean`. The heuristic default case calls
+// resolveFunctionCall which lands on the function — but until the
+// promotion was added the kind stayed as EdgeReads, hiding the
+// wire-up site from get_callers / find_usages. Every cobra subcommand
+// (and every other "function pointer as struct field" pattern)
+// looked like dead code.
+func TestResolveAll_BareFunctionValuePromotesReadToReferences(t *testing.T) {
+	g := graph.New()
+	g.AddNode(&graph.Node{
+		ID: "cmd/x/main.go::registerClean", Kind: graph.KindFunction, Name: "registerClean",
+		FilePath: "cmd/x/main.go", Language: "go",
+	})
+	g.AddNode(&graph.Node{
+		ID: "cmd/x/clean.go::runClean", Kind: graph.KindFunction, Name: "runClean",
+		FilePath: "cmd/x/clean.go", Language: "go",
+	})
+
+	edge := &graph.Edge{
+		From: "cmd/x/main.go::registerClean", To: "unresolved::runClean",
+		Kind: graph.EdgeReads, FilePath: "cmd/x/main.go", Line: 7,
+	}
+	g.AddEdge(edge)
+
+	r := New(g)
+	stats := r.ResolveAll()
+
+	assert.Equal(t, 1, stats.Resolved, "bare function-value reference should resolve")
+	assert.Equal(t, "cmd/x/clean.go::runClean", edge.To, "edge should point at the function")
+	assert.Equal(t, graph.EdgeReferences, edge.Kind,
+		"kind should be promoted Reads→References so get_callers/find_usages surface the wire-up site")
+}
+
 // Regression guard: a *real* field read should stay as EdgeReads even after
 // the method-value promotion path was added. We add a struct field named
 // `count` and a same-named method on a different type, and make sure the
