@@ -202,7 +202,7 @@ func FindDeadCode(g *graph.Graph, processes *ProcessResult, excludePatterns []st
 		if isTestFilePath(n.FilePath) {
 			continue
 		}
-		if isExportedSymbol(n.Name, n.Language) {
+		if isExportedSymbol(n.Name, n.Language) && !isPackagePrivateByConvention(n.FilePath, n.Language) {
 			continue
 		}
 		if matchesExcludePattern(n.FilePath, n.ID, excludePatterns) {
@@ -434,6 +434,28 @@ func isTestFilePath(path string) bool {
 		strings.Contains(base, ".spec.") ||
 		strings.HasPrefix(base, "test_") ||
 		strings.Contains(path, "__tests__/")
+}
+
+// isPackagePrivateByConvention reports whether a file lives inside a
+// directory the language's tooling treats as package-private regardless of
+// individual symbol capitalisation. The dead-code analyzer uses this to
+// override the "skip all exported symbols" rule: a function inside
+// `gortex/internal/parser/tsitter/` named `Test` is *visible only to other
+// gortex packages*, so if no caller exists in the indexed graph it really
+// is dead — there's nowhere else it could be called from.
+//
+// Currently handles Go's `/internal/` convention (compiler-enforced since
+// Go 1.4). Add other languages as their tooling acquires similar
+// hard-bounded visibility rules.
+func isPackagePrivateByConvention(filePath, lang string) bool {
+	if lang != "go" {
+		return false
+	}
+	// Match the path component "internal" anywhere in the path — Go's rule
+	// is that anything inside an `internal/` directory is only importable
+	// from its enclosing tree.
+	return strings.Contains(filePath, "/internal/") ||
+		strings.HasPrefix(filePath, "internal/")
 }
 
 // isExportedSymbol checks if a symbol name is exported (public API).

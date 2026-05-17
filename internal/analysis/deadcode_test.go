@@ -818,3 +818,54 @@ func TestDeadCode_ExpandedBuildConstraints(t *testing.T) {
 	result := FindDeadCode(g, nil, nil)
 	assert.Empty(t, result, "symbols in build-constrained files should be excluded")
 }
+
+// Regression: exported symbols inside `internal/` directories are
+// package-private by Go's import rules — the compiler refuses to let
+// external packages import them. So if the indexed graph has no caller,
+// they're genuinely dead. The pre-fix behaviour was to skip every
+// exported name unconditionally, silently hiding dead code anywhere a
+// project used Go's `internal/` convention.
+func TestDeadCode_ExportedInsideInternalIsSurfaced(t *testing.T) {
+	g := graph.New()
+
+	// Exported (capitalised) method inside `internal/` with zero callers.
+	// Real-world case: `func (b *Node) Test() bool` in
+	// gortex/internal/parser/tsitter/tsitter.go — used by the user as a
+	// dead-code-detection probe and expected to show up.
+	g.AddNode(&graph.Node{
+		ID: "gortex/internal/parser/tsitter/tsitter.go::Node.Test",
+		Kind: graph.KindMethod, Name: "Test",
+		FilePath: "gortex/internal/parser/tsitter/tsitter.go",
+		StartLine: 85, EndLine: 85, Language: "go",
+		Meta: map[string]any{"receiver": "Node"},
+	})
+
+	// Also: an exported function that's NOT inside internal/. Must still
+	// be excluded (the user's public-API code).
+	g.AddNode(&graph.Node{
+		ID: "pkg/gortex/api.go::DoThing", Kind: graph.KindFunction,
+		Name: "DoThing", FilePath: "pkg/gortex/api.go",
+		StartLine: 10, EndLine: 12, Language: "go",
+	})
+
+	// And an unexported function inside internal/ — pre-fix this was
+	// already surfaced; the new code path must not regress that.
+	g.AddNode(&graph.Node{
+		ID: "gortex/internal/helpers.go::helper", Kind: graph.KindFunction,
+		Name: "helper", FilePath: "gortex/internal/helpers.go",
+		StartLine: 5, EndLine: 7, Language: "go",
+	})
+
+	result := FindDeadCode(g, nil, nil)
+	ids := make(map[string]bool)
+	for _, e := range result {
+		ids[e.ID] = true
+	}
+
+	assert.True(t, ids["gortex/internal/parser/tsitter/tsitter.go::Node.Test"],
+		"exported method inside internal/ with zero callers must be surfaced as dead code")
+	assert.False(t, ids["pkg/gortex/api.go::DoThing"],
+		"exported function outside internal/ stays excluded — could be called externally")
+	assert.True(t, ids["gortex/internal/helpers.go::helper"],
+		"unexported function inside internal/ stays surfaced (no regression)")
+}
