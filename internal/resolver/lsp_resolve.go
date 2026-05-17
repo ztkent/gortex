@@ -78,6 +78,20 @@ func (r *Resolver) tryResolveViaLSP(e *graph.Edge, target string, stats *Resolve
 	}
 	e.Meta["resolved_by"] = "lsp"
 
+	// Mirror the heuristic-path promotion in resolver.go: when an
+	// EdgeReads target resolves to a method (h.foo passed as a func
+	// value, not invoked), promote to EdgeReferences so get_callers
+	// and find_usages surface the reference. Without this, every
+	// routing-style codebase (HTTP handlers, command tables, callback
+	// maps) silently looks like its handlers have zero callers — the
+	// LSP hot path was binding them but leaving the EdgeReads kind,
+	// which the query allowlist drops. Writes stay as EdgeWrites:
+	// assigning a func value to a method-typed field slot is still a
+	// write semantically.
+	if e.Kind == graph.EdgeReads && node.Kind == graph.KindMethod {
+		e.Kind = graph.EdgeReferences
+	}
+
 	// Multi-repo tracking: if the resolved node lives in a
 	// different repo than the caller, mark CrossRepo so the
 	// downstream cross-repo materialisation pass picks it up.

@@ -268,6 +268,49 @@ func TestLSPHotPath_MethodSelector(t *testing.T) {
 	assert.Equal(t, "lsp", callEdge.Meta["resolved_by"])
 }
 
+// TestLSPHotPath_MethodValueReadPromotesToReferences — when the LSP
+// helper binds an EdgeReads to a KindMethod (the `mux.HandleFunc("/p",
+// h.foo)` shape where h.foo is passed as a method value), the kind
+// must be promoted to EdgeReferences. The heuristic cascade already
+// does this in resolver.go's `*. + Reads/Writes` case; the LSP hot
+// path used to short-circuit before that branch ran and silently
+// leave the kind as EdgeReads — which GetCallers/FindUsages drop
+// (they only follow Calls/Matches/References). Every HTTP handler in
+// every router-style codebase looked like dead code as a result.
+func TestLSPHotPath_MethodValueReadPromotesToReferences(t *testing.T) {
+	g := graph.New()
+	g.AddNode(&graph.Node{ID: "src/routes.go", Kind: graph.KindFile, Name: "routes.go", FilePath: "src/routes.go", Language: "go"})
+	g.AddNode(&graph.Node{ID: "src/handler.go", Kind: graph.KindFile, Name: "handler.go", FilePath: "src/handler.go", Language: "go"})
+	g.AddNode(&graph.Node{ID: "src/routes.go::RegisterRoutes", Kind: graph.KindFunction, Name: "RegisterRoutes", FilePath: "src/routes.go", Language: "go"})
+	g.AddNode(&graph.Node{
+		ID: "src/handler.go::Handler.HandleHealth", Kind: graph.KindMethod, Name: "HandleHealth",
+		FilePath: "src/handler.go", StartLine: 42, EndLine: 45, Language: "go",
+	})
+
+	readEdge := &graph.Edge{
+		From: "src/routes.go::RegisterRoutes", To: "unresolved::*.HandleHealth",
+		Kind: graph.EdgeReads, FilePath: "src/routes.go", Line: 10,
+	}
+	g.AddEdge(readEdge)
+
+	helper := &fakeLSPHelper{
+		exts: []string{".go"},
+		defs: map[lspKey]lspAnswer{
+			{path: "src/routes.go", line: 10, name: "HandleHealth"}: {defPath: "src/handler.go", defLine: 42},
+		},
+	}
+
+	r := New(g)
+	r.SetLSPHelper(helper)
+	stats := r.ResolveAll()
+
+	require.Equal(t, 1, stats.Resolved)
+	assert.Equal(t, "src/handler.go::Handler.HandleHealth", readEdge.To)
+	assert.Equal(t, graph.OriginLSPResolved, readEdge.Origin)
+	assert.Equal(t, graph.EdgeReferences, readEdge.Kind,
+		"LSP-bound EdgeReads on a KindMethod must be promoted so get_callers surfaces it")
+}
+
 // TestLSPHotPath_NilHelper — when no helper is installed, the
 // resolver runs heuristic-only as in the pre-N5 world.
 func TestLSPHotPath_NilHelper(t *testing.T) {
