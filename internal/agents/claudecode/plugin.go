@@ -184,8 +184,8 @@ installs to ` + "`~/.local/bin`" + ` (or ` + "`/usr/local/bin`" + `), and runs `
 | Surface | What you get |
 |---------|--------------|
 | **MCP server** | 52 tools (` + "`search_symbols`" + `, ` + "`find_usages`" + `, ` + "`get_call_chain`" + `, ` + "`explain_change_impact`" + `, ` + "`rename_symbol`" + `, ` + "`scaffold`" + `, ` + "`contracts`" + `, …) over stdio via ` + "`gortex mcp --proxy`" + ` |
-| **Slash commands** | ` + "`/gortex-guide`" + `, ` + "`/gortex-explore`" + `, ` + "`/gortex-debug`" + `, ` + "`/gortex-impact`" + `, ` + "`/gortex-refactor`" + ` |
-| **Skills** | Five model-invoked skills that activate by task-shape (architecture exploration, debugging, blast-radius analysis, refactoring, tool reference) |
+| **Slash commands** | Discovery: ` + "`/gortex-guide`" + `, ` + "`/gortex-explore`" + `, ` + "`/gortex-debug`" + `, ` + "`/gortex-impact`" + `, ` + "`/gortex-dataflow-trace`" + `, ` + "`/gortex-cross-repo-usage`" + ` · Edit & refactor: ` + "`/gortex-refactor`" + `, ` + "`/gortex-safe-edit`" + `, ` + "`/gortex-rename`" + `, ` + "`/gortex-extract-function`" + `, ` + "`/gortex-fix-all`" + `, ` + "`/gortex-add-test`" + ` |
+| **Skills** | Twelve model-invoked skills that activate by task-shape. Discovery (5): architecture exploration, debugging, blast-radius analysis, dataflow tracing, cross-repo usage. Edit & refactor (6): general refactor, safe-edit (` + "`preview_edit`" + ` / ` + "`simulate_chain`" + ` before disk), cross-file rename, LSP-driven extract function, LSP ` + "`source.fixAll`" + `, coverage-led add-test. Plus the tool-reference guide. The edit skills exist to enforce the speculative-execution + LSP code-actions order so agents do not bypass safety steps. |
 | **Hooks** | PreToolUse routing (Read → ` + "`get_symbol_source`" + `, Grep → ` + "`search_symbols`" + ` / ` + "`find_usages`" + `), PreCompact orientation snapshot, Stop post-task diagnostics, SessionStart cold briefing |
 
 ## First run

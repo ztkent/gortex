@@ -52,7 +52,11 @@ const ProjectMCPJSON = `{
 const ClaudeMdBlock = agents.InstructionsBody + `
 ## Gortex slash commands
 
-Use these for guided workflows: ` + "`/gortex-guide`" + `, ` + "`/gortex-explore`" + `, ` + "`/gortex-debug`" + `, ` + "`/gortex-impact`" + `, ` + "`/gortex-refactor`" + `
+Discovery & analysis: ` + "`/gortex-guide`" + `, ` + "`/gortex-explore`" + `, ` + "`/gortex-debug`" + `, ` + "`/gortex-impact`" + `, ` + "`/gortex-dataflow-trace`" + `, ` + "`/gortex-cross-repo-usage`" + `
+
+Refactor & edit: ` + "`/gortex-refactor`" + `, ` + "`/gortex-safe-edit`" + `, ` + "`/gortex-rename`" + `, ` + "`/gortex-extract-function`" + `, ` + "`/gortex-fix-all`" + `, ` + "`/gortex-add-test`" + `
+
+The edit and refactor skills enforce a tool-call order — they exist to keep you on the speculative-execution path (` + "`preview_edit`" + ` → ` + "`simulate_chain`" + ` → ` + "`batch_edit`" + `) and the LSP code-actions path (` + "`get_code_actions`" + ` → ` + "`apply_code_action`" + `) instead of going straight to ` + "`Edit`" + ` / ` + "`Write`" + `.
 `
 
 // ClaudeMdSentinel is the substring used to detect whether
@@ -67,11 +71,18 @@ const ClaudeMdSentinel = agents.InstructionsSentinel
 // markdown content. Each file is a slash command Claude Code
 // auto-discovers.
 var SlashCommands = map[string]string{
-	"gortex-guide.md":    commandGuide,
-	"gortex-explore.md":  commandExplore,
-	"gortex-debug.md":    commandDebug,
-	"gortex-impact.md":   commandImpact,
-	"gortex-refactor.md": commandRefactor,
+	"gortex-guide.md":             commandGuide,
+	"gortex-explore.md":           commandExplore,
+	"gortex-debug.md":             commandDebug,
+	"gortex-impact.md":            commandImpact,
+	"gortex-refactor.md":          commandRefactor,
+	"gortex-safe-edit.md":         commandSafeEdit,
+	"gortex-fix-all.md":           commandFixAll,
+	"gortex-extract-function.md":  commandExtractFunction,
+	"gortex-rename.md":            commandRename,
+	"gortex-cross-repo-usage.md":  commandCrossRepoUsage,
+	"gortex-dataflow-trace.md":    commandDataflowTrace,
+	"gortex-add-test.md":          commandAddTest,
 }
 
 // GlobalSkills maps the directory name under ~/.claude/skills/ to
@@ -107,6 +118,48 @@ name: gortex-refactor
 description: "Use when the user wants to rename, extract, split, move, or restructure code safely. Examples: \"Rename this function\", \"Extract this into a module\", \"Refactor this class\""
 ---
 ` + commandRefactor,
+
+	"gortex-safe-edit": `---
+name: gortex-safe-edit
+description: "Use when the user is about to edit source code and wants the edit to be safe — speculative preview, broken-callers / blast-radius check, then on-disk apply. Enforces preview_edit / simulate_chain before batch_edit. Examples: \"Change the signature of X safely\", \"Apply this WorkspaceEdit but verify first\", \"Speculate this edit before writing\""
+---
+` + commandSafeEdit,
+
+	"gortex-fix-all": `---
+name: gortex-fix-all
+description: "Use when the user wants to clear LSP diagnostics — a single error, a file's worth of warnings, or the whole project's source.fixAll bundle. Enforces subscribe_diagnostics / get_code_actions / apply_code_action / fix_all_in_file in order. Examples: \"Fix the diagnostics in this file\", \"Run source.fixAll\", \"Apply quick-fixes for these errors\""
+---
+` + commandFixAll,
+
+	"gortex-extract-function": `---
+name: gortex-extract-function
+description: "Use when the user wants to extract code into a new function / method / variable via the language server's refactor actions (not a manual rewrite). Enforces get_editing_context / get_code_actions(kind=refactor.extract) / preview_edit / apply_code_action. Examples: \"Extract these lines into a helper\", \"Pull this into its own method\", \"Refactor this block into a function\""
+---
+` + commandExtractFunction,
+
+	"gortex-rename": `---
+name: gortex-rename
+description: "Use when the user wants to rename a symbol and have every reference (definition + callers + tests + cross-repo consumers) updated atomically. Enforces search_symbols / verify_change / rename_symbol / batch_edit / check_guards in order. Examples: \"Rename Foo to Bar everywhere\", \"Rename this method\", \"Change the package name\""
+---
+` + commandRename,
+
+	"gortex-cross-repo-usage": `---
+name: gortex-cross-repo-usage
+description: "Use when the user needs to see who uses a symbol across consumer repos, not just the current one. Enforces get_active_project / track_repository / find_usages partitioned by repo / analyze cross_repo. Examples: \"Who calls this across all our repos?\", \"What other services consume this API?\", \"Cross-repo blast radius\""
+---
+` + commandCrossRepoUsage,
+
+	"gortex-dataflow-trace": `---
+name: gortex-dataflow-trace
+description: "Use when the user wants to trace where a value flows — through assignments, function args, returns, channels, or pub/sub topics. Enforces search_symbols / flow_between / taint_paths / analyze pubsub|channel_ops. Examples: \"Where does this value end up?\", \"Trace the taint from input to sink\", \"Find every flow from X to Y\""
+---
+` + commandDataflowTrace,
+
+	"gortex-add-test": `---
+name: gortex-add-test
+description: "Use when the user wants to add tests for under-tested code — coverage gaps, untested symbols, regression repro. Enforces analyze coverage_gaps / get_untested_symbols / suggest_pattern / scaffold / get_test_targets. Examples: \"Add tests for X\", \"Cover the gaps in this package\", \"Write a test for this bug\""
+---
+` + commandAddTest,
 }
 
 const commandGuide = `# Gortex Guide
@@ -123,13 +176,29 @@ Quick reference for all Gortex MCP tools and the knowledge graph schema.
 
 ## Commands
 
-| Task                                         | Command                  |
-| -------------------------------------------- | ------------------------ |
-| Understand architecture / "How does X work?" | /gortex-explore          |
-| Blast radius / "What breaks if I change X?"  | /gortex-impact           |
-| Trace bugs / "Why is X failing?"             | /gortex-debug            |
-| Rename / extract / split / refactor          | /gortex-refactor         |
-| Tools, schema reference                      | /gortex-guide (this)     |
+### Discovery & analysis
+
+| Task                                                         | Command                    |
+| ------------------------------------------------------------ | -------------------------- |
+| Understand architecture / "How does X work?"                 | /gortex-explore            |
+| Blast radius / "What breaks if I change X?"                  | /gortex-impact             |
+| Trace bugs / "Why is X failing?"                             | /gortex-debug              |
+| Trace dataflow / "Where does this value end up?"             | /gortex-dataflow-trace     |
+| Cross-repo usage / "Who uses this across all our repos?"     | /gortex-cross-repo-usage   |
+| Tools, schema reference                                      | /gortex-guide (this)       |
+
+### Refactor & edit (enforce tool-call order)
+
+These wrap the speculative-execution + LSP-code-actions plumbing so you do not bypass the safety steps by calling ` + "`Edit`" + ` / ` + "`Write`" + ` directly.
+
+| Task                                                         | Command                    |
+| ------------------------------------------------------------ | -------------------------- |
+| Safe edit / "Apply this WorkspaceEdit but verify first"      | /gortex-safe-edit          |
+| Rename / extract / split / restructure                       | /gortex-refactor           |
+| Rename one symbol everywhere                                 | /gortex-rename             |
+| Extract a function / method / variable via LSP refactor      | /gortex-extract-function   |
+| Apply LSP quick-fixes / source.fixAll                        | /gortex-fix-all            |
+| Add tests for under-covered code                             | /gortex-add-test           |
 
 ## Tools Reference
 
@@ -478,4 +547,405 @@ const commandRefactor = `# Refactoring with Gortex
 - Before changing an HTTP route, gRPC method, topic, env, or OpenAPI contract: contracts({action: "check"}) to find cross-repo consumers
 - verify_change on the provider signature
 - Coordinate consumer-side edits in the same batch_edit when repos are tracked together
+`
+
+const commandSafeEdit = `# Safe Edit with Gortex (speculative-execution path)
+
+Use this **before** you touch ` + "`edit_file`" + ` / ` + "`edit_symbol`" + ` / ` + "`batch_edit`" + ` / ` + "`Edit`" + ` / ` + "`Write`" + `. It runs the edit against the in-memory shadow graph first, reports broken callers + broken interface implementors + blast-radius rollup + suggested tests, and only promotes to disk once those signals are clean.
+
+## Workflow (do not skip steps)
+
+` + "```" + `
+1. smart_context({task: "<what you intend to change>"})              -> Working-set bundle
+2. surface_memories({task, symbol_ids})                              -> Cross-session invariants on the same symbols
+3. get_editing_context({path: "<file>"})                             -> Pre-edit signature + caller map
+4. preview_edit({edit: <LSP WorkspaceEdit>})                         -> Single-shot speculative apply on the shadow graph
+   -> Inspect: touched / added / removed / renamed / broken_callers / broken_implementors / impact / suggested_tests
+5. simulate_chain({steps: [{edit: <e1>}, {edit: <e2>}, ...],         -> Multi-step ordered simulation
+                   inherit_overlay: true, stop_on_error: true,
+                   keep: false})
+   -> Use when the change is more than one WorkspaceEdit (cross-file refactor, signature + every caller, etc.)
+6. If broken_callers or broken_implementors is non-empty            -> Fix the chain first, re-run preview_edit / simulate_chain
+7. check_guards({ids: [<changed-ids>]})                              -> Team conventions from .gortex.yaml
+8. verify_change({id: <id>, new_signature: "..."})                   -> Final signature check before disk write
+9. batch_edit({edits: [...]})                                        -> Apply the same edits on disk in dependency order
+10. detect_changes({scope: "all"}) + diff_context({scope: "all"})    -> Confirm the on-disk diff matches the simulated one
+11. get_test_targets({ids: [<changed-ids>]})                         -> Tests to re-run (cross-repo aware)
+` + "```" + `
+
+## When to use ` + "`preview_edit`" + ` vs ` + "`simulate_chain`" + `
+
+| Situation                                              | Tool             | Why |
+| ------------------------------------------------------ | ---------------- | --- |
+| One self-contained ` + "`WorkspaceEdit`" + ` (e.g. one rename)        | preview_edit     | Single round-trip, simplest. |
+| Several dependent edits that must be applied in order  | simulate_chain   | First-failing-step semantics; ` + "`inherit_overlay`" + ` carries state forward. |
+| You want the simulated state to become the live overlay so subsequent queries see it | simulate_chain with ` + "`keep: true`" + ` | Promotes the final shadow state into a real overlay session — graph queries see post-edit reality without writing disk. |
+| Optional LSP diagnostics on the simulated content      | Either, with ` + "`with_diagnostics: true`" + ` | Drives ` + "`didChange(simulated) → wait → didChange(original)`" + ` round-trip; concurrent sessions never observe simulated state as authoritative. |
+
+## Reading the speculative report
+
+- **broken_callers** — callers whose call sites won't type-check against the new signature. Fix or update every one before disk.
+- **broken_implementors** — interface implementors that no longer satisfy the interface contract. Either widen the contract, update implementors, or revert.
+- **impact** — ` + "`analysis.AnalyzeImpact`" + ` blast-radius rollup. The same risk tiers ` + "`/gortex-impact`" + ` reports.
+- **suggested_tests** — what to feed to ` + "`get_test_targets`" + ` after the apply.
+- **added / removed / renamed** — non-trivial-signature unambiguous-candidate heuristic; bare ` + "`func ()`" + ` voids reject as ambiguous, so you may see fewer "renamed" entries than you expect — that is correct behaviour.
+
+## Checklist
+
+- ` + "`smart_context`" + ` before reading any file
+- ` + "`surface_memories`" + ` on the same working set — pick up cross-session decisions / gotchas
+- ` + "`preview_edit`" + ` (single edit) or ` + "`simulate_chain`" + ` (ordered chain) **before** any on-disk write
+- Treat ` + "`broken_callers`" + ` / ` + "`broken_implementors`" + ` as blockers, not warnings
+- ` + "`check_guards`" + ` + ` + "`verify_change`" + ` after the simulated diff is clean, before ` + "`batch_edit`" + `
+- ` + "`batch_edit`" + ` (dependency-ordered, atomic re-index between steps) over manual sequencing
+- ` + "`detect_changes`" + ` + ` + "`diff_context`" + ` to confirm the on-disk diff matches the simulation
+- ` + "`get_test_targets`" + ` to run the right tests, cross-repo aware
+- If the edit is durable knowledge ("X must hold the lock", "this package never uses gob"), ` + "`store_memory`" + ` so the next agent inherits the lesson
+`
+
+const commandFixAll = `# Fix LSP Diagnostics with Gortex (LSP code-actions path)
+
+Use this when the user wants errors / warnings cleared — for one symbol, one file, or the whole project. Bridges Gortex to the 18-language LSP coverage (gopls / tsserver / pyright / rust-analyzer / clangd / jdtls / kotlin-language-server / omnisharp / ruby-lsp / phpactor / lua-language-server / sourcekit-lsp / haskell-language-server / elixir-ls / ocamllsp / zls / terraform-ls / yaml-language-server / json-language-server / bash-language-server). No manual ` + "`Edit`" + ` of error messages.
+
+## Workflow (do not skip steps)
+
+` + "```" + `
+1. subscribe_diagnostics({min_severity: 1, path_prefix: "<dir>/"})   -> Push notifications, replays initial state once
+2. get_diagnostics({path: "<file>", wait: true, timeout_ms: 2000})   -> Poll form when you need a synchronous snapshot
+3. get_code_actions({path: "<file>", range: {...}})                  -> Menu of fixes / refactors / source actions
+4. For each chosen action:
+     preview_edit({edit: <action.workspaceEdit>})                    -> Speculative apply on the shadow graph
+     apply_code_action({path, action_id})                            -> Atomic on-disk apply (UTF-16 column math)
+5. fix_all_in_file({path: "<file>"})                                 -> One-shot source.fixAll over an entire file
+6. get_diagnostics({path: "<file>"})                                 -> Confirm the file is now clean
+7. check_guards({ids: [<changed-ids>]}) + get_test_targets({ids})    -> Post-fix guardrails
+8. unsubscribe_diagnostics                                           -> Only when narrowing scope; auto-fires on disconnect
+` + "```" + `
+
+## Diagnostic-fix patterns
+
+| Situation                                              | Tool ordering | Notes |
+| ------------------------------------------------------ | ------------- | ----- |
+| One specific error                                     | ` + "`get_code_actions`" + ` at the diagnostic range -> pick one -> ` + "`apply_code_action`" + ` | Smallest possible edit. |
+| Every error in a file                                  | ` + "`fix_all_in_file`" + ` | Bundles every server-suggested fix in a single round-trip. |
+| Refactor offered as a code action (` + "`refactor.*`" + `)       | ` + "`get_code_actions`" + ` -> pick by ` + "`kind`" + ` (e.g. ` + "`refactor.extract`" + `) -> ` + "`preview_edit`" + ` first | See ` + "`/gortex-extract-function`" + `. |
+| Source action (` + "`source.organizeImports`" + `, ` + "`source.fixAll`" + `) | ` + "`get_code_actions`" + ` with the right ` + "`only`" + ` kind, or ` + "`fix_all_in_file`" + ` | Whole-file scope. |
+| Watching diagnostics during a long edit session         | ` + "`subscribe_diagnostics`" + ` with ` + "`min_severity`" + ` + ` + "`path_prefix`" + ` filters | SHA-suppressed delta payloads; only changed files reach you. |
+
+## Reading the diagnostic stream
+
+- ` + "`initial_replay: true`" + ` on the first push — that's the synchronous snapshot of the current LSP state, not a new event.
+- Every subsequent push carries only files whose ` + "`publishDiagnostics`" + ` SHA changed.
+- ` + "`min_severity`" + ` 1 = error, 2 = warning, 3 = info, 4 = hint. Default to 1 unless you specifically need warnings.
+- ` + "`path_prefix`" + ` is your scope filter — pin it to the area you're working on so the rest of the project doesn't drown the stream.
+
+## When LSP cannot fix it
+
+If ` + "`get_code_actions`" + ` returns an empty menu, the server doesn't know how to fix this diagnostic. Fall back to:
+1. ` + "`search_symbols`" + ` for the symbol the diagnostic references
+2. ` + "`get_editing_context`" + ` on the file
+3. ` + "`/gortex-safe-edit`" + ` to author the edit by hand, with ` + "`preview_edit`" + ` to verify
+
+## Checklist
+
+- ` + "`subscribe_diagnostics`" + ` once per session, with ` + "`min_severity`" + ` + ` + "`path_prefix`" + ` scoped to the area you're touching
+- ` + "`get_code_actions`" + ` is the menu — never invent fixes
+- ` + "`preview_edit`" + ` (or ` + "`apply_code_action`" + ` directly when the action is small and well-known) before any disk write
+- ` + "`fix_all_in_file`" + ` for whole-file source.fixAll — one round-trip beats N targeted fixes
+- Re-run ` + "`get_diagnostics`" + ` after the fix; assume nothing
+- ` + "`check_guards`" + ` and ` + "`get_test_targets`" + ` after the diagnostics are clean — fixing the LSP error is not the same as fixing the test
+`
+
+const commandExtractFunction = `# Extract Function with Gortex (LSP refactor path)
+
+Use this when the user wants to extract code into a new function / method / variable / constant via the **language server's refactor actions**, not by hand-editing braces. Maps onto LSP ` + "`refactor.extract.*`" + ` code actions; works wherever the underlying server supports them (gopls / tsserver / pyright / rust-analyzer / jdtls / kotlin-language-server / omnisharp / and others).
+
+## Workflow (do not skip steps)
+
+` + "```" + `
+1. get_editing_context({path: "<file>"})                                -> See enclosing symbol, callers, callees
+2. (optional) find_usages({id: "<enclosing-fn>"})                       -> Who calls the function you are about to split
+3. get_code_actions({path: "<file>", range: {start, end},                -> Menu filtered to refactor.extract.* actions
+                     only: ["refactor.extract.function",
+                            "refactor.extract.method",
+                            "refactor.extract.variable",
+                            "refactor.extract.constant"]})
+4. preview_edit({edit: <chosen action.workspaceEdit>})                  -> Speculative apply
+   -> Inspect: touched / added / renamed / broken_callers / broken_implementors / impact
+5. If the extraction crosses files (e.g. moving the helper to a sibling file):
+     simulate_chain({steps: [...]})                                     -> Ordered chain with broken-caller carry-over
+6. apply_code_action({path: "<file>", action_id: "<id>"})               -> Atomic temp+rename, UTF-16 column math
+7. check_guards({ids: [<changed-ids>]}) + verify_change                  -> Convention + signature gate
+8. get_test_targets({ids: [<old-id>, <new-id>]})                        -> Run tests for both the caller and the extract
+9. detect_changes + diff_context                                        -> Final scope check
+` + "```" + `
+
+## Choosing the right extract action
+
+| User intent                                | Code-action kind                  | Notes |
+| ------------------------------------------ | --------------------------------- | ----- |
+| Pull a block of statements into a helper   | ` + "`refactor.extract.function`" + `             | Most servers infer params + return type from the selection. |
+| Move statements into a method on a type    | ` + "`refactor.extract.method`" + `               | Receiver / this binding chosen by the server. |
+| Extract a sub-expression to a local        | ` + "`refactor.extract.variable`" + `             | Best for naming repeated sub-expressions. |
+| Extract a literal to a package-level const | ` + "`refactor.extract.constant`" + `             | gopls and tsserver expose this; rust-analyzer uses ` + "`refactor.extract.module`" + ` for similar moves. |
+
+If you don't know which kinds the server offers, call ` + "`get_code_actions`" + ` **without** ` + "`only`" + ` and inspect the menu first.
+
+## Range selection
+
+LSP positions are line + UTF-16 character offsets. The ` + "`apply_code_action`" + ` mapper handles this correctly, but when you compose the range yourself:
+1. Get the file body via ` + "`get_symbol_source`" + ` (compress_bodies:false) or ` + "`get_file_summary`" + `
+2. Use the symbol's line numbers as anchors; expand to the precise statement boundaries
+3. Pass ` + "`range: {start: {line, character}, end: {line, character}}`" + ` to ` + "`get_code_actions`" + `
+
+## When the server has no extract action
+
+Some servers (yaml-language-server, json-language-server, bash-language-server) don't ship refactor actions. Fall back to ` + "`/gortex-safe-edit`" + ` and author the extract by hand — but still ` + "`preview_edit`" + ` first.
+
+## Checklist
+
+- ` + "`get_editing_context`" + ` to understand the enclosing symbol before selecting a range
+- ` + "`get_code_actions`" + ` with ` + "`only: refactor.extract.*`" + ` — pick from the menu, don't invent
+- ` + "`preview_edit`" + ` before ` + "`apply_code_action`" + ` (broken callers / blast radius)
+- ` + "`simulate_chain`" + ` if the extract moves the helper to a new file with follow-on rename of call sites
+- ` + "`check_guards`" + `, ` + "`verify_change`" + `, ` + "`get_test_targets`" + ` after the apply
+- ` + "`get_symbol`" + ` on the new symbol to confirm Gortex indexed it under the expected ID
+`
+
+const commandRename = `# Rename Symbol with Gortex (cross-file coordinated rename)
+
+Use this when the user wants to rename a function / method / type / variable / package and have every reference (definition, callers, tests, cross-repo consumers, doc-comments where applicable) updated atomically. Picks the right tool for the job — graph-coordinated ` + "`rename_symbol`" + ` for Gortex-known symbols, LSP ` + "`textDocument/rename`" + ` (surfaced as a ` + "`refactor.rename`" + ` code action where supported) for server-driven cases.
+
+## Workflow (do not skip steps)
+
+` + "```" + `
+1. search_symbols({query: "<old name>"})                              -> Resolve the symbol ID(s)
+2. winnow_symbols({...})                                              -> Disambiguate if multiple matches survive
+3. explain_change_impact({ids: "<id>"})                               -> Blast radius (callers, implementors, processes)
+4. find_usages({id: "<id>"})                                          -> Every reference (BM25-free; zero false positives)
+5. verify_change({id: "<id>", new_signature: "<old sig with new name>"}) -> Catches interface breaks early
+6. rename_symbol({id: "<id>", new_name: "<new>"})                     -> Generates dependency-ordered WorkspaceEdit (Gortex path)
+   OR get_code_actions({path, range, only: ["refactor.rename"]})      -> LSP-driven path (when you want server-side rename semantics)
+7. preview_edit({edit: <generated WorkspaceEdit>})                    -> Speculative apply; check broken_callers / broken_implementors
+8. batch_edit({edits: [...]})                                         -> Atomic on-disk apply, re-index between steps
+   OR apply_code_action({...})                                        -> If you went the LSP route
+9. check_guards({ids: [<old, new>]})                                  -> Naming conventions, banned terms from .gortex.yaml
+10. get_test_targets({ids: [<new-id>]})                               -> Tests to re-run; cross-repo aware
+11. detect_changes + diff_context                                     -> Confirm no stray reference survived
+` + "```" + `
+
+## Choosing the right rename tool
+
+| Situation                                                  | Tool                          | Why |
+| ---------------------------------------------------------- | ----------------------------- | --- |
+| Symbol is in the graph and rename is mechanical             | ` + "`rename_symbol`" + `                  | Generates the WorkspaceEdit from edges; deterministic, fast, no LSP round-trip. |
+| Symbol semantics depend on the server (TS shadowed locals, Java generics, Rust trait resolution) | ` + "`get_code_actions`" + ` + ` + "`apply_code_action`" + ` with ` + "`refactor.rename`" + ` | Server resolves identifier scoping the parser can't fully replicate. |
+| Cross-repo rename (consumer repos tracked together)         | ` + "`rename_symbol`" + ` + ` + "`contracts({action: check})`" + ` | Graph carries cross-repo edges; ` + "`contracts`" + ` flags HTTP / gRPC / topic-side breakage. |
+| Rename of a published API surface                           | ` + "`rename_symbol`" + ` **plus** ` + "`contracts({action: check})`" + ` and a deprecation shim | Pair with ` + "`/gortex-cross-repo-usage`" + ` to find consumer repos. |
+
+## Cross-repo renames
+
+` + "`rename_symbol`" + ` covers every repo the graph knows about — track consumer repos first (` + "`track_repository`" + `) and switch ` + "`set_active_project`" + ` to the multi-repo scope, then run the rename. ` + "`/gortex-cross-repo-usage`" + ` is the partition view that confirms every consumer repo was touched.
+
+## Renaming through interfaces
+
+If the renamed symbol is part of an interface contract:
+1. ` + "`find_implementations`" + ` on the interface — every implementor must be renamed in the same chain
+2. ` + "`verify_change`" + ` against the interface's signature with the new name
+3. ` + "`simulate_chain`" + ` with one step per implementor file so ` + "`broken_implementors`" + ` carries forward correctly
+4. Apply via ` + "`batch_edit`" + ` (or ` + "`apply_code_action`" + ` if you went the LSP route per-implementor)
+
+## Checklist
+
+- ` + "`search_symbols`" + ` + ` + "`winnow_symbols`" + ` until exactly one ID resolves to the symbol you mean
+- ` + "`explain_change_impact`" + ` + ` + "`find_usages`" + ` before authoring any edit
+- ` + "`verify_change`" + ` on the new signature — catches interface breaks before anything is written
+- Pick ` + "`rename_symbol`" + ` (graph path) or LSP ` + "`refactor.rename`" + ` (server path); never hand-author cross-file renames
+- ` + "`preview_edit`" + ` / ` + "`simulate_chain`" + ` on the generated edits before disk
+- ` + "`batch_edit`" + ` is dependency-ordered + re-indexes between steps — atomic in the sense that matters for the graph
+- ` + "`check_guards`" + `, ` + "`get_test_targets`" + `, ` + "`diff_context`" + ` after the apply
+`
+
+const commandCrossRepoUsage = `# Cross-Repo Usage with Gortex
+
+Use this when the user needs to see who uses a symbol **across every consumer repo**, not just the one they happen to be in. Wraps ` + "`find_usages`" + ` + the cross-repo edge layer (` + "`cross_repo_calls`" + ` / ` + "`cross_repo_implements`" + ` / ` + "`cross_repo_extends`" + `) so the answer is partitioned by repo and includes contract-level consumers (HTTP / gRPC / topics) that wouldn't show up as a direct call edge.
+
+## Workflow (do not skip steps)
+
+` + "```" + `
+1. get_active_project                                                  -> See current scope (single repo or multi-repo project)
+2. list_repos                                                          -> See which repos are tracked
+3. For each consumer repo not yet tracked:
+     track_repository({path: "<consumer repo path>"})                  -> Index immediately, persist to config
+4. set_active_project({name: "<multi-repo project>"})                  -> Switch scope so subsequent queries span repos
+5. search_symbols({query: "X"})                                        -> Resolve the symbol ID in the providing repo
+6. find_usages({id: "<id>"})                                           -> All references; group by repo prefix
+7. analyze({kind: "cross_repo",                                        -> Repo-boundary-crossing edges with relation
+            base_kind: "calls|implements|extends",
+            repo: "<providing repo>"})
+8. contracts({action: "check"})                                        -> Contract-level consumers (HTTP routes, gRPC methods, topics, env, OpenAPI)
+9. get_test_targets({ids: [<id>]})                                     -> Cross-repo tests that exercise this symbol
+10. export_context({format: "markdown"})                               -> Per-repo report for PR / Slack / docs
+` + "```" + `
+
+## Partitioning ` + "`find_usages`" + ` by repo
+
+The graph stores repo as a prefix on each node ID. Group results by the leading path segment so the user sees one section per consumer:
+
+| Repo                      | References |
+| ------------------------- | ---------- |
+| my-org/api-gateway        | 7 sites    |
+| my-org/billing            | 3 sites    |
+| my-org/notifications      | 1 site     |
+
+` + "`analyze kind=cross_repo`" + ` complements this — it reports the typed edges (calls / implements / extends) that physically cross the boundary, which is the count that matters for "is this safe to change without coordinating with consumer teams."
+
+## Contract-level consumers
+
+For published API surfaces, ` + "`find_usages`" + ` won't show consumers that go through the wire. ` + "`contracts({action: check})`" + ` catches:
+- HTTP route consumers (client-side ` + "`fetch`" + ` / ` + "`http.Get`" + ` / generated SDK methods)
+- gRPC method consumers (generated client stubs across repos)
+- Pub/sub subscribers (NATS / Kafka / RabbitMQ / Redis / EventEmitter / Socket.IO)
+- Env-var consumers (one process writes, another reads)
+- OpenAPI / GraphQL schema consumers
+
+## Onboarding a consumer repo
+
+If a known consumer is missing from the tracked-repo list:
+1. ` + "`track_repository`" + ` with its path — indexes immediately, persists to config
+2. Re-run ` + "`find_usages`" + ` and ` + "`analyze kind=cross_repo`" + ` — the new edges materialise
+3. ` + "`untrack_repository`" + ` only when you're done; leaving it tracked keeps subsequent cross-repo queries cheap
+
+## Checklist
+
+- ` + "`get_active_project`" + ` first — you may already be in multi-repo scope
+- ` + "`track_repository`" + ` every consumer repo you care about; ` + "`find_usages`" + ` only sees what's indexed
+- Partition the ` + "`find_usages`" + ` rows by repo prefix; the per-repo breakdown is the deliverable
+- ` + "`analyze kind=cross_repo`" + ` for the typed-edge view (calls / implements / extends)
+- ` + "`contracts({action: check})`" + ` for wire-level consumers that ` + "`find_usages`" + ` cannot see
+- ` + "`get_test_targets`" + ` returns cross-repo tests too — run them, not just the local ones
+- Hand the per-repo report to the user via ` + "`export_context`" + ` for PR descriptions / Slack
+`
+
+const commandDataflowTrace = `# Dataflow Trace with Gortex (CPG-lite)
+
+Use this when the user asks where a value flows — through assignments, function args, returns, channels, event buses, or pub/sub topics. Built on the CPG-lite edge layer (` + "`value_flow`" + ` ∪ ` + "`arg_of`" + ` ∪ ` + "`returns_to`" + `) plus the pub/sub + channel + emit layers, so flows survive crossing function and process boundaries that a plain caller-graph walk would lose.
+
+## Workflow (do not skip steps)
+
+` + "```" + `
+1. smart_context({task: "<the flow you want to understand>"})         -> Working-set bundle
+2. search_symbols({query: "<source>"})                                 -> Resolve the producing symbol ID
+3. search_symbols({query: "<sink>"})                                   -> Resolve the consuming symbol ID
+4. flow_between({source_id: "<src>", sink_id: "<sink>",                -> Ranked paths over value_flow ∪ arg_of ∪ returns_to
+                 max_depth: 8, max_paths: 10})
+5. taint_paths({source_pattern: "<pattern>",                           -> Every flow from any matching source to any matching sink
+                sink_pattern: "<pattern>",
+                max_depth: 8})
+6. analyze({kind: "channel_ops"})                                      -> Channel producer/consumer mismatch (Go)
+7. analyze({kind: "pubsub",                                            -> Pub/sub topics with publishers + subscribers
+            transport: "nats|kafka|rabbitmq|redis|eventemitter|socketio",
+            name: "<topic>",
+            role: "publish|subscribe"})
+8. analyze({kind: "event_emitters", level: "error"})                   -> Log/metric/span emit sites
+9. get_call_chain({id: "<sink>"}) + get_callers({id: "<source>"})      -> Caller-graph cross-check for any path flow_between missed
+10. export_context({format: "markdown"})                               -> Hand the trace to a PR / Slack / doc
+` + "```" + `
+
+## Pattern syntax for ` + "`taint_paths`" + `
+
+Each pattern is one or more clauses combined with AND:
+
+| Clause             | Meaning                                          | Example                       |
+| ------------------ | ------------------------------------------------ | ----------------------------- |
+| ` + "`<bare token>`" + `   | Substring match on the symbol name               | ` + "`Decode`" + `                    |
+| ` + "`exact:<name>`" + `   | Exact name match                                 | ` + "`exact:HandleRequest`" + `       |
+| ` + "`path:<prefix>`" + `  | Path prefix on the file the symbol lives in     | ` + "`path:internal/http/`" + `       |
+| ` + "`kind:<kind>`" + `    | Restrict to ` + "`function`" + ` / ` + "`method`" + ` / ` + "`field`" + ` / etc. | ` + "`kind:method`" + `               |
+
+Functions auto-expand to their params on the sink side, so ` + "`taint_paths`" + ` with a function-shaped sink pattern reports flows into any of its parameters.
+
+## Crossing process / transport boundaries
+
+` + "`flow_between`" + ` walks intra-process edges. To follow a value across a wire:
+
+| Boundary                          | Tool                                                 |
+| --------------------------------- | ---------------------------------------------------- |
+| Channel (Go)                       | ` + "`analyze kind=channel_ops`" + ` — find the matching ` + "`recv`" + ` site, then ` + "`flow_between`" + ` from there |
+| Pub/sub topic                      | ` + "`analyze kind=pubsub name=<topic>`" + ` — get every subscriber; ` + "`flow_between`" + ` from each |
+| HTTP / gRPC / GraphQL contract     | ` + "`contracts({action: check})`" + ` — match providers to consumers; the contract ID is your bridge node |
+| Env var (one process writes, another reads) | ` + "`analyze kind=config_readers name=<KEY>`" + ` -> consumers; ` + "`find_usages`" + ` on ` + "`cfg::env::<KEY>`" + ` |
+| Cross-repo call                    | ` + "`analyze kind=cross_repo base_kind=calls`" + ` — typed boundary-crossing edges |
+
+## Reading a ranked path
+
+Each row from ` + "`flow_between`" + ` is a sequence of edges with the kind annotated (` + "`value_flow`" + ` / ` + "`arg_of`" + ` / ` + "`returns_to`" + `). The rank reflects path length + edge confidence. Treat the top-3 paths as the load-bearing ones; the long tail tends to be incidental cross-references.
+
+## Checklist
+
+- ` + "`smart_context`" + ` first — pick up the working set before asking flow_between for a path
+- Resolve **both** source and sink to symbol IDs before calling ` + "`flow_between`" + ` (path search needs anchors)
+- Use ` + "`taint_paths`" + ` when "every flow from a kind of source to a kind of sink" matters more than one specific pair
+- Cross process boundaries with the right analyzer (` + "`channel_ops`" + ` / ` + "`pubsub`" + ` / ` + "`config_readers`" + ` / ` + "`contracts`" + `) — ` + "`flow_between`" + ` alone won't follow a value across the wire
+- Cross-check with ` + "`get_call_chain`" + ` / ` + "`get_callers`" + ` when ` + "`flow_between`" + ` returns zero paths for a flow you're sure exists — the producer or consumer may not yet be in the dataflow layer
+- ` + "`export_context`" + ` to hand the trace to a PR / Slack / doc without losing the structure
+`
+
+const commandAddTest = `# Add Tests with Gortex (coverage-led)
+
+Use this when the user wants tests added for under-covered code, untested symbols, or a specific regression. Walks the coverage analyzers first so the new test goes where it matters; uses ` + "`suggest_pattern`" + ` + ` + "`scaffold`" + ` to author the new test in the style of an existing one rather than from scratch.
+
+## Workflow (do not skip steps)
+
+` + "```" + `
+1. gortex enrich coverage  (CLI)                                       -> Stamp meta.coverage_pct on executable symbols from cover.out
+2. analyze({kind: "coverage_summary", path_prefix: "<dir>/"})          -> Per-directory rollup (avg / covered / partial / uncovered)
+3. analyze({kind: "coverage_gaps",                                     -> Symbols inside [min_pct, max_pct) — the candidate list
+            path_prefix: "<dir>/",
+            min_pct: 0, max_pct: 50})
+4. get_untested_symbols({path_prefix: "<dir>/"})                       -> Symbols with no covering test
+5. For the chosen target symbol:
+     get_editing_context({path: "<file>"})                             -> Signature, callers, callees
+     get_callers({id: "<id>"})                                         -> How the symbol is invoked in real code (drives test inputs)
+6. suggest_pattern({example_id: "<similar tested symbol>"})            -> Extracts the test-authoring pattern (source + registration + tests)
+7. scaffold({kind: "test", from: "<example>", target: "<new test>"})   -> Generate test stub + wiring
+8. preview_edit({edit: <generated WorkspaceEdit>}) -> apply / batch_edit -> Speculative apply, then on-disk
+9. get_test_targets({ids: [<symbol-under-test>]})                      -> Confirms the new test file is discovered + maps to a run command
+10. Run the test command; if green, re-check ` + "`analyze kind=coverage_gaps`" + ` to confirm the gap closed
+11. check_guards + detect_changes + diff_context                       -> Standard post-edit gates
+` + "```" + `
+
+## Picking the right target
+
+| Source of priority                  | Tool                                                        | Use when |
+| ----------------------------------- | ----------------------------------------------------------- | -------- |
+| User named the symbol               | ` + "`search_symbols`" + ` -> ` + "`get_untested_symbols`" + ` (confirm gap)            | Direct request. |
+| Recent regression                   | ` + "`detect_changes`" + ` -> ` + "`analyze kind=coverage_gaps`" + ` on the change set   | "Add a test for what just broke." |
+| Hot path with weak coverage         | ` + "`analyze kind=hotspots`" + ` -> filter by ` + "`coverage_pct`" + ` < 50           | High-impact gaps. |
+| Whole directory                     | ` + "`analyze kind=coverage_summary`" + ` -> walk lowest-coverage subdirs   | "Cover this package." |
+| Mutation hotspot without tests       | ` + "`analyze kind=field_writers`" + ` + ` + "`get_untested_symbols`" + `              | Race / state-mutation risk. |
+
+## Authoring the test
+
+` + "`suggest_pattern`" + ` returns the **shape** of a comparable test in the project (table-driven, parallel, golden-file, etc.) so the new test feels native. ` + "`scaffold`" + ` then materialises the file with the right imports, package, and registration. Hand-edit only the bits ` + "`scaffold`" + ` couldn't infer (inputs, expected values, edge cases).
+
+When the target is interface-implementing or LSP-driven, also run ` + "`find_implementations`" + ` and ensure each implementor has at least one test in the new file (table-driven test with one row per implementor is idiomatic in this repo).
+
+## Closing the loop
+
+After the new test runs green:
+1. ` + "`gortex enrich coverage`" + ` (CLI) to refresh ` + "`meta.coverage_pct`" + `
+2. Re-run ` + "`analyze kind=coverage_gaps`" + ` over the same scope
+3. Confirm the symbol is no longer in the gap list; if it still is, the test exercises a different branch — add another row
+
+## Checklist
+
+- Run ` + "`gortex enrich coverage`" + ` (CLI) at least once per session so the coverage analyzers have data to work with
+- ` + "`analyze kind=coverage_summary`" + ` for the per-directory rollup; ` + "`analyze kind=coverage_gaps`" + ` for the per-symbol list
+- ` + "`get_untested_symbols`" + ` is the truth for "zero covering tests" — coverage_pct=0 ≠ "no test"; some tests register but don't execute
+- ` + "`suggest_pattern`" + ` + ` + "`scaffold`" + ` for the test body — author in the project's style, not from scratch
+- ` + "`preview_edit`" + ` even for new files; the speculative report flags broken_callers if you accidentally add a name that collides
+- ` + "`get_test_targets`" + ` after the apply — the test must be discoverable + mapped to a run command
+- Re-run ` + "`analyze kind=coverage_gaps`" + ` once the test is green; confirm the gap actually closed (a passing test that doesn't exercise the gap is theatre)
+- If the test encodes a project-wide invariant ("Bar must hold the lock"), ` + "`store_memory kind:invariant`" + ` so the next agent inherits the constraint
 `
