@@ -69,6 +69,69 @@ func TestNew_ClaudeCLIMissingBinary(t *testing.T) {
 	}
 }
 
+func TestNew_GeminiMissingKey(t *testing.T) {
+	t.Setenv("GEMINI_API_KEY", "")
+	if _, err := New(llm.Config{Provider: "gemini"}.ApplyDefaults()); err == nil {
+		t.Fatal("expected error when GEMINI_API_KEY is unset")
+	}
+}
+
+func TestNew_GeminiOK(t *testing.T) {
+	t.Setenv("GEMINI_API_KEY", "k")
+	p, err := New(llm.Config{Provider: "gemini"}.ApplyDefaults())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer func() { _ = p.Close() }()
+	if p.Name() != "gemini" {
+		t.Errorf("Name()=%q want gemini", p.Name())
+	}
+}
+
+func TestNew_BedrockMissingModelID(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "k")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "s")
+	if _, err := New(llm.Config{Provider: "bedrock"}.ApplyDefaults()); err == nil {
+		t.Fatal("expected error when llm.bedrock.model_id is unset")
+	}
+}
+
+func TestNew_BedrockOK(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "k")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "s")
+	cfg := llm.Config{
+		Provider: "bedrock",
+		Bedrock:  llm.BedrockConfig{ModelID: "anthropic.claude-sonnet-4-20250514-v1:0"},
+	}.ApplyDefaults()
+	p, err := New(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer func() { _ = p.Close() }()
+	if p.Name() != "bedrock" {
+		t.Errorf("Name()=%q want bedrock", p.Name())
+	}
+}
+
+func TestNew_DeepSeekMissingKey(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "")
+	if _, err := New(llm.Config{Provider: "deepseek"}.ApplyDefaults()); err == nil {
+		t.Fatal("expected error when DEEPSEEK_API_KEY is unset")
+	}
+}
+
+func TestNew_DeepSeekOK(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "k")
+	p, err := New(llm.Config{Provider: "deepseek"}.ApplyDefaults())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer func() { _ = p.Close() }()
+	if p.Name() != "deepseek" {
+		t.Errorf("Name()=%q want deepseek", p.Name())
+	}
+}
+
 func TestNew_ClaudeCLIOK(t *testing.T) {
 	// Use a real binary that exists on every Unix to satisfy the
 	// PATH lookup — the factory only verifies presence, it doesn't

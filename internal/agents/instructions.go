@@ -61,7 +61,7 @@ A Gortex daemon is configured machine-wide via the ` + "`gortex` MCP server" + `
 
 ### Optional: delegate research to a local agent
 
-When the daemon is built with ` + "`-tags llama`" + ` and ` + "`llm.model`" + ` is set in ` + "`.gortex.yaml`" + ` (or via the ` + "`GORTEX_LLM_MODEL`" + ` env var), the ` + "`ask`" + ` MCP tool is registered. It runs a grammar-constrained agent locally that uses gortex tools to research one question and returns a synthesized answer — useful when you'd otherwise issue many ` + "`search_symbols`" + ` / ` + "`get_callers`" + ` / ` + "`contracts`" + ` calls.
+When ` + "`llm.provider`" + ` is configured (one of ` + "`local`" + ` / ` + "`anthropic`" + ` / ` + "`openai`" + ` / ` + "`ollama`" + ` / ` + "`claudecli`" + ` / ` + "`gemini`" + ` / ` + "`bedrock`" + ` / ` + "`deepseek`" + ` — pick one in ` + "`.gortex.yaml`" + ` or ` + "`~/.config/gortex/config.yaml`" + `, or via ` + "`GORTEX_LLM_PROVIDER`" + ` / ` + "`GORTEX_LLM_MODEL`" + `), the ` + "`ask`" + ` MCP tool is registered. It runs a grammar-constrained agent that uses gortex tools to research one question and returns a synthesized answer — useful when you'd otherwise issue many ` + "`search_symbols`" + ` / ` + "`get_callers`" + ` / ` + "`contracts`" + ` calls. Only the ` + "`local`" + ` provider requires a ` + "`-tags llama`" + ` build; the other seven are pure-Go HTTP / subprocess adapters available in every binary.
 
 | When you'd otherwise...               | Consider...                              |
 |---------------------------------------|------------------------------------------|
@@ -69,7 +69,7 @@ When the daemon is built with ` + "`-tags llama`" + ` and ` + "`llm.model`" + ` 
 | Trace a request across repos (consumer → contract → handler → downstream) | ` + "`ask`" + ` with ` + "`chain: true`" + ` |
 | Look up a single known fact | Skip ` + "`ask`" + ` — direct tools are faster |
 
-If ` + "`ask`" + ` isn't in ` + "`tools/list`" + `, gortex was built without ` + "`-tags llama`" + ` or ` + "`llm.model`" + ` is unset. Fall through to direct tools.
+If ` + "`ask`" + ` isn't in ` + "`tools/list`" + `, no provider could construct (missing model / API key, ` + "`local`" + ` without ` + "`-tags llama`" + `, ` + "`claudecli`" + ` without ` + "`claude`" + ` on ` + "`$PATH`" + `, ` + "`bedrock`" + ` without AWS credentials). Fall through to direct tools.
 
 ### Search and Navigation
 
@@ -236,7 +236,7 @@ Gortex is running as an MCP server. You MUST use graph queries instead of file r
 
 ### Optional: delegate research to a local agent
 
-When the daemon is built with ` + "`-tags llama`" + ` and ` + "`llm.model`" + ` is set in ` + "`.gortex.yaml`" + ` (or via the ` + "`GORTEX_LLM_MODEL`" + ` env var), the ` + "`ask`" + ` MCP tool is registered. It runs a grammar-constrained agent locally that uses gortex tools to research one question and returns a synthesized answer — useful when you'd otherwise issue many ` + "`search_symbols`" + ` / ` + "`get_callers`" + ` / ` + "`contracts`" + ` calls.
+When ` + "`llm.provider`" + ` is configured (one of ` + "`local`" + ` / ` + "`anthropic`" + ` / ` + "`openai`" + ` / ` + "`ollama`" + ` / ` + "`claudecli`" + ` / ` + "`gemini`" + ` / ` + "`bedrock`" + ` / ` + "`deepseek`" + ` — pick one in ` + "`.gortex.yaml`" + ` or ` + "`~/.config/gortex/config.yaml`" + `, or via ` + "`GORTEX_LLM_PROVIDER`" + ` / ` + "`GORTEX_LLM_MODEL`" + `), the ` + "`ask`" + ` MCP tool is registered. It runs a grammar-constrained agent that uses gortex tools to research one question and returns a synthesized answer — useful when you'd otherwise issue many ` + "`search_symbols`" + ` / ` + "`get_callers`" + ` / ` + "`contracts`" + ` calls. Only the ` + "`local`" + ` provider requires a ` + "`-tags llama`" + ` build; the other seven are pure-Go HTTP / subprocess adapters available in every binary.
 
 | When you'd otherwise...               | Consider...                              |
 |---------------------------------------|------------------------------------------|
@@ -244,7 +244,7 @@ When the daemon is built with ` + "`-tags llama`" + ` and ` + "`llm.model`" + ` 
 | Trace a request across repos (consumer → contract → handler → downstream) | ` + "`ask`" + ` with ` + "`chain: true`" + ` |
 | Look up a single known fact | Skip ` + "`ask`" + ` — direct tools are faster |
 
-If ` + "`ask`" + ` isn't in ` + "`tools/list`" + `, gortex was built without ` + "`-tags llama`" + ` or ` + "`llm.model`" + ` is unset. Fall through to direct tools.
+If ` + "`ask`" + ` isn't in ` + "`tools/list`" + `, no provider could construct (missing model / API key, ` + "`local`" + ` without ` + "`-tags llama`" + `, ` + "`claudecli`" + ` without ` + "`claude`" + ` on ` + "`$PATH`" + `, ` + "`bedrock`" + ` without AWS credentials). Fall through to direct tools.
 
 ### Navigation and Reading
 

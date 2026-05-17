@@ -682,7 +682,7 @@ Gortex can delegate code-intelligence work to an LLM. Two features, both **off b
 
 ### Providers
 
-The backend is chosen by the `llm.provider` key. Four of the five providers are pure Go — available in any build; only `local` needs a `-tags llama` build (it embeds llama.cpp).
+The backend is chosen by the `llm.provider` key. Seven of the eight providers are pure Go — available in any build; only `local` needs a `-tags llama` build (it embeds llama.cpp).
 
 | `llm.provider` | Backend | Needs |
 |----------------|---------|-------|
@@ -691,6 +691,9 @@ The backend is chosen by the `llm.provider` key. Four of the five providers are 
 | `openai` | OpenAI Chat Completions | `OPENAI_API_KEY` |
 | `ollama` | Ollama daemon | a running Ollama + a pulled model |
 | `claudecli` | Claude Code CLI subprocess | the `claude` binary on `$PATH` (signed in once). **No API key — reuses your Claude Code subscription.** |
+| `gemini` | Google Gemini `generateContent` REST | `GEMINI_API_KEY` |
+| `bedrock` | AWS Bedrock Converse API (SigV4-signed, no AWS SDK) | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (+ optional `AWS_SESSION_TOKEN`) |
+| `deepseek` | DeepSeek Chat Completions (OpenAI-compatible) | `DEEPSEEK_API_KEY` |
 
 ### Configuration
 
@@ -699,7 +702,7 @@ The `llm:` block goes in `~/.config/gortex/config.yaml` or a per-repo `.gortex.y
 ```yaml
 # ~/.config/gortex/config.yaml (or per-repo .gortex.yaml)
 llm:
-  provider: local            # local | anthropic | openai | ollama | claudecli
+  provider: local            # local | anthropic | openai | ollama | claudecli | gemini | bedrock | deepseek
   max_steps: 16              # agent tool-loop cap (provider-agnostic)
 
   local:                     # provider: local — requires a `-tags llama` build
@@ -726,11 +729,29 @@ llm:
     model: sonnet             # optional — forwarded as `--model`; empty = CLI default
     # args: ["--allowed-tools", ""]   # extra args appended after our flags (disable tools, etc.)
     # timeout_seconds: 180    # cap per Complete call; 0 → 120s
+
+  gemini:                    # provider: gemini — Google Gemini generateContent REST
+    model: gemini-2.5-pro
+    api_key_env: GEMINI_API_KEY
+    # base_url: https://generativelanguage.googleapis.com
+
+  bedrock:                   # provider: bedrock — AWS Bedrock Converse API (SigV4-signed)
+    model_id: anthropic.claude-sonnet-4-20250514-v1:0
+    region: us-east-1
+    # access_key_env: AWS_ACCESS_KEY_ID
+    # secret_key_env: AWS_SECRET_ACCESS_KEY
+    # session_token_env: AWS_SESSION_TOKEN     # optional — for STS-issued creds
+    # base_url: https://bedrock-runtime.us-east-1.amazonaws.com   # override for VPC endpoints
+
+  deepseek:                  # provider: deepseek — OpenAI-compatible Chat Completions
+    model: deepseek-chat
+    api_key_env: DEEPSEEK_API_KEY
+    # base_url: https://api.deepseek.com
 ```
 
-Env overrides: `GORTEX_LLM_PROVIDER`, `GORTEX_LLM_MODEL` (targets the active provider's model — including `claudecli`), `GORTEX_LLM_MAX_STEPS`, and `GORTEX_LLM_CLAUDECLI_BINARY` (override the `claude` binary path). API keys are read from the env var named by `api_key_env` — never stored in the config file.
+Env overrides: `GORTEX_LLM_PROVIDER`, `GORTEX_LLM_MODEL` (targets the active provider's model — including `gemini`, `bedrock` (sets `model_id`), `deepseek`, `claudecli`), `GORTEX_LLM_MAX_STEPS`, `GORTEX_LLM_CLAUDECLI_BINARY`, and `GORTEX_LLM_BEDROCK_REGION`. API keys are read from the env var named by `api_key_env` — never stored in the config file.
 
-If the active provider can't be constructed (missing model or API key, `local` without a `-tags llama` build, or `claudecli` without the `claude` binary on `$PATH`), the daemon logs a warning and the LLM features stay absent — the rest of Gortex is unaffected. If the `ask` tool isn't in `tools/list`, no provider is configured.
+If the active provider can't be constructed (missing model or API key, `local` without a `-tags llama` build, `claudecli` without the `claude` binary on `$PATH`, `bedrock` without AWS credentials), the daemon logs a warning and the LLM features stay absent — the rest of Gortex is unaffected. If the `ask` tool isn't in `tools/list`, no provider is configured.
 
 The `assist` prompts are tiered automatically — terser for hosted frontier models, rule-heavy for small local ones. `deep` mode in particular benefits from a 7B-class or hosted model; small local models are unreliable on its disambiguation cases.
 

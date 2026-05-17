@@ -14,7 +14,10 @@ import (
 
 	"github.com/zzet/gortex/internal/llm"
 	"github.com/zzet/gortex/internal/llm/provider/anthropic"
+	"github.com/zzet/gortex/internal/llm/provider/bedrock"
 	"github.com/zzet/gortex/internal/llm/provider/claudecli"
+	"github.com/zzet/gortex/internal/llm/provider/deepseek"
+	"github.com/zzet/gortex/internal/llm/provider/gemini"
 	"github.com/zzet/gortex/internal/llm/provider/local"
 	"github.com/zzet/gortex/internal/llm/provider/ollama"
 	"github.com/zzet/gortex/internal/llm/provider/openai"
@@ -39,7 +42,13 @@ func New(cfg llm.Config) (llm.Provider, error) {
 		return ollama.New(cfg.Ollama)
 	case "claudecli":
 		return claudecli.New(cfg.ClaudeCLI)
+	case "gemini":
+		return gemini.New(cfg.Gemini)
+	case "bedrock":
+		return bedrock.New(cfg.Bedrock)
+	case "deepseek":
+		return deepseek.New(cfg.DeepSeek)
 	default:
-		return nil, fmt.Errorf("llm: unknown provider %q (want local|anthropic|openai|ollama|claudecli)", cfg.ProviderName())
+		return nil, fmt.Errorf("llm: unknown provider %q (want local|anthropic|openai|ollama|claudecli|gemini|bedrock|deepseek)", cfg.ProviderName())
 	}
 }

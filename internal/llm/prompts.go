@@ -32,7 +32,7 @@ const (
 // ProfileSmall (the safe, more-explicit tier).
 func ProfileForProvider(name string) PromptProfile {
 	switch name {
-	case "anthropic", "openai", "claudecli":
+	case "anthropic", "openai", "claudecli", "gemini", "bedrock", "deepseek":
 		return ProfileFrontier
 	default:
 		return ProfileSmall

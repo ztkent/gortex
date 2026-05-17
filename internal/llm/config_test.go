@@ -31,6 +31,12 @@ func TestConfig_IsEnabled(t *testing.T) {
 		{"claudecli no model", Config{Provider: "claudecli"}, true},
 		{"claudecli with model", Config{Provider: "claudecli", ClaudeCLI: ClaudeCLIConfig{Model: "sonnet"}}, true},
 		{"unknown provider", Config{Provider: "bogus", Local: LocalConfig{Model: "/m.gguf"}}, false},
+		{"gemini with model", Config{Provider: "gemini", Gemini: RemoteConfig{Model: "gemini-2.5-pro"}}, true},
+		{"gemini no model", Config{Provider: "gemini"}, false},
+		{"bedrock with model_id", Config{Provider: "bedrock", Bedrock: BedrockConfig{ModelID: "anthropic.claude-sonnet-4-20250514-v1:0"}}, true},
+		{"bedrock no model_id", Config{Provider: "bedrock"}, false},
+		{"deepseek with model", Config{Provider: "deepseek", DeepSeek: RemoteConfig{Model: "deepseek-chat"}}, true},
+		{"deepseek no model", Config{Provider: "deepseek"}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -63,6 +69,69 @@ func TestConfig_ApplyDefaults(t *testing.T) {
 	}
 	if c.ClaudeCLI.Binary != defaultClaudeCLIBinary {
 		t.Errorf("claudecli binary=%q want %q", c.ClaudeCLI.Binary, defaultClaudeCLIBinary)
+	}
+	if c.Gemini.Model != defaultGeminiModel || c.Gemini.APIKeyEnv != defaultGeminiKeyEnv || c.Gemini.BaseURL != defaultGeminiBaseURL {
+		t.Errorf("gemini defaults wrong: %+v", c.Gemini)
+	}
+	if c.Bedrock.Region != defaultBedrockRegion || c.Bedrock.AccessKeyEnv != defaultBedrockAccessKeyEnv || c.Bedrock.SecretKeyEnv != defaultBedrockSecretKeyEnv || c.Bedrock.SessionTokenEnv != defaultBedrockSessionTokenEnv {
+		t.Errorf("bedrock defaults wrong: %+v", c.Bedrock)
+	}
+	if c.DeepSeek.Model != defaultDeepSeekModel || c.DeepSeek.APIKeyEnv != defaultDeepSeekKeyEnv || c.DeepSeek.BaseURL != defaultDeepSeekBaseURL {
+		t.Errorf("deepseek defaults wrong: %+v", c.DeepSeek)
+	}
+}
+
+func TestConfig_MergeEnv_GeminiModel(t *testing.T) {
+	t.Setenv("GORTEX_LLM_PROVIDER", "gemini")
+	t.Setenv("GORTEX_LLM_MODEL", "gemini-2.5-flash")
+	c := Config{}.MergeEnv()
+	if c.Gemini.Model != "gemini-2.5-flash" {
+		t.Errorf("gemini model=%q — GORTEX_LLM_MODEL should target the active provider", c.Gemini.Model)
+	}
+}
+
+func TestConfig_MergeEnv_BedrockModelAndRegion(t *testing.T) {
+	t.Setenv("GORTEX_LLM_PROVIDER", "bedrock")
+	t.Setenv("GORTEX_LLM_MODEL", "anthropic.claude-opus-4-20250514-v1:0")
+	t.Setenv("GORTEX_LLM_BEDROCK_REGION", "eu-west-1")
+	c := Config{}.MergeEnv()
+	if c.Bedrock.ModelID != "anthropic.claude-opus-4-20250514-v1:0" {
+		t.Errorf("bedrock model_id=%q", c.Bedrock.ModelID)
+	}
+	if c.Bedrock.Region != "eu-west-1" {
+		t.Errorf("bedrock region=%q want eu-west-1", c.Bedrock.Region)
+	}
+}
+
+func TestConfig_MergeEnv_DeepSeekModel(t *testing.T) {
+	t.Setenv("GORTEX_LLM_PROVIDER", "deepseek")
+	t.Setenv("GORTEX_LLM_MODEL", "deepseek-reasoner")
+	c := Config{}.MergeEnv()
+	if c.DeepSeek.Model != "deepseek-reasoner" {
+		t.Errorf("deepseek model=%q", c.DeepSeek.Model)
+	}
+}
+
+func TestConfig_MergedWith_NewProviders(t *testing.T) {
+	global := Config{
+		Provider: "bedrock",
+		Bedrock:  BedrockConfig{ModelID: "anthropic.claude-sonnet-4-20250514-v1:0", Region: "us-east-1"},
+		Gemini:   RemoteConfig{APIKeyEnv: "GEMINI_API_KEY", Model: "gemini-2.5-pro"},
+		DeepSeek: RemoteConfig{APIKeyEnv: "DEEPSEEK_API_KEY"},
+	}
+	local := Config{Bedrock: BedrockConfig{Region: "eu-west-1"}}
+	got := local.MergedWith(global)
+	if got.Bedrock.Region != "eu-west-1" {
+		t.Errorf("bedrock region=%q want eu-west-1 (local should win)", got.Bedrock.Region)
+	}
+	if got.Bedrock.ModelID != "anthropic.claude-sonnet-4-20250514-v1:0" {
+		t.Errorf("bedrock model_id=%q — global should fill", got.Bedrock.ModelID)
+	}
+	if got.Gemini.Model != "gemini-2.5-pro" {
+		t.Errorf("gemini model=%q — global should fill", got.Gemini.Model)
+	}
+	if got.DeepSeek.APIKeyEnv != "DEEPSEEK_API_KEY" {
+		t.Errorf("deepseek api_key_env=%q — global should fill", got.DeepSeek.APIKeyEnv)
 	}
 }
 

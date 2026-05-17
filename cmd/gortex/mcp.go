@@ -420,7 +420,7 @@ func runMCP(cmd *cobra.Command, args []string) error {
 	// per non-zero field, global ~/.config/gortex/config.yaml fills the
 	// rest, env vars override last inside SetupLLM. The active provider
 	// is chosen by `llm.provider` (local / anthropic / openai / ollama /
-	// claudecli).
+	// claudecli / gemini / bedrock / deepseek).
 	gc, _ := config.LoadGlobal()
 	srv.SetupLLM(gc.MergeLLMInto(cfg.LLM))
 
