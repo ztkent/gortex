@@ -270,8 +270,10 @@ All query tools (`search_symbols`, `get_symbol`, `find_usages`, `get_file_summar
 
 After `gortex install` (once per machine) and `gortex init` (once per repo), Claude Code automatically starts Gortex via `.mcp.json`. The agent gets:
 
-- **Slash commands:** `/gortex-guide`, `/gortex-explore`, `/gortex-debug`, `/gortex-impact`, `/gortex-refactor` — installed to `~/.claude/commands/` by `gortex install`
-- **Tool-usage skills:** installed to `~/.claude/skills/` by `gortex install` — one copy per user, used across every repo
+- **Slash commands (12):** installed to `~/.claude/commands/` by `gortex install`. Two groups:
+  - *Discovery & analysis* — `/gortex-guide`, `/gortex-explore`, `/gortex-debug`, `/gortex-impact`, `/gortex-dataflow-trace`, `/gortex-cross-repo-usage`
+  - *Refactor & edit (enforce tool-call order)* — `/gortex-refactor`, `/gortex-safe-edit`, `/gortex-rename`, `/gortex-extract-function`, `/gortex-fix-all`, `/gortex-add-test`. These wrap the speculative-execution (`preview_edit` / `simulate_chain`) and LSP code-actions (`get_code_actions` / `apply_code_action` / `fix_all_in_file`) paths so the agent does not bypass the safety steps by calling `Edit` / `Write` directly.
+- **Tool-usage skills:** the same 12 are installed as model-invoked skills to `~/.claude/skills/` by `gortex install` — one copy per user, used across every repo
 - **PreToolUse hook:** automatic graph context + graph-tool suggestions on Read/Grep/Glob
 - **PreCompact hook:** condensed orientation snapshot injected before context compaction so the agent resumes without re-exploring
 - **Stop hook:** post-task diagnostics — tests to run, guard violations, dead code, and contract issues on the changed symbols — injected as context before the agent hands off
