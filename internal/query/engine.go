@@ -321,6 +321,9 @@ func (e *Engine) FindUsagesScoped(nodeID string, opts QueryOptions) *SubGraph {
 		// find_usages on an Image returns workloads pulling it.
 		if edge.Kind == graph.EdgeCalls || edge.Kind == graph.EdgeReferences ||
 			edge.Kind == graph.EdgeInstantiates ||
+			edge.Kind == graph.EdgeReturns || edge.Kind == graph.EdgeTypedAs ||
+			edge.Kind == graph.EdgeImplements || edge.Kind == graph.EdgeExtends ||
+			edge.Kind == graph.EdgeComposes ||
 			edge.Kind == graph.EdgeProvides || edge.Kind == graph.EdgeConsumes ||
 			edge.Kind == graph.EdgeReadsConfig || edge.Kind == graph.EdgeWritesConfig ||
 			edge.Kind == graph.EdgeUsesEnv || edge.Kind == graph.EdgeConfigures ||

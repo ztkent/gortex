@@ -398,6 +398,60 @@ func TestResolveAll_MethodValuePromotesReadToReferences(t *testing.T) {
 		"kind should be promoted Reads→References so get_callers/find_usages surface it")
 }
 
+// Regression: a return-type or param-type reference must resolve to
+// a TYPE, never to a same-named function or method. Before the fix
+// the resolver's default case routed `EdgeReturns` / `EdgeTypedAs`
+// through resolveFunctionCall, so `func GetLanguage() *tsitter.Language`
+// landed on a method named `Language` somewhere unrelated in the
+// repo — leaving the `Language` type alias visibly unused and
+// triggering false-positive dead-code skulls on every cross-package
+// type re-export pattern.
+func TestResolveAll_ReturnsAndTypedAsResolveToType(t *testing.T) {
+	g := graph.New()
+	g.AddNode(&graph.Node{
+		ID: "pkg/tsitter/tsitter.go::Language", Kind: graph.KindType, Name: "Language",
+		FilePath: "pkg/tsitter/tsitter.go", StartLine: 30, Language: "go",
+	})
+	// Decoy method with the same name — pre-fix the resolver picked
+	// this because it tried resolveFunctionCall first.
+	g.AddNode(&graph.Node{
+		ID: "pkg/apex/apex.go::Apex.Language", Kind: graph.KindMethod, Name: "Language",
+		FilePath: "pkg/apex/apex.go", StartLine: 11, Language: "go",
+		Meta: map[string]any{"receiver": "Apex"},
+	})
+	g.AddNode(&graph.Node{
+		ID: "pkg/ocaml/ocaml.go::GetLanguage", Kind: graph.KindFunction, Name: "GetLanguage",
+		FilePath: "pkg/ocaml/ocaml.go", StartLine: 10, Language: "go",
+	})
+	g.AddNode(&graph.Node{
+		ID: "pkg/ocaml/ocaml.go::Run#param:lang", Kind: graph.KindParam, Name: "lang",
+		FilePath: "pkg/ocaml/ocaml.go", StartLine: 20, Language: "go",
+	})
+
+	// `func GetLanguage() *tsitter.Language` → EdgeReturns
+	retEdge := &graph.Edge{
+		From: "pkg/ocaml/ocaml.go::GetLanguage", To: "unresolved::Language",
+		Kind: graph.EdgeReturns, FilePath: "pkg/ocaml/ocaml.go", Line: 10,
+	}
+	g.AddEdge(retEdge)
+
+	// `func Run(lang *tsitter.Language)` → EdgeTypedAs on the param
+	typedAsEdge := &graph.Edge{
+		From: "pkg/ocaml/ocaml.go::Run#param:lang", To: "unresolved::Language",
+		Kind: graph.EdgeTypedAs, FilePath: "pkg/ocaml/ocaml.go", Line: 20,
+	}
+	g.AddEdge(typedAsEdge)
+
+	r := New(g)
+	stats := r.ResolveAll()
+
+	assert.Equal(t, 2, stats.Resolved)
+	assert.Equal(t, "pkg/tsitter/tsitter.go::Language", retEdge.To,
+		"EdgeReturns must resolve to the type, not the same-named method")
+	assert.Equal(t, "pkg/tsitter/tsitter.go::Language", typedAsEdge.To,
+		"EdgeTypedAs must resolve to the type, not the same-named method")
+}
+
 // Regression: a *bare* function name passed as a value (e.g.
 // `&cobra.Command{RunE: runClean}`) is extracted as EdgeReads with
 // To=`unresolved::runClean`. The heuristic default case calls

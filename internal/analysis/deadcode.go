@@ -158,15 +158,18 @@ func incomingUsageKinds(k graph.NodeKind) []graph.EdgeKind {
 			graph.EdgeMemberOf, graph.EdgeImplements, graph.EdgeInstantiates,
 		}
 	case graph.KindType, graph.KindInterface:
-		// Types are exercised by References (typed-as / return-type /
-		// param-type), Instantiates (struct literal), MemberOf
-		// (methods/fields hanging off the type), Implements (a type
-		// satisfies this interface), Extends (subclass), Composes
-		// (embeds), TypedAs (variable typed as this type).
+		// Types are exercised by References (generic value-position
+		// use), Instantiates (struct literal), MemberOf (methods/
+		// fields hanging off the type), Implements (a type satisfies
+		// this interface), Extends (subclass), Composes (embeds),
+		// TypedAs (variable / param / field declared as this type),
+		// Returns (function returns this type — the canonical pattern
+		// for cross-package type re-export via `type X = pkg.X`).
 		return []graph.EdgeKind{
 			graph.EdgeReferences, graph.EdgeInstantiates,
 			graph.EdgeMemberOf, graph.EdgeImplements,
-			graph.EdgeExtends, graph.EdgeComposes, graph.EdgeTypedAs,
+			graph.EdgeExtends, graph.EdgeComposes,
+			graph.EdgeTypedAs, graph.EdgeReturns,
 		}
 	case graph.KindField:
 		// Fields are accessed via Reads/Writes (the dominant pattern)

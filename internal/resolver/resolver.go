@@ -463,16 +463,25 @@ func (r *Resolver) resolveEdge(e *graph.Edge, stats *ResolveStats) (oldTo string
 		// its precise import-path evidence here rather than falling to
 		// the same-repo-only resolveTypeRef below.
 		r.resolveExtern(e, strings.TrimPrefix(target, "extern::"), stats)
-	case e.Kind == graph.EdgeExtends || e.Kind == graph.EdgeImplements || e.Kind == graph.EdgeComposes:
-		// Type-hierarchy edges must land on a type or interface — never
-		// a function or method. Routing them through resolveFunctionCall
-		// or resolveMethodCall (the old default / `*.` paths) let
-		// `type EdgeKind string` "extend" a method named `string` in
-		// some other repo. resolveTypeRef accepts only KindType /
-		// KindInterface candidates and is placed ahead of the `*.`
-		// cases so a selector-shaped supertype target can't slip into
-		// method resolution. extern:: targets are handled above —
-		// their import path is real cross-repo evidence.
+	case e.Kind == graph.EdgeExtends || e.Kind == graph.EdgeImplements || e.Kind == graph.EdgeComposes ||
+		e.Kind == graph.EdgeReturns || e.Kind == graph.EdgeTypedAs:
+		// Type-hierarchy and type-position edges must land on a type
+		// or interface — never a function or method. Without this
+		// gate the default case routes them through resolveFunctionCall
+		// which happily matches any same-named function (e.g.
+		// `*tsitter.Language` as a return type landed on a method
+		// named `Language` instead of the `Language` type alias,
+		// hiding every cross-package type reference from the graph
+		// and making aliased types look completely unused). The four
+		// kinds covered here:
+		//   - EdgeExtends/EdgeImplements/EdgeComposes: type hierarchy
+		//   - EdgeReturns: function/method return types
+		//   - EdgeTypedAs: parameter / variable / field declared types
+		// resolveTypeRef accepts only KindType / KindInterface
+		// candidates and is placed ahead of the `*.` cases so a
+		// selector-shaped supertype target can't slip into method
+		// resolution. extern:: targets are handled above — their
+		// import path is real cross-repo evidence.
 		r.resolveTypeRef(e, target, stats)
 	case strings.HasPrefix(target, "*.") && (e.Kind == graph.EdgeWrites || e.Kind == graph.EdgeReads):
 		// Field write/read: prefer a KindField candidate whose
