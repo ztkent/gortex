@@ -52,11 +52,13 @@ const ProjectMCPJSON = `{
 const ClaudeMdBlock = agents.InstructionsBody + `
 ## Gortex slash commands
 
-Discovery & analysis: ` + "`/gortex-guide`" + `, ` + "`/gortex-explore`" + `, ` + "`/gortex-debug`" + `, ` + "`/gortex-impact`" + `, ` + "`/gortex-dataflow-trace`" + `, ` + "`/gortex-cross-repo-usage`" + `
+Discovery & analysis: ` + "`/gortex-guide`" + `, ` + "`/gortex-explore`" + `, ` + "`/gortex-debug`" + `, ` + "`/gortex-impact`" + `, ` + "`/gortex-dataflow-trace`" + `, ` + "`/gortex-cross-repo-usage`" + `, ` + "`/gortex-co-change`" + `, ` + "`/gortex-onboarding`" + `
 
-Refactor & edit: ` + "`/gortex-refactor`" + `, ` + "`/gortex-safe-edit`" + `, ` + "`/gortex-rename`" + `, ` + "`/gortex-extract-function`" + `, ` + "`/gortex-fix-all`" + `, ` + "`/gortex-add-test`" + `
+Refactor & edit (enforce tool-call order): ` + "`/gortex-refactor`" + `, ` + "`/gortex-safe-edit`" + `, ` + "`/gortex-rename`" + `, ` + "`/gortex-extract-function`" + `, ` + "`/gortex-fix-all`" + `, ` + "`/gortex-add-test`" + `
 
-The edit and refactor skills enforce a tool-call order — they exist to keep you on the speculative-execution path (` + "`preview_edit`" + ` → ` + "`simulate_chain`" + ` → ` + "`batch_edit`" + `) and the LSP code-actions path (` + "`get_code_actions`" + ` → ` + "`apply_code_action`" + `) instead of going straight to ` + "`Edit`" + ` / ` + "`Write`" + `.
+Review & operate: ` + "`/gortex-pr-review`" + `, ` + "`/gortex-architecture-review`" + `, ` + "`/gortex-quality-audit`" + `, ` + "`/gortex-incident-investigation`" + `, ` + "`/gortex-episode-replay`" + `
+
+The edit and refactor skills enforce a tool-call order — they exist to keep you on the speculative-execution path (` + "`preview_edit`" + ` → ` + "`simulate_chain`" + ` → ` + "`batch_edit`" + `) and the LSP code-actions path (` + "`get_code_actions`" + ` → ` + "`apply_code_action`" + `) instead of going straight to ` + "`Edit`" + ` / ` + "`Write`" + `. The review & operate skills wrap the discovery + impact + memory surfaces into ordered playbooks so postmortems, audits, and PR reviews are graph-grounded.
 `
 
 // ClaudeMdSentinel is the substring used to detect whether
@@ -71,18 +73,25 @@ const ClaudeMdSentinel = agents.InstructionsSentinel
 // markdown content. Each file is a slash command Claude Code
 // auto-discovers.
 var SlashCommands = map[string]string{
-	"gortex-guide.md":             commandGuide,
-	"gortex-explore.md":           commandExplore,
-	"gortex-debug.md":             commandDebug,
-	"gortex-impact.md":            commandImpact,
-	"gortex-refactor.md":          commandRefactor,
-	"gortex-safe-edit.md":         commandSafeEdit,
-	"gortex-fix-all.md":           commandFixAll,
-	"gortex-extract-function.md":  commandExtractFunction,
-	"gortex-rename.md":            commandRename,
-	"gortex-cross-repo-usage.md":  commandCrossRepoUsage,
-	"gortex-dataflow-trace.md":    commandDataflowTrace,
-	"gortex-add-test.md":          commandAddTest,
+	"gortex-guide.md":                    commandGuide,
+	"gortex-explore.md":                  commandExplore,
+	"gortex-debug.md":                    commandDebug,
+	"gortex-impact.md":                   commandImpact,
+	"gortex-refactor.md":                 commandRefactor,
+	"gortex-safe-edit.md":                commandSafeEdit,
+	"gortex-fix-all.md":                  commandFixAll,
+	"gortex-extract-function.md":         commandExtractFunction,
+	"gortex-rename.md":                   commandRename,
+	"gortex-cross-repo-usage.md":         commandCrossRepoUsage,
+	"gortex-dataflow-trace.md":           commandDataflowTrace,
+	"gortex-add-test.md":                 commandAddTest,
+	"gortex-incident-investigation.md":   commandIncidentInvestigation,
+	"gortex-episode-replay.md":           commandEpisodeReplay,
+	"gortex-co-change.md":                commandCoChange,
+	"gortex-onboarding.md":               commandOnboarding,
+	"gortex-quality-audit.md":            commandQualityAudit,
+	"gortex-architecture-review.md":      commandArchitectureReview,
+	"gortex-pr-review.md":                commandPRReview,
 }
 
 // GlobalSkills maps the directory name under ~/.claude/skills/ to
@@ -160,6 +169,48 @@ name: gortex-add-test
 description: "Use when the user wants to add tests for under-tested code — coverage gaps, untested symbols, regression repro. Enforces analyze coverage_gaps / get_untested_symbols / suggest_pattern / scaffold / get_test_targets. Examples: \"Add tests for X\", \"Cover the gaps in this package\", \"Write a test for this bug\""
 ---
 ` + commandAddTest,
+
+	"gortex-incident-investigation": `---
+name: gortex-incident-investigation
+description: "Use when an alert fired, a deploy regressed, or production is misbehaving and the user needs to walk from symptom (log line, error, broken endpoint, failing CI) back to root cause. Enforces surface_memories / search_symbols / get_recent_changes / analyze error_surface|event_emitters / get_callers / flow_between / taint_paths / explain_change_impact / store_memory(kind:incident). Examples: \"Why did this alert fire?\", \"What broke in the last deploy?\", \"Trace this production error to its root cause\""
+---
+` + commandIncidentInvestigation,
+
+	"gortex-episode-replay": `---
+name: gortex-episode-replay
+description: "Use when the user wants to reconstruct what happened in a window — for a postmortem, a release-boundary diff, a 'what did Alice change last week', or a 'what did this PR actually change beyond the diff'. Enforces gortex enrich blame all / analyze releases|blame|ownership / get_recent_changes / detect_changes / diff_context / explain_change_impact per symbol / query_notes|query_memories / export_context. Examples: \"What shipped in v1.3?\", \"Walk me through last week's changes\", \"Build a postmortem from this incident window\""
+---
+` + commandEpisodeReplay,
+
+	"gortex-co-change": `---
+name: gortex-co-change
+description: "Use when the user asks what tends to change together — for refactor planning, ownership decisions, ADR rationale, or to find hidden coupling the graph's static edges don't capture. Enforces gortex enrich blame all / get_recent_changes / get_symbol_history / analyze blame|ownership|hotspots / get_dependents / find_clones / detect_changes. Examples: \"What changes together with X?\", \"Find hidden coupling in this package\", \"Which files should I refactor together?\""
+---
+` + commandCoChange,
+
+	"gortex-onboarding": `---
+name: gortex-onboarding
+description: "Use when the user is new to a repo (or returning cold) and wants a structured tour — where to read first, what the architecture is, who owns what, where to safely make a first edit. Enforces graph_stats / get_active_project / get_repo_outline / surface_memories / distill_session / get_communities / get_processes / analyze hotspots|components|routes|models|ownership / contracts list / audit_agent_config / export_context. Examples: \"Give me a tour of this repo\", \"I'm new here, where do I start?\", \"Onboard me on this codebase\""
+---
+` + commandOnboarding,
+
+	"gortex-quality-audit": `---
+name: gortex-quality-audit
+description: "Use when the user wants a structured pass over a repo / directory looking for code-quality issues at scale — dead code, hotspots, cycles, churn, todos, coverage gaps, clones, anti-patterns, config drift. Enforces gortex enrich / analyze dead_code|hotspots|cycles|todos|stale_code|stale_flags|coverage_*|error_surface|field_writers|race_writes|unclosed_channels|orphan_tables / find_clones dead_only / search_ast detectors / audit_agent_config / contracts check / export_context. Examples: \"Audit this repo for quality issues\", \"Find code smells in this package\", \"Run a quality scan and rank by priority\""
+---
+` + commandQualityAudit,
+
+	"gortex-architecture-review": `---
+name: gortex-architecture-review
+description: "Use when the user wants a graph-grounded architectural read — what the architecture actually looks like, where the design is under stress, what to refactor before it breaks. Distinct from quality-audit (punch list) — this produces a narrative. Enforces get_repo_outline / get_communities / get_processes / analyze components|routes|models|k8s_resources|images|hotspots|cycles|cross_repo|pubsub|channel_ops|race_writes|stale_code|ownership / contracts list+check / get_class_hierarchy / get_dependencies+dependents at community level / export_context. Examples: \"Review the architecture of this repo\", \"Where is this design under stress?\", \"Map the de facto modules and processes\""
+---
+` + commandArchitectureReview,
+
+	"gortex-pr-review": `---
+name: gortex-pr-review
+description: "Use when the user wants a code-review pass on a pending change — local staged diff, a branch about to merge, or a PR they're reading. Walks the diff through the graph so comments are grounded in real callers / contracts / coverage / guards, not style nitpicks. Enforces detect_changes / diff_context / explain_change_impact / verify_change / contracts check / check_guards / analyze would_create_cycle|coverage_gaps / get_test_targets / find_clones dead_only / preview_edit on high-risk changes / surface_memories on touched symbols / export_context. Examples: \"Review this PR\", \"What does this staged diff break?\", \"Do a graph-grounded review of this change\""
+---
+` + commandPRReview,
 }
 
 const commandGuide = `# Gortex Guide
@@ -178,27 +229,41 @@ Quick reference for all Gortex MCP tools and the knowledge graph schema.
 
 ### Discovery & analysis
 
-| Task                                                         | Command                    |
-| ------------------------------------------------------------ | -------------------------- |
-| Understand architecture / "How does X work?"                 | /gortex-explore            |
-| Blast radius / "What breaks if I change X?"                  | /gortex-impact             |
-| Trace bugs / "Why is X failing?"                             | /gortex-debug              |
-| Trace dataflow / "Where does this value end up?"             | /gortex-dataflow-trace     |
-| Cross-repo usage / "Who uses this across all our repos?"     | /gortex-cross-repo-usage   |
-| Tools, schema reference                                      | /gortex-guide (this)       |
+| Task                                                         | Command                       |
+| ------------------------------------------------------------ | ----------------------------- |
+| Understand architecture / "How does X work?"                 | /gortex-explore               |
+| Blast radius / "What breaks if I change X?"                  | /gortex-impact                |
+| Trace bugs / "Why is X failing?"                             | /gortex-debug                 |
+| Trace dataflow / "Where does this value end up?"             | /gortex-dataflow-trace        |
+| Cross-repo usage / "Who uses this across all our repos?"     | /gortex-cross-repo-usage      |
+| Co-change / "What changes together with X?"                  | /gortex-co-change             |
+| Onboarding / "Give me a tour of this repo"                   | /gortex-onboarding            |
+| Tools, schema reference                                      | /gortex-guide (this)          |
 
 ### Refactor & edit (enforce tool-call order)
 
 These wrap the speculative-execution + LSP-code-actions plumbing so you do not bypass the safety steps by calling ` + "`Edit`" + ` / ` + "`Write`" + ` directly.
 
-| Task                                                         | Command                    |
-| ------------------------------------------------------------ | -------------------------- |
-| Safe edit / "Apply this WorkspaceEdit but verify first"      | /gortex-safe-edit          |
-| Rename / extract / split / restructure                       | /gortex-refactor           |
-| Rename one symbol everywhere                                 | /gortex-rename             |
-| Extract a function / method / variable via LSP refactor      | /gortex-extract-function   |
-| Apply LSP quick-fixes / source.fixAll                        | /gortex-fix-all            |
-| Add tests for under-covered code                             | /gortex-add-test           |
+| Task                                                         | Command                       |
+| ------------------------------------------------------------ | ----------------------------- |
+| Safe edit / "Apply this WorkspaceEdit but verify first"      | /gortex-safe-edit             |
+| Rename / extract / split / restructure                       | /gortex-refactor              |
+| Rename one symbol everywhere                                 | /gortex-rename                |
+| Extract a function / method / variable via LSP refactor      | /gortex-extract-function      |
+| Apply LSP quick-fixes / source.fixAll                        | /gortex-fix-all               |
+| Add tests for under-covered code                             | /gortex-add-test              |
+
+### Review & operate (graph-grounded playbooks)
+
+These wrap the discovery + impact + memory surfaces into ordered playbooks so postmortems, audits, and PR reviews are graph-grounded, not stream-of-consciousness.
+
+| Task                                                         | Command                       |
+| ------------------------------------------------------------ | ----------------------------- |
+| Review a PR / staged diff                                    | /gortex-pr-review             |
+| Architecture review (narrative + diagrams)                   | /gortex-architecture-review   |
+| Quality audit (prioritised findings packet)                  | /gortex-quality-audit         |
+| Incident investigation (symptom → root cause)                | /gortex-incident-investigation|
+| Episode replay (postmortem / release / window timeline)      | /gortex-episode-replay        |
 
 ## Tools Reference
 
@@ -948,4 +1013,617 @@ After the new test runs green:
 - ` + "`get_test_targets`" + ` after the apply — the test must be discoverable + mapped to a run command
 - Re-run ` + "`analyze kind=coverage_gaps`" + ` once the test is green; confirm the gap actually closed (a passing test that doesn't exercise the gap is theatre)
 - If the test encodes a project-wide invariant ("Bar must hold the lock"), ` + "`store_memory kind:invariant`" + ` so the next agent inherits the constraint
+`
+
+const commandIncidentInvestigation = `# Incident Investigation with Gortex
+
+Use this when an alert fired, a deploy regressed, or production is misbehaving and the user needs to walk back from the symptom (log line, error message, broken endpoint, failing test in CI) to the root cause. Wraps the debug + impact + recent-changes paths into one ordered drill so the investigator never loses the thread.
+
+## Workflow (do not skip steps)
+
+` + "```" + `
+1. graph_stats                                                         -> Confirm index + orient
+2. surface_memories({task: "<symptom>"})                               -> Prior incidents / invariants on the same area
+3. search_symbols({query: "<error string or symbol name from the alert>"})  -> Resolve the suspect symbol
+4. get_recent_changes({since_ts: <alert_time - 24h>})                  -> Files/symbols changed in the suspect window
+5. get_symbol_history                                                  -> Symbols churning this session (regression hotspot)
+6. analyze({kind: "error_surface", path_prefix: "<suspect dir>/"})     -> Throw sites that match the symptom
+7. analyze({kind: "event_emitters", level: "error",                    -> Every log/metric site that could have produced the alert
+            path_prefix: "<suspect dir>/", name: "<event token>"})
+8. get_callers({id: "<suspect symbol>"})                               -> Who calls the suspect — narrow blast
+9. get_call_chain({id: "<suspect symbol>"})                            -> What the suspect calls — downstream contributors
+10. flow_between({source_id: "<input>", sink_id: "<suspect>"})         -> Trace the bad value's path (when applicable)
+11. taint_paths({source_pattern: "name:<external input>",              -> Every flow from a kind of source to the suspect
+                  sink_pattern: "name:<suspect>"})
+12. analyze({kind: "field_writers", id: "<contended field>"})          -> Race / mutation suspects
+13. analyze({kind: "channel_ops"})                                     -> Channel deadlock / orphan recv (Go)
+14. analyze({kind: "goroutine_spawns"})                                -> Unowned background work
+15. explain_change_impact({ids: "<root-cause id>"})                    -> Blast radius of the proposed fix
+16. get_test_targets({ids: ["<root-cause id>"]})                       -> Tests to add / re-run as regression coverage
+17. store_memory({kind: "incident", title: "<incident slug>",          -> Persist root cause + fix + affected symbols
+                  body: "...", symbol_ids: ["<id>"], importance: 5})
+` + "```" + `
+
+## Triage by symptom
+
+| Symptom                                                  | First-stop tools                                             |
+| -------------------------------------------------------- | ------------------------------------------------------------ |
+| New 5xx / panic / crash log                              | ` + "`search_symbols`" + ` on the error → ` + "`analyze kind=error_surface`" + ` → ` + "`get_callers`" + ` on throw sites |
+| Latency spike on one endpoint                            | ` + "`analyze kind=routes path=<route>`" + ` → ` + "`get_call_chain`" + ` on the handler → ` + "`analyze kind=external_calls`" + ` for hot stdlib / module hops |
+| Background worker silently broken                        | ` + "`analyze kind=goroutine_spawns`" + ` / ` + "`channel_ops`" + ` → ` + "`get_callers`" + ` on the spawned target |
+| Pub/sub event missing                                    | ` + "`analyze kind=pubsub name=<topic>`" + ` → publisher + subscriber sides; ` + "`taint_paths`" + ` from publisher to subscriber handler |
+| Config-driven misbehavior after a deploy                 | ` + "`analyze kind=config_readers name=<KEY>`" + ` → callers; ` + "`analyze kind=stale_flags`" + ` if it's a feature flag |
+| Data corruption / wrong value at a sink                  | ` + "`flow_between`" + ` from suspected source to sink; ` + "`taint_paths`" + ` when multiple sources are plausible |
+| Cross-service / contract drift                           | ` + "`contracts({action: check})`" + ` → orphan providers/consumers; pair with ` + "`/gortex-cross-repo-usage`" + ` |
+| Test regression after a refactor                         | ` + "`detect_changes`" + ` over the merge → ` + "`diff_context`" + ` for graph-enriched view → ` + "`get_test_targets`" + ` for the missing test signal |
+
+## Walking the timeline
+
+When the symptom appears tied to a window (between two deploys, between two commits, since N hours ago):
+
+1. ` + "`analyze kind=blame`" + ` to stamp ` + "`meta.last_authored`" + ` on every blame-eligible symbol (one-time per session; cheap thereafter)
+2. ` + "`get_recent_changes since_ts=<window-start>`" + ` to enumerate files / symbols touched
+3. ` + "`detect_changes scope=all`" + ` to project the diff onto blast radius
+4. Pair each touched symbol with ` + "`explain_change_impact`" + ` — anything in the d=1/d=2 buckets that overlaps the symptom area is your root-cause candidate
+5. ` + "`get_symbol_history`" + ` flags symbols edited 3+ times *in this session*; combine with blame for "edited 3+ times in the suspect window"
+
+## Closing the loop (mandatory)
+
+After root-cause is found and the fix is shipped:
+- ` + "`store_memory({kind: \"incident\", ...})`" + ` so the next on-call sees this pattern surfaced via ` + "`surface_memories`" + `
+- If the incident exposed an invariant the code lacked guard for (lock missing, contract unenforced), also ` + "`store_memory({kind: \"invariant\", importance: 5, pinned: true})`" + `
+- ` + "`save_note({tags: \"incident\", body: ...})`" + ` for the session-local timeline before context compacts
+
+## Checklist
+
+- ` + "`graph_stats`" + ` + ` + "`surface_memories`" + ` before any search — prior incident memories are the highest-value signal
+- ` + "`search_symbols`" + ` on the actual error string / symbol from the alert — do not paraphrase
+- ` + "`get_recent_changes`" + ` + ` + "`get_symbol_history`" + ` to scope the window
+- ` + "`analyze kind=error_surface`" + ` + ` + "`event_emitters`" + ` to find the production sites of the symptom
+- ` + "`get_callers`" + ` / ` + "`get_call_chain`" + ` / ` + "`flow_between`" + ` / ` + "`taint_paths`" + ` to walk from symptom toward root cause
+- Concurrency-shape symptoms → ` + "`channel_ops`" + ` / ` + "`goroutine_spawns`" + ` / ` + "`field_writers`" + ` / ` + "`race_writes`" + ` / ` + "`unclosed_channels`" + `
+- ` + "`explain_change_impact`" + ` on the candidate fix; ` + "`get_test_targets`" + ` for regression coverage
+- ` + "`store_memory({kind: \"incident\"})`" + ` is **mandatory** before declaring the investigation closed
+`
+
+const commandEpisodeReplay = `# Episode Replay with Gortex (timeline reconstruction)
+
+Use this when the user wants to reconstruct what happened in a specific window — for a postmortem, a "what shipped between v1.2 and v1.3", a "what did Alice touch last week", or "walk me through what this PR actually changed". Pairs git history with the graph so the replay shows blast radius alongside the diff, not just the file list.
+
+## Workflow (do not skip steps)
+
+` + "```" + `
+1. graph_stats                                                         -> Orient
+2. gortex enrich blame all (CLI; once per session)                     -> Stamp meta.last_authored / meta.last_commit_at / meta.added_in
+3. analyze({kind: "releases"})                                         -> Tag boundaries → maps a tag to the symbols added in it
+4. analyze({kind: "blame", path_prefix: "<scope>/"})                   -> Per-symbol last-author rollup
+5. get_recent_changes({since_ts: <window-start>})                      -> Symbols touched in the window
+6. analyze({kind: "ownership", path_prefix: "<scope>/"})               -> Per-author symbol/file counts in the window
+7. detect_changes({scope: "<all|staged|since-tag>"})                   -> The change-set's graph projection
+8. diff_context({scope: "<same>"})                                     -> Graph-enriched diff: callers, callees, communities, per-file risk
+9. For each material symbol in the window:
+     get_symbol_history({id: "<id>"})                                  -> Per-session edit count (regression hotspot)
+     explain_change_impact({ids: "<id>"})                              -> Blast radius of that one change
+10. query_notes({since: <window-start>})                               -> Session decisions / bug notes recorded in the window
+11. query_memories({tag: "decision", since: <window-start>})           -> Cross-session decisions in the window
+12. export_context({format: "markdown",                                -> Hand the replay packet to PR / Slack / wiki
+                    sections: ["changes", "impact", "decisions"]})
+` + "```" + `
+
+## Replay shapes
+
+| Goal                                                  | Driver query                                                             |
+| ----------------------------------------------------- | ------------------------------------------------------------------------ |
+| "What shipped in v1.3?"                               | ` + "`analyze kind=releases`" + ` → symbols where ` + "`meta.added_in == \"v1.3\"`" + `; then ` + "`diff_context`" + ` between v1.2..v1.3 tags |
+| "What did Alice change last week?"                    | ` + "`analyze kind=ownership`" + ` filtered to Alice → cross-ref with ` + "`get_recent_changes since_ts=now-7d`" + ` |
+| "What did this incident touch?"                       | Start with ` + "`/gortex-incident-investigation`" + ` → use its root-cause symbol set as the seed; replay walks ` + "`explain_change_impact`" + ` on each |
+| "Postmortem narrative for a one-day window"           | Full chain above + ` + "`query_notes`" + ` + ` + "`query_memories`" + ` so commentary rides next to code in the markdown |
+| "What did this PR actually change beyond the diff?"   | ` + "`detect_changes scope=staged`" + ` + ` + "`diff_context`" + ` + ` + "`explain_change_impact`" + ` per symbol → second-order blast that the literal diff hides |
+
+## Reading the replay output
+
+- ` + "`detect_changes`" + ` is the change-set's *graph* projection — every node a touched file owns, plus every directly-affected dependent. It is broader than ` + "`git diff --stat`" + ` because it captures symbols whose *meaning* changed, not just files whose *bytes* changed.
+- ` + "`diff_context`" + ` adds the callers / callees / community / processes / per-file risk overlay. This is the artifact you embed in the PR description or postmortem.
+- Per-symbol ` + "`explain_change_impact`" + ` surfaces the *second-order* blast (what depends on the things that changed). The replay is incomplete without this for any change touching a fan-in-heavy symbol.
+
+## Crossing the merge boundary
+
+For replays that span a merge or rebase, prefer ` + "`detect_changes scope=since-tag`" + ` over a literal commit-range diff. The graph projection survives rebases that the literal diff doesn't.
+
+When the replay is across a release boundary, ` + "`analyze kind=releases`" + ` is the bridge: it stamps ` + "`meta.added_in`" + ` from git tags onto file nodes, so "symbols introduced in v1.3" is one filter away.
+
+## Annotating the replay with prior context
+
+` + "`query_notes`" + ` and ` + "`query_memories`" + ` are how prior session decisions and cross-session invariants enter the timeline:
+
+- ` + "`query_notes({since: <window-start>})`" + ` — every session note authored in the window; tag-filterable (` + "`decision`" + ` / ` + "`bug`" + ` / ` + "`gotcha`" + ` / ` + "`follow-up`" + `).
+- ` + "`query_memories({tag: \"decision\", since: <window-start>})`" + ` — durable cross-session decisions stamped in the window.
+
+These two surfaces are how a postmortem reads as a story rather than a list of file paths.
+
+## Checklist
+
+- ` + "`gortex enrich blame all`" + ` (CLI) at least once per session — the blame / releases / ownership analyzers need ` + "`meta.last_authored`" + ` to be populated
+- ` + "`analyze kind=releases`" + ` for release-boundary replays
+- ` + "`get_recent_changes`" + ` + ` + "`analyze kind=ownership`" + ` for the window-scoped change set
+- ` + "`detect_changes`" + ` + ` + "`diff_context`" + ` to project the diff onto the graph
+- ` + "`explain_change_impact`" + ` on every material symbol — second-order blast or it didn't happen
+- ` + "`query_notes`" + ` + ` + "`query_memories`" + ` to ride commentary alongside the code timeline
+- ` + "`export_context format=markdown`" + ` so the replay leaves the session as a shareable artifact
+`
+
+const commandCoChange = `# Co-change Analysis with Gortex
+
+Use this when the user asks "what tends to change together with this?" — for refactor planning, ownership decisions, ADR rationale, or to find hidden coupling the graph's static edges don't capture (two files that always co-modify but have no import / call edge between them). Built on git blame + history + the symbol-churn surface ` + "`get_symbol_history`" + ` + the existing graph dependents view.
+
+## Workflow (do not skip steps)
+
+` + "```" + `
+1. graph_stats                                                         -> Orient
+2. gortex enrich blame all (CLI; once per session)                     -> Stamp last_authored / last_commit_at on every node
+3. search_symbols({query: "<target symbol or file>"})                  -> Resolve the anchor
+4. get_recent_changes({since_ts: <N months ago>})                       -> Per-file change frequency baseline
+5. get_symbol_history                                                  -> Symbol-level churn this session (live hotspot signal)
+6. analyze({kind: "blame", path_prefix: "<dir>/"})                      -> Per-symbol last-author rollup; cross-ref with churn
+7. analyze({kind: "ownership", path_prefix: "<dir>/"})                  -> Per-author symbol / file counts — proxy for who-touches-it-most
+8. analyze({kind: "hotspots", path_prefix: "<dir>/"})                   -> Coupling-by-fan-in/out — graph-level vs git-level coupling
+9. get_dependents({id: "<anchor>", depth: 2})                           -> Static dependent set (graph coupling)
+10. find_clones({path_prefix: "<dir>/", dead_only: false})              -> Near-duplicate functions — copy-paste co-evolution signal
+11. detect_changes({scope: "all"})                                      -> If a diff already exists, project it onto the graph
+12. diff_context({scope: "all"})                                        -> Per-file risk + per-symbol callers/callees overlay
+` + "```" + `
+
+## Co-change vs graph coupling
+
+The two signals are complementary:
+
+| Signal                                  | What it tells you                                                              | Tool                                                                |
+| --------------------------------------- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------- |
+| **Graph coupling**                      | Static structure: who imports / calls / extends / implements whom              | ` + "`get_dependents`" + ` / ` + "`get_dependencies`" + ` / ` + "`analyze kind=hotspots`" + `       |
+| **Co-change coupling**                  | Historical / temporal: who tends to co-modify even without a static edge       | ` + "`get_recent_changes`" + ` + ` + "`analyze kind=blame`" + ` + ` + "`get_symbol_history`" + `       |
+| **Both align**                          | Healthy module — the structure reflects how the team edits it                   | Use either; co-change adds confidence                                |
+| **Co-change > graph**                   | **Hidden coupling** — two files always co-modify but have no graph edge. Smell: missing abstraction, parallel hierarchies, copy-paste | ` + "`find_clones`" + ` is the corroborating evidence                          |
+| **Graph > co-change**                   | Dead coupling — graph edge exists but the files don't co-evolve. Often safe to break | ` + "`analyze kind=dead_code`" + ` may flag the dependent              |
+
+## Driving a refactor with co-change
+
+1. Pick the anchor (file / symbol the user wants to refactor)
+2. Compute co-change set: symbols whose ` + "`meta.last_authored`" + ` clusters with the anchor's, AND whose churn (` + "`get_symbol_history`" + ` + ` + "`get_recent_changes`" + `) overlaps the anchor's
+3. Compute graph-coupling set: ` + "`get_dependents`" + ` + ` + "`get_dependencies`" + ` (depth 2)
+4. Diff the two sets — the **co-change ∖ graph** delta is the hidden-coupling list and the highest ROI for "extract a shared abstraction"
+5. Pair with ` + "`find_clones`" + ` on the co-change set — clone clusters that span the boundary are the copy-paste hidden coupling
+6. ` + "`store_memory({kind: \"convention\", body: \"X always changes with Y because Z\"})`" + ` so the next agent inherits the invariant rather than re-discovering it
+
+## Ownership signal
+
+` + "`analyze kind=ownership`" + ` projected onto the co-change set tells you who-pings-who for review. Two files that co-modify under different primary authors is a *coordination* signal — the team is implicitly maintaining a contract neither file's CODEOWNERS captures.
+
+## Crossing the repo boundary
+
+When the anchor lives in a multi-repo project (` + "`get_active_project`" + ` shows >1 member):
+
+- ` + "`analyze kind=cross_repo base_kind=calls repo=<anchor's repo>`" + ` gives the static cross-repo coupling
+- For the temporal signal across repos, run ` + "`analyze kind=blame`" + ` per repo and look for authors who appear in both — that's the implicit cross-repo co-change channel
+
+## Checklist
+
+- ` + "`gortex enrich blame all`" + ` (CLI) at least once per session — the temporal analyzers need ` + "`meta.last_authored`" + `
+- ` + "`get_recent_changes`" + ` + ` + "`get_symbol_history`" + ` for the live churn signal
+- ` + "`analyze kind=blame`" + ` + ` + "`ownership`" + ` for the per-symbol / per-author rollup
+- ` + "`get_dependents`" + ` (graph coupling) **and** the churn surface (temporal coupling) — diff them; the delta is the hidden coupling
+- ` + "`find_clones`" + ` to corroborate copy-paste-style hidden coupling
+- ` + "`analyze kind=hotspots`" + ` for the graph-side coupling-by-fan-in/out view
+- For multi-repo work: ` + "`analyze kind=cross_repo`" + ` on the static side + per-repo blame on the temporal side
+- ` + "`store_memory({kind: \"convention\"})`" + ` when you discover a stable co-change relationship — saves the next agent from re-deriving it
+`
+
+const commandOnboarding = `# Onboarding with Gortex (30-minute repo tour)
+
+Use this when the user is new to a repo (or returning to one cold) and wants a structured tour: where to read first, what the architecture looks like, who owns what, what's load-bearing, and where to safely make a first edit. Composes the discovery-tier tools into a single ordered walk so the agent doesn't waste the user's first hour on undirected ` + "`Read`" + ` calls.
+
+## Workflow (do not skip steps)
+
+` + "```" + `
+1. graph_stats                                                         -> Confirm Gortex is indexed; per-language / per-kind counts
+2. get_active_project                                                  -> Is this single-repo or part of a multi-repo project?
+3. list_repos (when multi-repo)                                        -> See sibling repos in the project
+4. get_repo_outline                                                    -> Narrative single-call codebase overview (entry points, top communities, hot paths)
+5. surface_memories({task: "onboarding <repo>"})                       -> Cross-session invariants / conventions already captured
+6. distill_session                                                     -> Prior session digest for this workspace (decisions, pinned notes)
+7. get_communities                                                     -> Functional clusters via Louvain — the implicit "modules"
+8. get_processes                                                       -> Discovered execution flows (the implicit "use cases")
+9. analyze({kind: "hotspots"})                                         -> Over-coupled symbols — where most edits should be careful
+10. analyze({kind: "components"})                                      -> Component fan-in/out (UI projects)
+11. analyze({kind: "routes"})                                          -> HTTP / gRPC / GraphQL / WS endpoints — the API surface
+12. analyze({kind: "models"})                                          -> ORM models → tables — the data surface
+13. analyze({kind: "ownership", path_prefix: "<dir>/"})                -> Per-author rollup — who to ping for what
+14. contracts({action: "list"})                                        -> Detected API contracts (provider side)
+15. audit_agent_config                                                 -> Project CLAUDE.md / AGENTS.md / .cursor/rules — read what the team told the agent
+16. ask({question: "What does this repo do and how is it organised?"}) -> LLM summary grounded in the working set (only when llm provider configured)
+` + "```" + `
+
+## The five-minute version (when the user is in a hurry)
+
+` + "```" + `
+1. graph_stats
+2. get_repo_outline
+3. get_communities  (top 5)
+4. surface_memories({task: "onboarding"})
+5. audit_agent_config
+` + "```" + `
+
+Stop here unless the user asks for more depth. The outline + communities + memories triple covers "what is this repo / how is it carved up / what should I know before editing."
+
+## The full tour (when the user wants 30 minutes)
+
+The full ` + "`Workflow`" + ` above, plus per-community drilldowns:
+
+1. From ` + "`get_communities`" + `, pick the top 3 by node count
+2. For each, ` + "`get_communities({id: <community-id>})`" + ` returns its members
+3. ` + "`get_file_summary`" + ` on the community's central file (highest fan-in by symbol count)
+4. ` + "`get_processes`" + ` on a process that crosses the community
+5. ` + "`get_callers`" + ` / ` + "`get_call_chain`" + ` on the community's entry-point symbol
+
+Result: the user has a concrete mental model of one community per drilldown.
+
+## Where to make a first edit safely
+
+After the tour, the user usually asks "where can I make my first change without breaking things?" Answer with:
+
+1. ` + "`analyze kind=todos`" + ` — every TODO / FIXME node, filterable by author / tag — pick a small one in a low-fan-in symbol
+2. ` + "`analyze kind=coverage_gaps min_pct=0 max_pct=50 path_prefix=<community dir>/`" + ` — undertested code where a test addition is a safe first PR
+3. ` + "`analyze kind=stale_code older_than=180`" + ` — code untouched for 6+ months in a community the user just explored — usually safe to add a small clarifying refactor
+
+Either path: hand off to ` + "`/gortex-safe-edit`" + ` (or ` + "`/gortex-add-test`" + ` for the coverage-gap path) for the actual change.
+
+## Multi-repo onboarding
+
+When ` + "`get_active_project`" + ` shows multiple members:
+
+- ` + "`list_repos`" + ` first; pick the *primary* repo for the tour (usually the largest by node count or the one with the most ` + "`KindContract`" + ` provider nodes)
+- ` + "`analyze kind=cross_repo base_kind=calls`" + ` shows the cross-repo coupling — onboarding must cover *who calls into* + *who is called from* the primary
+- ` + "`contracts({action: list})`" + ` partitioned by repo shows the wire surface each repo exposes
+
+## Onboarding artefact
+
+The deliverable for an onboarding session is a markdown packet the user can keep:
+
+` + "```" + `
+export_context({
+  task: "onboarding tour of <repo>",
+  format: "markdown",
+  sections: ["outline", "communities", "processes", "hotspots", "routes", "models", "memories"]
+})
+` + "```" + `
+
+Hand that to the user; they can paste it into their notes / wiki / agent memory.
+
+## Checklist
+
+- ` + "`graph_stats`" + ` + ` + "`get_active_project`" + ` before any tool that reads the graph — confirm scope first
+- ` + "`get_repo_outline`" + ` is the single-call narrative; if it's missing fields the user needs, fall back to the per-analyzer walks
+- ` + "`surface_memories`" + ` + ` + "`distill_session`" + ` — prior agents may have left invariants / conventions / decisions that shape the tour
+- ` + "`get_communities`" + ` + ` + "`get_processes`" + ` for the architectural skeleton
+- ` + "`audit_agent_config`" + ` reads the team's own CLAUDE.md / AGENTS.md so the tour respects whatever conventions the team wrote down
+- For multi-repo: pick the primary, then ` + "`analyze kind=cross_repo`" + ` for the boundary view
+- End with ` + "`export_context format=markdown`" + ` so the user keeps the tour
+- Suggest a safe first edit via ` + "`analyze kind=todos`" + ` / ` + "`coverage_gaps`" + ` / ` + "`stale_code`" + ` and hand off to ` + "`/gortex-safe-edit`" + ` or ` + "`/gortex-add-test`" + `
+`
+
+const commandQualityAudit = `# Quality Audit with Gortex (repo health scan)
+
+Use this when the user wants a structured pass over a repo / directory looking for code-quality issues at scale — dead code, hotspots, cycles, churn, todos, coverage gaps, clones, anti-pattern smells, configuration drift. The output is a prioritised punch list, not a verdict; each finding is grounded in a graph query the user can re-run.
+
+## Workflow (do not skip steps)
+
+` + "```" + `
+1. graph_stats                                                         -> Orient
+2. gortex enrich blame coverage releases all (CLI; once)               -> Stamp the metadata the temporal + coverage analyzers need
+3. analyze({kind: "dead_code", path_prefix: "<dir>/"})                 -> Symbols with zero incoming edges (excludes entry points + tests)
+4. find_clones({path_prefix: "<dir>/", dead_only: true})               -> Dead duplicates of live code — the segment-unique diagnostic
+5. analyze({kind: "hotspots", path_prefix: "<dir>/"})                  -> Over-coupled symbols by fan-in / fan-out / community crossings
+6. analyze({kind: "cycles", path_prefix: "<dir>/"})                    -> Tarjan SCCs with severity
+7. analyze({kind: "todos", path_prefix: "<dir>/"})                     -> TODO / FIXME / HACK nodes
+8. analyze({kind: "stale_code", older_than: 365, path_prefix: "<dir>/"})  -> Code untouched 1y+ — refactor / delete candidates
+9. analyze({kind: "stale_flags", older_than: 180})                     -> Feature flags whose every toggler is older than 6mo
+10. analyze({kind: "coverage_summary", path_prefix: "<dir>/"})         -> Per-directory coverage rollup
+11. analyze({kind: "coverage_gaps", path_prefix: "<dir>/",             -> Undertested symbols
+             min_pct: 0, max_pct: 50})
+12. get_untested_symbols({path_prefix: "<dir>/"})                      -> Symbols with zero covering tests
+13. analyze({kind: "error_surface", path_prefix: "<dir>/"})            -> Functions and what they throw — risk concentration
+14. analyze({kind: "field_writers"})                                   -> Mutability hotspots — fields ranked by write count
+15. analyze({kind: "race_writes"})                                     -> Cross-language goroutine-reachable writes w/o lock
+16. analyze({kind: "unclosed_channels"})                               -> Channels with sends but no close()
+17. analyze({kind: "orphan_tables"})                                   -> Tables queried but missing a migration
+18. analyze({kind: "unreferenced_tables"})                             -> Tables provided by a migration with zero readers
+19. analyze({kind: "stale_flags"})                                     -> Dead-rollout flag candidates (rerun with smaller window if noisy)
+20. search_ast({detector: "<one of: error-not-wrapped | sql-string-concat |  -> Cross-language anti-pattern sweep
+                weak-crypto | panic-in-library | goroutine-without-recover |
+                http-client-no-timeout | hardcoded-secret | empty-catch |
+                java-string-equality | python-mutable-default-arg>"})
+21. audit_agent_config                                                 -> Stale references in CLAUDE.md / AGENTS.md / .cursor/rules — config drift
+22. contracts({action: "check"})                                       -> Orphan providers / consumers; HTTP / gRPC / topics / env drift
+23. analyze({kind: "ownership", path_prefix: "<dir>/"})                -> Per-author rollup — who to ping per finding
+24. export_context({format: "markdown",                                -> Hand the audit packet to PR / Slack / wiki
+                    sections: ["findings", "ownership", "priorities"]})
+` + "```" + `
+
+## Prioritising findings
+
+Findings are not equal. Rank by:
+
+| Tier | Filter                                                                                   | Why this matters first |
+| ---- | ---------------------------------------------------------------------------------------- | ---------------------- |
+| **P0** | ` + "`race_writes`" + ` / ` + "`unclosed_channels`" + ` / ` + "`weak-crypto`" + ` / ` + "`hardcoded-secret`" + ` / ` + "`http-client-no-timeout`" + ` | Correctness / security |
+| **P1** | ` + "`cycles severity=severe`" + ` / ` + "`orphan_tables`" + ` / ` + "`contracts({action: check})`" + ` orphans / ` + "`audit_agent_config`" + ` stale refs | Real bugs latent in the graph |
+| **P2** | ` + "`dead_code`" + ` ∩ ` + "`find_clones dead_only=true`" + ` / ` + "`stale_flags`" + ` / ` + "`stale_code`" + ` | Deletion candidates — easy ROI |
+| **P3** | ` + "`hotspots top=20`" + ` / ` + "`coverage_gaps min_pct=0 max_pct=20`" + ` / ` + "`error_surface`" + ` widening | Refactor targets |
+| **P4** | ` + "`todos`" + ` / ` + "`field_writers`" + ` heavy churn | Backlog signal |
+
+Always pair every P0 / P1 finding with ` + "`analyze kind=ownership`" + ` on its path so the audit packet pings the right reviewer.
+
+## Cross-language anti-pattern sweep
+
+` + "`search_ast`" + ` ships 10 bundled detectors covering the common cross-language smells:
+
+| Detector                          | Languages                            |
+| --------------------------------- | ------------------------------------ |
+| ` + "`error-not-wrapped`" + `              | Go                                   |
+| ` + "`sql-string-concat`" + `              | Go / Python / JS / TS / Ruby         |
+| ` + "`weak-crypto`" + `                    | Go / Python                          |
+| ` + "`panic-in-library`" + `               | Go                                   |
+| ` + "`goroutine-without-recover`" + `      | Go                                   |
+| ` + "`http-client-no-timeout`" + `         | Go                                   |
+| ` + "`hardcoded-secret`" + `               | Go / Python / JS / TS / Ruby         |
+| ` + "`empty-catch`" + `                    | Java / JS / TS / Python              |
+| ` + "`java-string-equality`" + `           | Java                                 |
+| ` + "`python-mutable-default-arg`" + `     | Python                               |
+
+Run each ` + "`search_ast detector=<name>`" + ` once; the per-match ` + "`symbol_id`" + ` chains directly into ` + "`find_usages`" + ` / ` + "`apply_code_action`" + ` for follow-up.
+
+## Audit deliverable
+
+The output of a quality audit is a prioritised markdown packet, not a one-line "score":
+
+` + "```" + `
+# <Repo / dir> audit — <date>
+
+## P0 — Correctness / security
+- <finding> · <symbol id> · owner: <author> · evidence: <analyze kind=… ran>
+
+## P1 — Real bugs latent in the graph
+…
+
+## P2 — Deletion candidates
+…
+
+## P3 — Refactor targets
+…
+
+## P4 — Backlog signal
+…
+` + "```" + `
+
+` + "`export_context format=markdown`" + ` is the producer.
+
+## Checklist
+
+- ` + "`gortex enrich blame coverage releases all`" + ` (CLI) before the audit — temporal + coverage analyzers need ` + "`meta.last_authored`" + ` / ` + "`meta.coverage_pct`" + ` / ` + "`meta.added_in`" + `
+- Walk the analyzers in the order above — earlier ones surface highest-priority findings
+- Pair every finding with ` + "`analyze kind=ownership`" + ` so the audit packet has a routing column
+- Run the ` + "`search_ast`" + ` detectors that match the repo's languages; skip the ones that don't
+- ` + "`audit_agent_config`" + ` catches stale references in the team's CLAUDE.md / AGENTS.md / IDE config — config drift is a real-world finding
+- Rank by the P0..P4 tiers; do not hand the user a flat list
+- ` + "`export_context format=markdown`" + ` for the packet
+- ` + "`store_memory({kind: \"reference\", title: \"<repo> audit YYYY-MM\", body: \"...\"})`" + ` so the next audit can diff against this baseline
+`
+
+const commandArchitectureReview = `# Architecture Review with Gortex
+
+Use this when the user wants a graph-grounded architectural read of a repo / system — "what does the architecture actually look like, where is the design under stress, what should we refactor before it breaks." Distinct from ` + "`/gortex-quality-audit`" + ` (which produces a punch list) — this produces a *narrative* with diagrams.
+
+## Workflow (do not skip steps)
+
+` + "```" + `
+1. graph_stats                                                         -> Orient
+2. get_repo_outline                                                    -> Narrative single-call overview
+3. get_communities                                                     -> Functional clusters via Louvain — the de facto module boundaries
+4. get_processes                                                       -> Discovered execution flows — the de facto use cases
+5. analyze({kind: "components"})                                       -> UI component tree (when applicable) — render hierarchy fan-in/out
+6. analyze({kind: "routes"})                                           -> The API surface (HTTP / gRPC / GraphQL / WS / topic)
+7. analyze({kind: "models"})                                           -> ORM models → tables — the data surface
+8. analyze({kind: "k8s_resources"}) + analyze({kind: "images"})        -> Deployment topology (when applicable)
+9. analyze({kind: "hotspots", top: 20})                                -> Symbols under coupling stress
+10. analyze({kind: "cycles"})                                          -> Architectural cycles (Tarjan SCC with severity)
+11. analyze({kind: "would_create_cycle", from: "<A>", to: "<B>"})      -> Pre-flight before proposing a new dep in the review
+12. analyze({kind: "cross_repo", base_kind: "calls"})                  -> Inter-repo coupling (when multi-repo)
+13. contracts({action: "list"})                                        -> Provider-side wire surface
+14. contracts({action: "check"})                                       -> Provider ↔ consumer match across repos
+15. get_class_hierarchy({id: "<key interface>"})                       -> Inheritance / implementation depth on load-bearing interfaces
+16. get_dependencies / get_dependents at the community / file level    -> Layering walk — does the dependency direction match the intent?
+17. analyze({kind: "pubsub"}) + analyze({kind: "channel_ops"})         -> Async + concurrency topology
+18. analyze({kind: "field_writers"}) + analyze({kind: "race_writes"})  -> Shared-state hotspots — the architecture's hidden mutable surface
+19. analyze({kind: "stale_code", older_than: 365})                     -> Strata that haven't moved in a year — likely the "stable core"
+20. analyze({kind: "ownership"})                                       -> Per-author footprint per community — Conway's law check
+21. export_context({format: "markdown",                                -> The review deliverable
+                    sections: ["overview", "modules", "processes",
+                               "wire_surface", "data_surface", "concurrency",
+                               "cross_repo", "stress_points", "recommendations"]})
+` + "```" + `
+
+## What the architecture review answers
+
+| Question                                                       | Tool                                                                          |
+| -------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| **What are the de facto modules?** (not what's claimed)        | ` + "`get_communities`" + ` — Louvain finds the actual cluster structure              |
+| **What are the de facto use cases?**                            | ` + "`get_processes`" + ` — discovered execution flows                                 |
+| **Where is the design under coupling stress?**                  | ` + "`analyze kind=hotspots top=20`" + ` — fan-in + fan-out + community crossings     |
+| **Are there cycles?**                                            | ` + "`analyze kind=cycles`" + ` — Tarjan SCC with severity classification             |
+| **Does the dependency direction match the intent?**             | Walk ` + "`get_dependencies`" + ` / ` + "`get_dependents`" + ` at the community / file level |
+| **What is the wire surface?**                                    | ` + "`analyze kind=routes`" + ` + ` + "`contracts({action: list})`" + `                            |
+| **What is the data surface?**                                    | ` + "`analyze kind=models`" + ` + ` + "`analyze kind=orphan_tables`" + ` / ` + "`unreferenced_tables`" + ` |
+| **What is the deployment topology?**                            | ` + "`analyze kind=k8s_resources`" + ` + ` + "`analyze kind=images`" + `                            |
+| **Where does shared state live?**                                | ` + "`analyze kind=field_writers`" + ` + ` + "`race_writes`" + ` — the mutable-state surface |
+| **Where does the async + pub/sub topology lead?**                | ` + "`analyze kind=pubsub`" + ` + ` + "`channel_ops`" + ` + ` + "`goroutine_spawns`" + ` + ` + "`unclosed_channels`" + `   |
+| **Does the team's structure match the code's structure? (Conway)** | ` + "`analyze kind=ownership`" + ` projected onto ` + "`get_communities`" + ` — author overlap per community |
+| **Where is the stable core?**                                    | ` + "`analyze kind=stale_code older_than=365`" + ` — strata that haven't moved in a year |
+| **Where would adding a new edge create a cycle?**                | ` + "`analyze kind=would_create_cycle from=A to=B`" + ` — pre-flight for proposed deps |
+
+## Stress points
+
+Stress points are graph signals that the design is fighting itself. Surface them explicitly in the review:
+
+- **Cyclic dependency in the load-bearing layer** — ` + "`analyze kind=cycles severity=severe`" + ` ∩ a community with high ` + "`hotspots`" + ` rank
+- **Architecture-spanning hotspot** — a symbol whose ` + "`community_crossings`" + ` is > 50% of its fan-in (the symbol "is" the integration layer, often by accident)
+- **Mutable shared field reachable from a goroutine without a lock** — ` + "`analyze kind=race_writes`" + ` on a high-fan-in field
+- **Contract orphan** — ` + "`contracts({action: check})`" + ` returns a provider with no consumer or a consumer with no provider, especially cross-repo
+- **Inverted dependency** — a "lower" layer importing a "higher" one. Walk ` + "`get_dependencies`" + ` from each community to confirm directionality
+- **Deployment ↔ code drift** — ` + "`analyze kind=images role=base ref=latest`" + ` (unpinned), ` + "`k8s_resources k8s_kind=ConfigMap`" + ` orphans
+
+## Multi-repo architecture
+
+When ` + "`get_active_project`" + ` shows >1 member:
+
+- ` + "`analyze kind=cross_repo base_kind=calls`" + ` — typed cross-repo edges; the count is the *contract surface* the architecture must hold stable
+- ` + "`contracts({action: check})`" + ` partitioned by repo pair — orphan providers / consumers across the boundary
+- For each cross-repo edge, ` + "`get_test_targets`" + ` returns the cross-repo tests that exercise it; the absence of those tests is itself an architecture finding
+
+## Review deliverable
+
+The output of an architecture review is a markdown narrative with embedded diagrams (Mermaid / DOT) generated from the graph:
+
+` + "```" + `
+export_context({
+  task: "architecture review of <repo / project>",
+  format: "markdown",
+  sections: [...]
+})
+` + "```" + `
+
+The packet rides the same surface as ` + "`/gortex-quality-audit`" + ` but is structured as a *narrative* (modules, processes, surfaces, stress, recommendations) rather than a flat punch list.
+
+## Checklist
+
+- ` + "`graph_stats`" + ` + ` + "`get_active_project`" + ` before any analyzer
+- ` + "`get_repo_outline`" + ` for the narrative skeleton
+- ` + "`get_communities`" + ` + ` + "`get_processes`" + ` are the architectural primitives — pin the review on these
+- ` + "`analyze kind=hotspots`" + ` + ` + "`cycles`" + ` for stress points
+- Wire surface = ` + "`analyze kind=routes`" + ` + ` + "`contracts list`" + `; data surface = ` + "`analyze kind=models`" + ` + ` + "`orphan_tables`" + `; deployment = ` + "`k8s_resources`" + ` + ` + "`images`" + `
+- Concurrency / async = ` + "`pubsub`" + ` + ` + "`channel_ops`" + ` + ` + "`goroutine_spawns`" + ` + ` + "`race_writes`" + ` + ` + "`unclosed_channels`" + `
+- Multi-repo: ` + "`cross_repo`" + ` + ` + "`contracts check`" + ` partitioned by repo pair
+- ` + "`ownership`" + ` ∩ ` + "`communities`" + ` for Conway's law alignment
+- ` + "`export_context format=markdown`" + ` for the narrative
+- ` + "`store_memory({kind: \"decision\"})`" + ` for every architectural decision the review surfaces — the next agent inherits the rationale
+`
+
+const commandPRReview = `# PR Review with Gortex (graph-grounded change review)
+
+Use this when the user wants a code-review pass on a pending change — local staged diff, a branch about to merge, or a PR they're reading. The review walks the diff through the graph so the comments are grounded in real callers / contracts / coverage / guards, not surface-level style nitpicks.
+
+## Workflow (do not skip steps)
+
+` + "```" + `
+1. graph_stats                                                         -> Orient
+2. detect_changes({scope: "staged"})                                   -> The change-set's graph projection (use "all" / "since-tag" as needed)
+3. diff_context({scope: "staged"})                                     -> Graph-enriched diff: callers, callees, communities, processes, per-file risk
+4. For each changed symbol:
+     explain_change_impact({ids: "<id>"})                              -> Risk-tiered blast radius
+     verify_change({id: "<id>", new_signature: "<post-change sig>"})   -> Catch interface / contract breaks
+5. contracts({action: "check"})                                        -> Provider ↔ consumer match across repos (HTTP / gRPC / topics / env / OpenAPI)
+6. check_guards({ids: [<changed-ids>]})                                -> Team conventions from .gortex.yaml
+7. analyze({kind: "would_create_cycle", from: "<from>", to: "<to>"})   -> If the diff adds a new import edge, pre-flight it
+8. analyze({kind: "coverage_gaps", path_prefix: "<changed dir>/",      -> Did the change touch undertested code?
+            min_pct: 0, max_pct: 50})
+9. get_untested_symbols({path_prefix: "<changed dir>/"})               -> Symbols still uncovered after the change
+10. get_test_targets({ids: [<changed-ids>]})                           -> Tests to re-run (cross-repo aware)
+11. find_clones({path_prefix: "<changed dir>/", dead_only: true})      -> Did the change leave dead duplicates behind?
+12. analyze({kind: "error_surface", path_prefix: "<changed dir>/"})    -> Did the change widen what gets thrown?
+13. analyze({kind: "cross_repo", base_kind: "calls"})                  -> Cross-repo blast (when multi-repo)
+14. For high-risk changed symbols (d=1 in explain_change_impact):
+     preview_edit({edit: <the diff as a WorkspaceEdit>})               -> Speculative apply on the shadow graph; reports broken_callers / broken_implementors
+15. surface_memories({task: "review <PR title>", symbol_ids: [...]})   -> Cross-session invariants on the touched symbols
+16. export_context({format: "markdown",                                -> Review packet for the PR thread
+                    sections: ["scope", "impact", "contracts",
+                               "guards", "coverage", "tests",
+                               "recommendations"]})
+` + "```" + `
+
+## Review priorities
+
+Walk every PR through these gates, in order. A failure at gate N is a blocker — do not move to gate N+1 until N is addressed:
+
+| Gate | Tool                                            | Blocker if … |
+| ---- | ----------------------------------------------- | ------------ |
+| **1. Scope**                | ` + "`detect_changes`" + `                      | Touches files / symbols the PR description doesn't mention |
+| **2. Signature safety**     | ` + "`verify_change`" + ` per signature change  | Callers / implementors break |
+| **3. Contract safety**      | ` + "`contracts({action: check})`" + `          | Orphan providers / consumers; cross-repo wire drift |
+| **4. Convention compliance** | ` + "`check_guards`" + `                        | Project rules from ` + "`.gortex.yaml`" + ` violated |
+| **5. Coupling sanity**      | ` + "`analyze kind=would_create_cycle`" + `     | New import edge introduces a cycle |
+| **6. Coverage hygiene**     | ` + "`analyze kind=coverage_gaps`" + ` + ` + "`get_untested_symbols`" + ` | Changed code is uncovered or under-covered |
+| **7. Test discoverability** | ` + "`get_test_targets`" + `                    | The PR adds a symbol with no covering test target |
+| **8. Dead duplication**     | ` + "`find_clones dead_only=true`" + `          | Refactor left a dead duplicate of live code |
+| **9. Blast verification**   | ` + "`preview_edit`" + ` on high-risk changes   | Speculative apply reports ` + "`broken_callers`" + ` or ` + "`broken_implementors`" + ` that the diff doesn't address |
+| **10. Memory check**        | ` + "`surface_memories`" + ` on touched symbols | Diff contradicts a pinned invariant / decision / gotcha |
+
+## Cross-repo PRs
+
+When the PR touches a multi-repo project:
+
+- ` + "`detect_changes`" + ` only sees the local repo's changes; also run ` + "`contracts({action: check})`" + ` to flag wire-side breakage in consumer repos
+- ` + "`analyze kind=cross_repo base_kind=calls repo=<changed repo>`" + ` lists every consumer call that crosses out of the changed repo
+- ` + "`get_test_targets`" + ` returns the cross-repo tests that exercise the affected wire path — those tests must be on the reviewer's run list
+
+## Review deliverable
+
+Hand the PR author a structured comment block, not a stream-of-consciousness comment:
+
+` + "```markdown" + `
+## Review — <PR title>
+
+### Scope
+- ✅ / ⚠ — ` + "`detect_changes`" + ` matches the PR description
+- Touched: N files, M symbols, K cross-repo edges
+
+### Impact
+- High-risk: <id> · d=1 blast — see ` + "`explain_change_impact`" + `
+- Medium: …
+
+### Contracts
+- ✅ / ❌ — ` + "`contracts({action: check})`" + ` summary
+
+### Guards
+- ✅ / ❌ — ` + "`check_guards`" + ` summary
+
+### Coverage
+- Uncovered after this PR: <symbol ids> (` + "`get_untested_symbols`" + `)
+- Coverage gap deltas: …
+
+### Tests
+- ` + "`get_test_targets`" + ` recommends: …
+
+### Speculative apply (for high-risk changes)
+- ` + "`preview_edit`" + ` flagged: broken_callers=…, broken_implementors=…
+
+### Recommendations
+1. …
+2. …
+` + "```" + `
+
+` + "`export_context format=markdown sections=[...]`" + ` produces this skeleton automatically.
+
+## When the diff is already on disk
+
+If the diff is in the working tree (or a feature branch checked out), ` + "`detect_changes`" + ` + ` + "`diff_context`" + ` see it directly. If the user pasted in a unified diff or a GitHub URL, parse it into a synthetic ` + "`WorkspaceEdit`" + ` and drive ` + "`preview_edit`" + ` to get the speculative report — same blast / broken-callers / broken-implementors signal without touching disk.
+
+## Checklist
+
+- ` + "`graph_stats`" + ` first — confirm Gortex sees the working tree
+- ` + "`detect_changes`" + ` + ` + "`diff_context`" + ` produce the graph-grounded scope + per-file risk
+- Walk the **10 gates** above in order; do not skip ahead on a blocker
+- ` + "`contracts({action: check})`" + ` is **mandatory** for any PR that touches a provider symbol — the orphan check catches wire drift the diff doesn't
+- ` + "`check_guards`" + ` runs the team's ` + "`.gortex.yaml`" + ` rules — these encode conventions a reviewer would otherwise have to remember
+- For high-risk changes, ` + "`preview_edit`" + ` the diff as a ` + "`WorkspaceEdit`" + ` and read ` + "`broken_callers`" + ` / ` + "`broken_implementors`" + `; the speculative report is the highest-confidence signal in the review
+- ` + "`surface_memories`" + ` on the touched symbols before finalising the review — a diff that contradicts a pinned invariant is a blocker, not a nit
+- ` + "`export_context format=markdown`" + ` for the structured review block; never hand the user a stream-of-consciousness comment
+- Cross-repo PRs: ` + "`contracts({action: check})`" + ` + ` + "`analyze kind=cross_repo`" + ` + ` + "`get_test_targets`" + ` (cross-repo aware)
 `
