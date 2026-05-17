@@ -642,6 +642,52 @@ func encodeAnalyze(kind string, payload any) ([]byte, error) {
 			}
 		}
 		return buf.Bytes(), enc.Close()
+	case "health_score":
+		items, _ := payload.([]healthScoreItem)
+		enc := newGCX(&buf, "analyze.health_score",
+			[]string{
+				"id", "name", "kind", "file", "line",
+				"score", "grade",
+				"coverage_pct", "complexity_pct", "recency_pct", "churn_pct",
+				"fan_in", "fan_out", "crossings",
+				"age_days", "mods", "axes_used",
+			},
+			"count", fmt.Sprintf("%d", len(items)),
+		)
+		for _, it := range items {
+			if err := enc.WriteRow(
+				it.ID, it.Name, it.Kind, it.File, it.Line,
+				it.Score, it.Grade,
+				it.CoveragePct, it.ComplexityPct, it.RecencyPct, it.ChurnPct,
+				it.FanIn, it.FanOut, it.Crossings,
+				it.AgeDays, it.Mods, it.AxesUsed,
+			); err != nil {
+				return nil, err
+			}
+		}
+		return buf.Bytes(), enc.Close()
+	case "health_score.rollup":
+		items, _ := payload.([]healthRollupItem)
+		enc := newGCX(&buf, "analyze.health_score.rollup",
+			[]string{
+				"scope", "key",
+				"avg_score", "min_score", "max_score",
+				"symbols", "grade",
+				"count_a", "count_b", "count_c", "count_d", "count_f",
+			},
+			"count", fmt.Sprintf("%d", len(items)),
+		)
+		for _, it := range items {
+			if err := enc.WriteRow(
+				it.Scope, it.Key,
+				it.AvgScore, it.MinScore, it.MaxScore,
+				it.Symbols, it.Grade,
+				it.CountA, it.CountB, it.CountC, it.CountD, it.CountF,
+			); err != nil {
+				return nil, err
+			}
+		}
+		return buf.Bytes(), enc.Close()
 	default:
 		// Fall back to generic so analyze variants without a hand-tuned
 		// encoder still produce valid GCX instead of failing.
@@ -807,6 +853,49 @@ type unsafePatternItem struct {
 	Line     int
 	Symbol   string
 	Text     string
+}
+
+// healthScoreItem is one row of `analyze kind=health_score`: a
+// per-symbol composite health value with the per-axis breakdown.
+// "_pct" fields are the 0..100 axis values; NaN encodes "no data
+// for this axis" (the GCX encoder serializes NaN as empty so a
+// downstream reader can distinguish missing from zero).
+type healthScoreItem struct {
+	ID            string
+	Name          string
+	Kind          string
+	File          string
+	Line          int
+	Score         float64
+	Grade         string
+	CoveragePct   float64
+	ComplexityPct float64
+	RecencyPct    float64
+	ChurnPct      float64
+	FanIn         int
+	FanOut        int
+	Crossings     int
+	AgeDays       int
+	Mods          int
+	AxesUsed      int
+}
+
+// healthRollupItem is one row of `analyze kind=health_score` when
+// `roll_up` aggregates the per-symbol scores up to file or repo
+// scope.
+type healthRollupItem struct {
+	Scope    string
+	Key      string
+	AvgScore float64
+	MinScore float64
+	MaxScore float64
+	Symbols  int
+	Grade    string
+	CountA   int
+	CountB   int
+	CountC   int
+	CountD   int
+	CountF   int
 }
 
 // --------------------------------------------------------------------
