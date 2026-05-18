@@ -7,7 +7,7 @@ package main
 //
 // Order matters for goreleaser ldflag templates — keep these unchanged.
 var (
-	version = "0.29.0" // SemVer 2.0.0 string without build slot (e.g. "0.1.0", "0.1.0-rc1")
+	version = "0.30.0" // SemVer 2.0.0 string without build slot (e.g. "0.1.0", "0.1.0-rc1")
 	commit  = ""       // short git SHA (e.g. "abc1234"); becomes +<build> in the canonical form
 	date    = ""       // RFC-3339 build timestamp
 )
