@@ -18,12 +18,17 @@ import (
 )
 
 var (
-	exportFormat        string
-	exportOut           string
-	exportRepo          string
-	exportKinds         []string
-	exportLanguages     []string
-	exportDropSynthetic bool
+	exportFormat         string
+	exportOut            string
+	exportOutDir         string
+	exportRepo           string
+	exportKinds          []string
+	exportLanguages      []string
+	exportDropSynthetic  bool
+	exportMermaidScope   string
+	exportMermaidMinComm int
+	exportMermaidMaxComm int
+	exportOnCommit       bool
 )
 
 var exportCmd = &cobra.Command{
@@ -48,8 +53,10 @@ Loading a GraphML export into Gephi: File → Open → graph.graphml
 }
 
 func init() {
-	exportCmd.Flags().StringVar(&exportFormat, "format", "cypher", "output format: cypher | graphml")
+	exportCmd.Flags().StringVar(&exportFormat, "format", "cypher", "output format: cypher | graphml | mermaid")
 	exportCmd.Flags().StringVar(&exportOut, "out", "", "output file (default: stdout)")
+	exportCmd.Flags().StringVar(&exportOutDir, "out-dir", "",
+		"output directory (mermaid scope=all writes one file per scope here)")
 	exportCmd.Flags().StringVar(&exportRepo, "repo", "", "filter to one repo prefix (default: all)")
 	exportCmd.Flags().StringSliceVar(&exportKinds, "kinds", nil,
 		"comma-separated node kinds to include (function,method,field,type,interface,...). Default: all.")
@@ -57,6 +64,14 @@ func init() {
 		"comma-separated languages to include. Default: all.")
 	exportCmd.Flags().BoolVar(&exportDropSynthetic, "no-synthetic", false,
 		"drop synthetic stub nodes for unresolved/external/annotation endpoints (default: keep them so call topology stays intact)")
+	exportCmd.Flags().StringVar(&exportMermaidScope, "scope", "architecture",
+		"(mermaid) diagram scope: architecture | communities | processes | all")
+	exportCmd.Flags().IntVar(&exportMermaidMinComm, "min-community", 3,
+		"(mermaid) minimum community size to include")
+	exportCmd.Flags().IntVar(&exportMermaidMaxComm, "max-communities", 20,
+		"(mermaid) maximum communities to include")
+	exportCmd.Flags().BoolVar(&exportOnCommit, "on-commit", false,
+		"informational marker: this run was triggered by a post-commit hook")
 	rootCmd.AddCommand(exportCmd)
 }
 
@@ -100,6 +115,50 @@ func runExport(_ *cobra.Command, args []string) error {
 		opts.Kinds = append(opts.Kinds, graph.NodeKind(strings.ToLower(strings.TrimSpace(k))))
 	}
 
+	format := strings.ToLower(exportFormat)
+	mermaidOpts := exporter.MermaidOpts{
+		Scope:          exportMermaidScope,
+		MaxCommunities: exportMermaidMaxComm,
+		MinCommunity:   exportMermaidMinComm,
+		Kinds:          opts.Kinds,
+		Languages:      opts.Languages,
+	}
+
+	// Mermaid multi-file (scope=all + --out-dir) path: writes one
+	// file per scope into out-dir.
+	if format == "mermaid" && exportOutDir != "" {
+		exportStart := time.Now()
+		scopes := []string{"architecture", "communities", "processes"}
+		if exportMermaidScope != "all" {
+			scopes = []string{exportMermaidScope}
+		}
+		if err := os.MkdirAll(exportOutDir, 0o755); err != nil {
+			return fmt.Errorf("mkdir out-dir: %w", err)
+		}
+		var total exporter.Stats
+		for _, sc := range scopes {
+			scopeOpts := mermaidOpts
+			scopeOpts.Scope = sc
+			path := exportOutDir + "/" + sc + ".mermaid"
+			f, err := os.Create(path)
+			if err != nil {
+				return fmt.Errorf("create %q: %w", path, err)
+			}
+			st, err := exporter.WriteMermaid(f, g, scopeOpts)
+			_ = f.Close()
+			if err != nil {
+				return fmt.Errorf("write mermaid %s: %w", sc, err)
+			}
+			total.NodesWritten += st.NodesWritten
+			total.EdgesWritten += st.EdgesWritten
+			total.BytesWritten += st.BytesWritten
+		}
+		_, _ = fmt.Fprintf(os.Stderr,
+			"[gortex export] mermaid: wrote %d files under %s (%d bytes) in %dms\n",
+			len(scopes), exportOutDir, total.BytesWritten, time.Since(exportStart).Milliseconds())
+		return nil
+	}
+
 	out, closeFn, err := openOutput(exportOut)
 	if err != nil {
 		return fmt.Errorf("open output: %w", err)
@@ -108,13 +167,15 @@ func runExport(_ *cobra.Command, args []string) error {
 
 	exportStart := time.Now()
 	var exportStats exporter.Stats
-	switch strings.ToLower(exportFormat) {
+	switch format {
 	case "cypher":
 		exportStats, err = exporter.WriteCypher(out, g, opts)
 	case "graphml":
 		exportStats, err = exporter.WriteGraphML(out, g, opts)
+	case "mermaid":
+		exportStats, err = exporter.WriteMermaid(out, g, mermaidOpts)
 	default:
-		return fmt.Errorf("unknown format %q (expected cypher | graphml)", exportFormat)
+		return fmt.Errorf("unknown format %q (expected cypher | graphml | mermaid)", exportFormat)
 	}
 	if err != nil {
 		return fmt.Errorf("export: %w", err)

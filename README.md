@@ -314,9 +314,44 @@ gortex untrack <path>        Remove a repository from the tracked workspace
 gortex workspace <sub>       list / set / set-all — manage workspace + project slugs across tracked repos
 gortex config exclude ...    add / list / remove entries in the effective ignore list
 gortex query <subcommand>    Query the knowledge graph from the CLI
+gortex wiki [path]           Generate a multi-page markdown wiki (per-community + processes + analysis)
+gortex docs [path]           Generate a "living docs" bundle (recent changes + ownership + stale + blame)
+gortex export [path]         Export the graph to Cypher, GraphML, or Mermaid (--format mermaid --scope all)
+gortex githook <sub>         install / uninstall / status — manage the post-commit hook
 gortex clean                 Remove Gortex files from a project
 gortex version               Print version
 ```
+
+### Generated Wiki + Living Diagrams
+
+Run `gortex wiki .` to produce a Markdown wiki under `wiki/<repo-slug>/`:
+
+```
+wiki/
+  index.md                    # top-level (single repo today, multi-repo extension point)
+  <repo>/
+    index.md                  # community navigation
+    architecture.md           # community-level system overview
+    communities/<n>-<slug>.md # one page per detected community
+    processes/<slug>.md       # one page per discovered execution flow (Mermaid sequenceDiagram)
+    contracts/api-surface.md  # HTTP / gRPC / GraphQL contracts
+    analysis/{hotspots,cycles,semantic}.md
+    _assets/community-graph.mermaid
+  _workspace/                 # reserved for multi-repo pages
+```
+
+Pair with `gortex githook install post-commit --regen-mermaid --regen-wiki`
+to keep diagrams and docs in sync after every commit. The hook is idempotent
+and preserves any non-gortex content in the existing hook file.
+
+For CI, drop `examples/.github/workflows/gortex-architecture.yml` into your
+repo: it re-runs `gortex export --format mermaid --scope all` on every push
+and opens a PR when the diagrams drift.
+
+`gortex wiki --enhance` enables LLM-augmented narrative summaries via the
+configured `llm.provider` (claudecli for MVP — uses your local Claude Code
+subscription). Results are cached by `(node, content_hash)` so re-runs on
+unchanged inputs produce byte-identical output without re-invoking the LLM.
 
 ### Query Subcommands
 
