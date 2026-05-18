@@ -56,7 +56,7 @@ For Homebrew, package managers (`.deb` / `.rpm` / `.apk`), direct binary downloa
 - **Agent feedback loop** — unified `feedback` tool (`action: "record"` / `"query"`) lets agents report which symbols were useful/missing. Cross-session persistence improves future `smart_context` quality via feedback-aware reranking
 - **Context export** — `export_context` tool + `gortex context` CLI render graph context as portable markdown/JSON briefings for sharing outside MCP (Slack, PRs, docs, non-MCP AI tools)
 - **ETag conditional fetch** — content-hash based `if_none_match` on source-reading tools avoids re-transmitting unchanged symbols during iterative editing
-- **Token savings tracking** — per-call `tokens_saved` field on source-reading tools + session-level metrics in `graph_stats` (calls counted, tokens returned, tokens saved, efficiency ratio)
+- **Token savings tracking** — per-call `tokens_saved` field on source-reading tools + session-level metrics in `graph_stats` (calls counted, tokens returned, tokens saved, efficiency ratio). `gortex savings` renders a three-bucket dashboard (Today / Last 7 days / All time) with 16-cell `█/░` bars, percentage saved, raw token counts, and USD cost avoided priced against the headline model. Per-call JSONL log at `<cache>/savings.jsonl` powers windowed buckets and the `--verbose` per-tool breakdown (`get_symbol_source` / `batch_symbols` / `smart_context`)
 - **GCX1 compact wire format** — published, round-trippable text format for MCP tool responses. Opt-in per call via `format: "gcx"` on every list-shaped tool (~17). Auto-served as the default for known clients (Claude Code, Cursor, VS Code, Zed, Aider, Kilo Code, OpenCode, OpenClaw, Codex) when no `format` is passed; explicit `format` always wins. **Median −27.4% tiktoken savings** vs JSON across a 20-case benchmark (best case −38.3%), 100% round-trip integrity. Spec: [`docs/wire-format.md`](docs/wire-format.md). Standalone MIT-licensed reference implementations: Go ([`github.com/gortexhq/gcx-go`](https://github.com/gortexhq/gcx-go)) and TypeScript ([`github.com/gortexhq/gcx-ts`](https://github.com/gortexhq/gcx-ts), npm [`@gortex/wire`](https://www.npmjs.com/package/@gortex/wire)). Reproducible harness: [`bench/wire-format/`](bench/wire-format/)
 - **TOON fallback wire format** — second-tier compact text (~10–15% smaller than JSON, lossy but human-friendly) on every list-shaped tool for clients that don't yet speak GCX. Pass `format: "toon"`
 - **Budget-by-default MCP responses** — list-shaped tools cap each page at the project default budget and return `next_cursor` for the tail. Pagination, sparse fieldsets, and graceful degradation built in. Per-call caps via `max_bytes` *and* `max_tokens` (composable — tighter wins; ~3.5 bytes/token heuristic calibrated across JSON / TOON / GCX1). Truncation rides on the response as `_truncated_by_budget` / `_truncated_by_tokens` / `_max_returned_<list>` markers (JSON) or a `# truncated_by_budget=true` / `# max_tokens=N truncated_by_tokens=true` comment (GCX)
@@ -142,7 +142,7 @@ gortex mcp --no-daemon --watch          # explicit embedded mode
 
 ```bash
 gortex server --index .                  # HTTP/JSON API on :4747 (/v1/*). UI lives at github.com/gortexhq/web.
-gortex savings                           # cumulative tokens saved + $ avoided across sessions
+gortex savings [--verbose] [--json]      # Today / Last 7 days / All time bar-chart dashboard + $ avoided
 gortex version
 ```
 
@@ -306,7 +306,7 @@ gortex daemon <subcommand>   start / stop / restart / reload / status / logs / i
 gortex eval <subcommand>     Retrieval + token benchmarks — recall, embedders, swebench, tokens
 gortex eval-server [flags]   HTTP server used by the swebench harness
 gortex context [flags]       Generate portable context briefing for a task
-gortex savings [flags]       Show cumulative token savings + cost avoided across sessions
+gortex savings [flags]       Token-savings dashboard (Today / Last 7 days / All time bars + USD avoided; --verbose, --json, --model, --utc, --reset)
 gortex index [path...]       Index one or more repositories and print stats
 gortex status [flags]        Show index status (per-repo and per-project in multi-repo mode)
 gortex track <path>          Add a repository to the tracked workspace
@@ -797,19 +797,37 @@ Gortex tracks how many tokens it saves compared to naive file reads — per-call
 
 - **Per-call:** `get_symbol_source` and other source-reading tools include a `tokens_saved` field in the response, showing the difference between reading the full file vs the targeted symbol.
 - **Session-level:** `graph_stats` returns a `token_savings` object with `calls_counted`, `tokens_returned`, `tokens_saved`, `efficiency_ratio`.
-- **Cumulative (cross-session):** `graph_stats` also returns `cumulative_savings` when persistence is wired — includes `first_seen`, `last_updated`, and `cost_avoided_usd` per model (Claude Opus/Sonnet/Haiku, GPT-4o, GPT-4o-mini). Backed by `~/.cache/gortex/savings.json`.
+- **Cumulative (cross-session):** `graph_stats` also returns `cumulative_savings` when persistence is wired — includes `first_seen`, `last_updated`, and `cost_avoided_usd` per model (Claude Opus/Sonnet/Haiku, GPT-4o, GPT-4o-mini). Backed by `~/.cache/gortex/savings.json` (top-line totals + per-repo + per-language) and a sibling `~/.cache/gortex/savings.jsonl` event log (one line per call) used to render the windowed buckets and the per-tool breakdown.
+
+`gortex savings` renders a three-bucket dashboard:
+
+```text
+Gortex Token Savings
+====================
+Cost avoided:   $168.69 (claude-opus-4) across 1,878 calls · 11,246,094 tokens saved
+
+Today       ████████░░░░░░░░   50.0%  saved 9,200 / 18,400 tokens   $0.14
+Last 7 days ██████████░░░░░░   62.5%  saved 60,100 / 96,200 tokens  $0.90
+All time    ███████████████░   93.3%  saved 11,246,094 / 12,050,716 tokens  $168.69
+```
 
 ```bash
-# Show totals + cost across all default models
+# Three-bucket dashboard with USD on top
 gortex savings
 
-# Highlight a single model (fuzzy match: "opus" → claude-opus-4)
+# Per-tool breakdown inside each bucket
+gortex savings --verbose
+
+# Headline a single model (fuzzy match: "opus" → claude-opus-4)
 gortex savings --model opus
 
-# Machine-readable output
+# Bucket "Today" by UTC instead of local time
+gortex savings --utc
+
+# Machine-readable output (mirrors the dashboard structure: buckets[].per_tool, cost_avoided_usd, etc.)
 gortex savings --json
 
-# Wipe cumulative totals
+# Wipe cumulative totals and the JSONL event log
 gortex savings --reset
 
 # Override pricing (JSON array of {model, usd_per_m_input})
