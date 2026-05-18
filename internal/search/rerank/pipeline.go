@@ -146,8 +146,8 @@ func Nodes(cands []*Candidate) []*graph.Node {
 	return out
 }
 
-// DefaultSignals returns the canonical 11-signal lineup in stable
-// order. Callers wanting a subset should construct New() directly.
+// DefaultSignals returns the canonical signal lineup in stable order.
+// Callers wanting a subset should construct New() directly.
 func DefaultSignals() []Signal {
 	return []Signal{
 		BM25Signal{},
@@ -161,6 +161,9 @@ func DefaultSignals() []Signal {
 		TypeSignatureSignal{},
 		RecencySignal{},
 		FeedbackSignal{},
+		FileCoherenceSignal{},
+		PathPenaltySignal{},
+		DefinitionBiasSignal{},
 	}
 }
 
@@ -170,38 +173,49 @@ func DefaultSignals() []Signal {
 // (no query or a query that misses every BM25 doc), fan-in should
 // still discriminate. Community and feedback weight in below fan-in
 // so a high-fan-in symbol can't be unseated by mere topic-cluster
-// presence. Weights sum to ~5.0 so the final score sits in a
-// human-readable 0..5 range when every signal saturates.
+// presence. File-coherence captures multi-chunk evidence one signal
+// down from fan-in; the path-penalty multiplier sits at 0.4 so test /
+// example demotion is noticeable on ties but never crushes a strong
+// hit; definition-bias is gated by IsSymbolQuery so its weight only
+// applies on identifier queries where the boost is desired. Weights
+// sum to ~6.0 so the final score sits in a human-readable range
+// when every signal saturates.
 func DefaultWeights() map[string]float64 {
 	return map[string]float64{
-		SignalBM25:          1.00,
-		SignalSemantic:      0.80,
-		SignalFanIn:         0.60,
-		SignalFanOut:        0.20,
-		SignalChurn:         0.30,
-		SignalCommunity:     0.30,
-		SignalMinHash:       0.30,
-		SignalAPISignature:  0.45,
-		SignalTypeSignature: 0.45,
-		SignalRecency:       0.30,
-		SignalFeedback:      0.50,
+		SignalBM25:           1.00,
+		SignalSemantic:       0.80,
+		SignalFanIn:          0.60,
+		SignalFanOut:         0.20,
+		SignalChurn:          0.30,
+		SignalCommunity:      0.30,
+		SignalMinHash:        0.30,
+		SignalAPISignature:   0.45,
+		SignalTypeSignature:  0.45,
+		SignalRecency:        0.30,
+		SignalFeedback:       0.50,
+		SignalFileCoherence:  0.30,
+		SignalPathPenalty:    0.40,
+		SignalDefinitionBias: 0.60,
 	}
 }
 
 // Canonical signal names. Use these constants when reading or writing
 // weights from config so a typo is a compile error.
 const (
-	SignalBM25          = "bm25"
-	SignalSemantic      = "semantic"
-	SignalFanIn         = "fan_in"
-	SignalFanOut        = "fan_out"
-	SignalChurn         = "churn"
-	SignalCommunity     = "community"
-	SignalMinHash       = "minhash"
-	SignalAPISignature  = "api_signature"
-	SignalTypeSignature = "type_signature"
-	SignalRecency       = "recency"
-	SignalFeedback      = "feedback"
+	SignalBM25           = "bm25"
+	SignalSemantic       = "semantic"
+	SignalFanIn          = "fan_in"
+	SignalFanOut         = "fan_out"
+	SignalChurn          = "churn"
+	SignalCommunity      = "community"
+	SignalMinHash        = "minhash"
+	SignalAPISignature   = "api_signature"
+	SignalTypeSignature  = "type_signature"
+	SignalRecency        = "recency"
+	SignalFeedback       = "feedback"
+	SignalFileCoherence  = "file_coherence"
+	SignalPathPenalty    = "path_penalty"
+	SignalDefinitionBias = "definition_bias"
 )
 
 // AllSignalNames lists every canonical signal name. Useful for config
@@ -219,5 +233,8 @@ func AllSignalNames() []string {
 		SignalTypeSignature,
 		SignalRecency,
 		SignalFeedback,
+		SignalFileCoherence,
+		SignalPathPenalty,
+		SignalDefinitionBias,
 	}
 }

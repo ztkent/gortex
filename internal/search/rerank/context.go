@@ -76,6 +76,28 @@ type Context struct {
 	// MinHash uses it to only count similarity edges that point to
 	// other candidates in the same batch (cluster-cohesion signal).
 	candidateIDs map[string]struct{}
+
+	// fileGroups maps each file path → candidates from that file in
+	// batch order. The file-coherence signal reads this to detect
+	// "many candidates share this file" multi-chunk evidence and
+	// boost the lead candidate from each file. Files with a single
+	// candidate are present but contribute zero to the signal.
+	fileGroups map[string][]*Candidate
+	// fileScoreSum maps file path → sum of BM25-rank weights for the
+	// candidates from that file (lower text rank = higher weight).
+	// Drives the per-file evidence score; the multi-chunk signal
+	// boosts the per-file lead by `fileScoreSum / maxFileScoreSum`.
+	fileScoreSum map[string]float64
+	// maxFileScoreSum is the largest value in fileScoreSum across
+	// the batch; used to normalise the boost into [0, 1]. Zero when
+	// no candidate has a usable text rank.
+	maxFileScoreSum float64
+
+	// pathPenaltyCache memoises the path-penalty multiplier per file
+	// path within a single Rerank call so the regex-heavy rubric
+	// runs once per file rather than once per candidate. Bounded by
+	// the candidate set's file count.
+	pathPenaltyCache map[string]float64
 }
 
 // now returns the active timestamp (test-injectable when Now != 0).
@@ -95,6 +117,10 @@ func (c *Context) prepare(cands []*Candidate) {
 	c.fanInMax = 0
 	c.fanOutMax = 0
 	c.churnMax = 0
+	c.fileGroups = make(map[string][]*Candidate, len(cands))
+	c.fileScoreSum = make(map[string]float64, len(cands))
+	c.maxFileScoreSum = 0
+	c.pathPenaltyCache = make(map[string]float64, len(cands))
 
 	for _, cand := range cands {
 		if cand == nil || cand.Node == nil {
@@ -126,6 +152,21 @@ func (c *Context) prepare(cands []*Candidate) {
 		ch := c.churnFor(cand.Node)
 		if ch > c.churnMax {
 			c.churnMax = ch
+		}
+
+		// File grouping: collect candidates by FilePath and sum their
+		// inverse-rank weights so the file-coherence signal can detect
+		// multi-chunk evidence + identify the per-file lead candidate.
+		fp := cand.Node.FilePath
+		if fp != "" {
+			c.fileGroups[fp] = append(c.fileGroups[fp], cand)
+			if cand.TextRank >= 0 {
+				w := 1.0 / float64(cand.TextRank+1)
+				c.fileScoreSum[fp] += w
+				if c.fileScoreSum[fp] > c.maxFileScoreSum {
+					c.maxFileScoreSum = c.fileScoreSum[fp]
+				}
+			}
 		}
 	}
 }

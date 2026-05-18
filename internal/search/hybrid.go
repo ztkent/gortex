@@ -6,26 +6,44 @@ import (
 	"time"
 
 	"github.com/zzet/gortex/internal/embedding"
+	"github.com/zzet/gortex/internal/search/rerank"
 )
 
 // HybridBackend combines text search (BM25/Bleve) with vector search (HNSW)
 // using Reciprocal Rank Fusion (RRF) for result ranking.
+//
+// When autoAlpha is true (the default), Search() classifies the query as
+// identifier-shaped or natural-language and applies an α-weighted fusion
+// instead of even-weight RRF: identifier queries lean toward BM25 (small
+// α) where exact-token matches are most reliable, NL queries balance both
+// channels (larger α) so semantic similarity catches synonymous wording.
+// Set autoAlpha=false via SetAutoAlpha to fall back to the original
+// equal-weight RRF — useful for tests pinning the legacy ranking.
 type HybridBackend struct {
-	text     Backend
-	vector   *VectorBackend
-	embedder embedding.Provider
-	k        int // RRF constant (default 60)
+	text      Backend
+	vector    *VectorBackend
+	embedder  embedding.Provider
+	k         int // RRF constant (default 60)
+	autoAlpha bool
 }
 
-// NewHybrid creates a hybrid search backend.
+// NewHybrid creates a hybrid search backend with auto-α enabled.
 func NewHybrid(text Backend, vector *VectorBackend, embedder embedding.Provider) *HybridBackend {
 	return &HybridBackend{
-		text:     text,
-		vector:   vector,
-		embedder: embedder,
-		k:        60,
+		text:      text,
+		vector:    vector,
+		embedder:  embedder,
+		k:         60,
+		autoAlpha: true,
 	}
 }
+
+// SetAutoAlpha toggles auto-α fusion. When false, Search() reverts to
+// the original equal-weight RRF.
+func (h *HybridBackend) SetAutoAlpha(on bool) { h.autoAlpha = on }
+
+// AutoAlpha reports whether auto-α fusion is active.
+func (h *HybridBackend) AutoAlpha() bool { return h.autoAlpha }
 
 // Add indexes a symbol in both text and vector backends.
 func (h *HybridBackend) Add(id string, fields ...string) {
@@ -45,7 +63,12 @@ func (h *HybridBackend) Remove(id string) {
 	// they won't match graph nodes and will be filtered out.
 }
 
-// Search runs both text and vector search, fuses results with RRF.
+// Search runs both text and vector search, fuses results with RRF
+// (equal weight) when autoAlpha is off, or α-weighted RRF when on.
+// Auto-α leans toward BM25 for identifier queries (where exact-token
+// matches are the most reliable signal) and balances both channels
+// for natural-language queries (where semantic similarity catches
+// synonymous wording).
 func (h *HybridBackend) Search(query string, limit int) []SearchResult {
 	textResults, vecIDs := h.searchChannels(query, limit)
 	if len(vecIDs) == 0 {
@@ -53,6 +76,9 @@ func (h *HybridBackend) Search(query string, limit int) []SearchResult {
 			return textResults[:limit]
 		}
 		return textResults
+	}
+	if h.autoAlpha {
+		return alphaFuse(textResults, vecIDs, rerank.AlphaFor(query), h.k, limit)
 	}
 	return rrfFuse(textResults, vecIDs, h.k, limit)
 }
@@ -109,6 +135,65 @@ func (h *HybridBackend) TextSizeBytes() uint64 { return BackendSize(h.text) }
 
 // VectorSizeBytes returns just the vector backend's size.
 func (h *HybridBackend) VectorSizeBytes() uint64 { return h.vector.SizeBytes() }
+
+// alphaFuse combines text and vector results with an α-weighted blend
+// of their reciprocal-rank contributions. Higher α gives the vector
+// channel more weight (good for natural-language queries where
+// semantic similarity catches synonyms); lower α gives BM25 more
+// weight (good for identifier queries where exact-token matches are
+// the most reliable signal).
+//
+// Formula:
+//
+//	score(doc) = (1-α) × 1/(k+rank_text+1) + α × 1/(k+rank_vector+1)
+//
+// α=0 reduces to text-only; α=1 reduces to vector-only; α=0.5 is
+// equivalent to rrfFuse with each channel halved (so absolute scores
+// differ from rrfFuse but the relative ordering is the same).
+func alphaFuse(textResults []SearchResult, vecIDs []string, alpha float64, k, limit int) []SearchResult {
+	if alpha < 0 {
+		alpha = 0
+	}
+	if alpha > 1 {
+		alpha = 1
+	}
+	textWeight := 1.0 - alpha
+	vecWeight := alpha
+	scores := make(map[string]float64)
+
+	for rank, r := range textResults {
+		scores[r.ID] += textWeight / float64(k+rank+1)
+	}
+	for rank, id := range vecIDs {
+		scores[id] += vecWeight / float64(k+rank+1)
+	}
+
+	type scored struct {
+		id    string
+		score float64
+	}
+	results := make([]scored, 0, len(scores))
+	for id, score := range scores {
+		results = append(results, scored{id: id, score: score})
+	}
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].score != results[j].score {
+			return results[i].score > results[j].score
+		}
+		// Stable secondary key: id ascending so identical-score
+		// runs ship in a deterministic order across calls.
+		return results[i].id < results[j].id
+	})
+
+	if len(results) > limit {
+		results = results[:limit]
+	}
+	out := make([]SearchResult, len(results))
+	for i, r := range results {
+		out[i] = SearchResult{ID: r.id, Score: r.score}
+	}
+	return out
+}
 
 // rrfFuse combines text and vector results using Reciprocal Rank Fusion.
 // score(doc) = 1/(k+rank_text) + 1/(k+rank_vector)
