@@ -143,6 +143,8 @@ gortex mcp --no-daemon --watch          # explicit embedded mode
 ```bash
 gortex server --index .                  # HTTP/JSON API on :4747 (/v1/*). UI lives at github.com/gortexhq/web.
 gortex savings [--verbose] [--json]      # Today / Last 7 days / All time bar-chart dashboard + $ avoided
+gortex bench <sub>                       # user-facing benchmark suite (recall / tokens / embedders / swebench / all)
+gortex gain [--since 7d]                 # forward-looking per-call USD savings + optional history slice
 gortex version
 ```
 
@@ -303,8 +305,10 @@ gortex init doctor           Zero-op drift report across all detected agents (hu
 gortex mcp [flags]            Start the MCP stdio server (auto-detects daemon; --no-daemon / --proxy; --server adds HTTP API)
 gortex server [flags]         Start the HTTP/JSON API under /v1/* (--bind, --auth-token, --watch, --cors-origin)
 gortex daemon <subcommand>   start / stop / restart / reload / status / logs / install-service / service-status / uninstall-service / server (multi-server roster)
-gortex eval <subcommand>     Retrieval + token benchmarks — recall, embedders, swebench, tokens
+gortex eval <subcommand>     Retrieval + token benchmarks — recall, embedders, swebench, tokens (substrate; prefer `gortex bench` for the user-facing surface)
 gortex eval-server [flags]   HTTP server used by the swebench harness
+gortex bench <subcommand>    User-facing benchmark suite — recall / tokens / embedders / swebench / all; `bench tokens` adds a USD-per-model card (per-day + per-month projections); `--out-dir DIR` writes per-run artifacts
+gortex gain [flags]          Forward-looking per-call USD savings projection from the latest bench tokens output; optional `--since DURATION` cumulative-history slice
 gortex context [flags]       Generate portable context briefing for a task
 gortex savings [flags]       Token-savings dashboard (Today / Last 7 days / All time bars + USD avoided; --verbose, --json, --model, --utc, --reset)
 gortex index [path...]       Index one or more repositories and print stats
