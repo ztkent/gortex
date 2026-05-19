@@ -21,7 +21,7 @@ var _ Extractor = (*HTTPExtractor)(nil)
 func (h *HTTPExtractor) SupportedLanguages() []string {
 	return []string{
 		"go", "typescript", "javascript", "python",
-		"java", "kotlin", "dart",
+		"java", "kotlin", "dart", "swift",
 		"rust", "csharp", "ruby", "php", "elixir",
 	}
 }
@@ -453,6 +453,35 @@ var httpPatterns = []httpPattern{
 		confidence: 0.85,
 		languages:  []string{"dart"},
 	},
+
+	// ---- Swift providers (Vapor / Hummingbird) ----
+	// `app.get("users") { req in ... }` (trailing-closure handler) and
+	// `app.get("users", use: listUsers)` (use: labelled handler). The
+	// receiver is anchored to the conventional names (app / routes /
+	// router) — same trade-off express makes for route-group vars.
+	{
+		re:         regexp.MustCompile(`\b(?:app|routes|router)\.(get|post|put|delete|patch)\(\s*"([^"]+)"(?:[^{)]*?\buse:\s*(\w+))?`),
+		role:       RoleProvider,
+		methodGrp:  1,
+		pathGrp:    2,
+		handlerGrp: 3,
+		framework:  "vapor",
+		confidence: 0.85,
+		languages:  []string{"swift"},
+	},
+
+	// ---- Swift consumers (Alamofire) ----
+	// `AF.request("https://…", method: .get)` /
+	// `session.request("…", method: .post)`.
+	{
+		re:         regexp.MustCompile(`\b(?:AF|\w*[Ss]ession)\.request\(\s*"([^"]+)"[^{)]*?\bmethod:\s*\.(get|post|put|delete|patch)`),
+		role:       RoleConsumer,
+		methodGrp:  2,
+		pathGrp:    1,
+		framework:  "alamofire",
+		confidence: 0.8,
+		languages:  []string{"swift"},
+	},
 }
 
 // httpPrefilterMarkers is the per-language substring prefilter.
@@ -511,6 +540,14 @@ var httpPrefilterMarkers = map[string][][]byte{
 		[]byte("->put("),
 		[]byte("->delete("),
 		[]byte("->patch("),
+	},
+	"swift": {
+		[]byte(".get("),
+		[]byte(".post("),
+		[]byte(".put("),
+		[]byte(".delete("),
+		[]byte(".patch("),
+		[]byte(".request("),
 	},
 }
 
@@ -762,6 +799,8 @@ func detectLanguage(filePath string) string {
 		return "dart"
 	case strings.HasSuffix(filePath, ".rs"):
 		return "rust"
+	case strings.HasSuffix(filePath, ".swift"):
+		return "swift"
 	case strings.HasSuffix(filePath, ".cs"):
 		return "csharp"
 	case strings.HasSuffix(filePath, ".rb"):

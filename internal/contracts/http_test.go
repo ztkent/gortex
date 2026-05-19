@@ -888,3 +888,74 @@ func TestHTTPExtractor_Go_Fiber_RealRoute(t *testing.T) {
 		t.Errorf("expected http::DELETE::/v1/users/{p1}; got %v", byID)
 	}
 }
+
+func TestHTTPExtractor_Swift_Vapor(t *testing.T) {
+	src := []byte(`
+import Vapor
+
+func routes(_ app: Application) throws {
+    app.get("users") { req in
+        return "users"
+    }
+    app.post("users", use: createUser)
+    routes.delete("users", ":id") { req in
+        return "deleted"
+    }
+}
+`)
+	nodes := makeNodes("routes.swift", []struct {
+		name       string
+		start, end int
+	}{
+		{"routes", 4, 12},
+	})
+
+	ext := &HTTPExtractor{}
+	contracts := ext.Extract("routes.swift", src, nodes, nil)
+	if len(contracts) != 3 {
+		t.Fatalf("expected 3 Vapor routes, got %d: %+v", len(contracts), contracts)
+	}
+	methods := map[string]bool{}
+	for _, c := range contracts {
+		if c.Meta["framework"] != "vapor" {
+			t.Errorf("framework = %v, want vapor", c.Meta["framework"])
+		}
+		methods[c.Meta["method"].(string)] = true
+	}
+	for _, m := range []string{"GET", "POST", "DELETE"} {
+		if !methods[m] {
+			t.Errorf("expected a %s route, got methods %v", m, methods)
+		}
+	}
+}
+
+func TestHTTPExtractor_Swift_Alamofire(t *testing.T) {
+	src := []byte(`
+import Alamofire
+
+func fetchUsers() {
+    AF.request("https://api.example.com/users", method: .get)
+    session.request("https://api.example.com/users", method: .post)
+}
+`)
+	nodes := makeNodes("client.swift", []struct {
+		name       string
+		start, end int
+	}{
+		{"fetchUsers", 4, 7},
+	})
+
+	ext := &HTTPExtractor{}
+	contracts := ext.Extract("client.swift", src, nodes, nil)
+	if len(contracts) != 2 {
+		t.Fatalf("expected 2 Alamofire consumers, got %d: %+v", len(contracts), contracts)
+	}
+	for _, c := range contracts {
+		if c.Meta["framework"] != "alamofire" {
+			t.Errorf("framework = %v, want alamofire", c.Meta["framework"])
+		}
+		if c.Role != RoleConsumer {
+			t.Errorf("role = %v, want consumer", c.Role)
+		}
+	}
+}
