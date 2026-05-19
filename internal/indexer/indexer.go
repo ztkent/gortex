@@ -29,6 +29,7 @@ import (
 	"github.com/zzet/gortex/internal/licenses"
 	"github.com/zzet/gortex/internal/modules"
 	"github.com/zzet/gortex/internal/parser"
+	"github.com/zzet/gortex/internal/parser/crashpool"
 	"github.com/zzet/gortex/internal/progress"
 	"github.com/zzet/gortex/internal/reach"
 	"github.com/zzet/gortex/internal/resolver"
@@ -53,9 +54,14 @@ type IndexResult struct {
 	// — full-index passes treat every file as stale and would
 	// duplicate FileCount). Used by the janitor / reconcile log to
 	// report "how much work did the snapshot delta require".
-	StaleFileCount int          `json:"stale_file_count,omitempty"`
-	DurationMs     int64        `json:"duration_ms"`
-	Errors         []IndexError `json:"errors,omitempty"`
+	StaleFileCount int `json:"stale_file_count,omitempty"`
+	// QuarantinedFiles is the number of files held in the parser
+	// crash-isolation quarantine after this pass — files that
+	// SIGSEGV'd / hung / panicked the parser and were skipped with a
+	// Meta["parse_error"] node. Zero unless crash isolation is on.
+	QuarantinedFiles int          `json:"quarantined_files,omitempty"`
+	DurationMs       int64        `json:"duration_ms"`
+	Errors           []IndexError `json:"errors,omitempty"`
 }
 
 // IndexError records a per-file parsing failure.
@@ -1336,6 +1342,25 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 		workers = 1
 	}
 
+	// Optional crash isolation: run tree-sitter extraction in worker
+	// subprocesses so a grammar SIGSEGV / OOM / hang on one
+	// pathological file is contained — the bad file is quarantined and
+	// the pass still completes. Off unless index.crash_isolation /
+	// GORTEX_PARSER_ISOLATION is set.
+	var parsePool *crashpool.Pool
+	var quarantine *crashpool.Quarantine
+	if idx.crashIsolationEnabled() {
+		quarantine = crashpool.LoadQuarantine(filepath.Join(absRoot, ".gortex", "parser-quarantine.json"))
+		if p, perr := newParsePool(workers, idx.logger); perr != nil {
+			idx.logger.Warn("indexer: crash isolation requested but parser pool unavailable; parsing in-process",
+				zap.Error(perr))
+		} else {
+			parsePool = p
+			defer parsePool.Close()
+			idx.logger.Info("indexer: parser crash isolation enabled", zap.Int("workers", workers))
+		}
+	}
+
 	// Workers parse files, write the resulting nodes/edges to the
 	// sharded graph, and run per-file contract extractors on the same
 	// src bytes — all in one pass. Reusing src avoids the 10k+ disk
@@ -1383,21 +1408,25 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 					continue
 				}
 
-				result, err := ext.Extract(relPath, src)
+				result, quarantined, err := idx.extractFile(parsePool, quarantine, path, relPath, lang, ext, src)
 				if err != nil {
 					errMu.Lock()
 					errors = append(errors, IndexError{FilePath: path, Error: err.Error()})
 					errMu.Unlock()
+				}
+				if result == nil {
 					continue
 				}
-
-				stampParseErrors(result)
 
 				// Append coverage artifacts (todos / licenses /
 				// ownership) before applyRepoPrefix so they get the
 				// same multi-repo namespacing treatment as
-				// language-extractor output.
-				idx.applyCoverageDomains(relPath, lang, src, result)
+				// language-extractor output. Skipped for quarantined
+				// files — the coverage scanners would re-read a source
+				// the parser could not survive.
+				if !quarantined {
+					idx.applyCoverageDomains(relPath, lang, src, result)
+				}
 
 				idx.applyRepoPrefix(result.Nodes, result.Edges)
 
@@ -1429,7 +1458,7 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 				// per-edge path during cold-start warmup.
 				idx.graph.AddBatch(result.Nodes, result.Edges)
 
-				if fileGraphPath != "" {
+				if !quarantined && fileGraphPath != "" {
 					exts := contractExtractorsByLang[lang]
 					if len(exts) > 0 {
 						c := idx.runContractExtractorsForFile(
@@ -1637,15 +1666,26 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 		})
 	}
 
+	// Persist the parser quarantine so a file that crashed the parser
+	// stays skipped across daemon restarts until its content changes.
+	if quarantine != nil {
+		if err := quarantine.Save(); err != nil {
+			idx.logger.Warn("indexer: failed to persist parser quarantine", zap.Error(err))
+		} else if n := quarantine.Len(); n > 0 {
+			idx.logger.Info("indexer: parser quarantine", zap.Int("files", n))
+		}
+	}
+
 	reporter.Report("indexing complete", int(fileCount), len(files))
 
 	nodes, edges := idx.repoNodeEdgeCount()
 	return &IndexResult{
-		NodeCount:  nodes,
-		EdgeCount:  edges,
-		FileCount:  int(fileCount),
-		DurationMs: time.Since(start).Milliseconds(),
-		Errors:     errors,
+		NodeCount:        nodes,
+		EdgeCount:        edges,
+		FileCount:        int(fileCount),
+		QuarantinedFiles: quarantine.Len(),
+		DurationMs:       time.Since(start).Milliseconds(),
+		Errors:           errors,
 	}, nil
 }
 
@@ -1717,17 +1757,32 @@ func (idx *Indexer) indexFile(filePath string, resolve bool) error {
 		return nil
 	}
 
-	result, err := ext.Extract(relPath, src)
-	if err != nil {
+	// Crash isolation for the incremental path: a file the user just
+	// saved that SIGSEGVs the parser is quarantined instead of taking
+	// the daemon down with it.
+	var pool *crashpool.Pool
+	var quarantine *crashpool.Quarantine
+	if idx.crashIsolationEnabled() {
+		quarantine = crashpool.LoadQuarantine(filepath.Join(idx.rootPath, ".gortex", "parser-quarantine.json"))
+		if p, perr := newParsePool(1, idx.logger); perr == nil {
+			pool = p
+			defer pool.Close()
+		}
+	}
+	result, quarantined, err := idx.extractFile(pool, quarantine, absPath, relPath, lang, ext, src)
+	if quarantine != nil {
+		_ = quarantine.Save()
+	}
+	if result == nil {
 		return err
 	}
 
-	stampParseErrors(result)
-
 	// Coverage extractors (todos, licenses, ownership). Same call
 	// site exists in the bulk IndexCtx worker pool — see
-	// applyCoverageDomains.
-	idx.applyCoverageDomains(relPath, lang, src, result)
+	// applyCoverageDomains. Skipped for a quarantined file.
+	if !quarantined {
+		idx.applyCoverageDomains(relPath, lang, src, result)
+	}
 
 	idx.applyRepoPrefix(result.Nodes, result.Edges)
 

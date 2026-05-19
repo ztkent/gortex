@@ -276,6 +276,15 @@ type IndexConfig struct {
 	// that drops real symbols silently is a worse default than a
 	// slightly slower full index.
 	MaxFileSize int64 `mapstructure:"max_file_size" yaml:"max_file_size,omitempty"`
+	// CrashIsolation runs tree-sitter extraction in worker
+	// subprocesses so a grammar SIGSEGV / OOM / hang on one
+	// pathological file is contained: the bad file is quarantined
+	// with Meta["parse_error"] and the index pass still completes.
+	// Off by default — the subprocess round-trip adds measurable
+	// overhead and an in-process index is the common case. Opt in via
+	// `.gortex.yaml::index::crash_isolation: true` or the
+	// GORTEX_PARSER_ISOLATION=1 environment override.
+	CrashIsolation bool `mapstructure:"crash_isolation" yaml:"crash_isolation,omitempty"`
 	// Coverage gates the per-domain coverage extractors (todos,
 	// licenses, ownership, function shape, etc.). Each sub-block has
 	// its own default; an empty Coverage block means "use the
