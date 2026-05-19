@@ -37,6 +37,11 @@ var annotationGenerators = map[string]annotationGen{
 	"Mapper": {"mapstruct", []string{"mapper_impl"}},
 	// Kotlin compiler plugins (KAPT / kotlin-parcelize).
 	"Parcelize": {"kapt", []string{"parcelable"}},
+	// CommunityToolkit.Mvvm .NET source generators: [ObservableProperty]
+	// on a field generates the public property + change notification;
+	// [RelayCommand] on a method generates an ICommand property.
+	"ObservableProperty": {"mvvm_toolkit", []string{"observable_property"}},
+	"RelayCommand":       {"mvvm_toolkit", []string{"relay_command"}},
 }
 
 // AnnotationGeneratedStats reports what MarkAnnotatedGenerated did.

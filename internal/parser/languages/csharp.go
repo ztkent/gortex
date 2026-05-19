@@ -261,6 +261,10 @@ func (e *CSharpExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 		})
 	}
 
+	// .NET surfaces a symbol walk misses: DI registrations + COM
+	// interop. Stamped onto the file node.
+	detectDotNetSurfaces(src, result)
+
 	return result, nil
 }
 

@@ -73,6 +73,20 @@ func TestMarkAnnotatedGenerated_MergesAndDedups(t *testing.T) {
 	require.Contains(t, members, "setters")
 }
 
+func TestMarkAnnotatedGenerated_MVVMSourceGenerators(t *testing.T) {
+	nodes := []*graph.Node{
+		{ID: "vm.cs::name", Kind: graph.KindField, Name: "name", FilePath: "vm.cs"},
+		annoNode("annotation::csharp::ObservableProperty", "ObservableProperty"),
+	}
+	edges := []*graph.Edge{
+		{From: "vm.cs::name", To: "annotation::csharp::ObservableProperty", Kind: graph.EdgeAnnotated},
+	}
+	_, stats := MarkAnnotatedGenerated(nodes, edges)
+	require.Equal(t, 1, stats.NodesMarked)
+	require.Equal(t, "mvvm_toolkit", nodes[0].Meta["codegen_tool"])
+	require.Contains(t, nodes[0].Meta["generated_members"].([]string), "observable_property")
+}
+
 func TestNormalizeAnnotationName(t *testing.T) {
 	require.Equal(t, "Data", normalizeAnnotationName("@Data"))
 	require.Equal(t, "Data", normalizeAnnotationName("lombok.Data"))
