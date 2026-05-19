@@ -83,6 +83,7 @@ type Indexer struct {
 	resolver    *resolver.Resolver
 	search      search.Backend
 	config      config.IndexConfig
+	transforms  *transformPipeline
 	excludes    *excludes.Matcher
 	excludeOnce sync.Once
 	rootPath    string
@@ -211,6 +212,7 @@ func New(g *graph.Graph, reg *parser.Registry, cfg config.IndexConfig, logger *z
 		// idx.search (Hybrid wrap, etc.) should use swap helpers below.
 		search:        search.NewSwappable(search.NewAuto()),
 		config:        cfg,
+		transforms:    newTransformPipeline(cfg.Transforms, logger),
 		logger:        logger,
 		fileMtimes:    make(map[string]int64),
 		contractCache: make(map[string]*contractCacheEntry),
@@ -1316,7 +1318,7 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 			}
 			return nil
 		}
-		lang, ok := idx.registry.DetectLanguage(path)
+		lang, ok := idx.effectiveLanguage(path)
 		if !ok {
 			return nil
 		}
@@ -1415,11 +1417,16 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 				}
 
 				relPath, _ := filepath.Rel(absRoot, path)
-				lang, _ := idx.registry.DetectLanguage(path)
+				lang, _ := idx.effectiveLanguage(path)
 				ext, _ := idx.registry.GetByLanguage(lang)
 				if ext == nil {
 					continue
 				}
+
+				// Pre-ingestion transforms: rewrite the bytes before
+				// extraction (BOM strip, minified-bundle expansion, a
+				// PDF→markdown command, …).
+				src = idx.transforms.run(relPath, src)
 
 				result, skipped, err := idx.extractFile(parsePool, quarantine, path, relPath, lang, ext, src)
 				if err != nil {
@@ -1772,7 +1779,7 @@ func (idx *Indexer) indexFile(filePath string, resolve bool) error {
 		return err
 	}
 
-	lang, ok := idx.registry.DetectLanguage(absPath)
+	lang, ok := idx.effectiveLanguage(absPath)
 	if !ok {
 		return nil
 	}
@@ -1792,6 +1799,9 @@ func (idx *Indexer) indexFile(filePath string, resolve bool) error {
 		idx.graph.AddBatch([]*graph.Node{n}, nil)
 		return nil
 	}
+
+	// Pre-ingestion transforms — same pipeline as the bulk path.
+	src = idx.transforms.run(relPath, src)
 
 	// Crash isolation for the incremental path: a file the user just
 	// saved that SIGSEGVs the parser is quarantined instead of taking
@@ -2178,7 +2188,7 @@ func (idx *Indexer) IncrementalReindex(root string) (*IndexResult, error) {
 			}
 			return nil
 		}
-		if _, ok := idx.registry.DetectLanguage(path); !ok {
+		if _, ok := idx.effectiveLanguage(path); !ok {
 			return nil
 		}
 		if idx.shouldExclude(path, absRoot) {

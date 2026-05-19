@@ -295,12 +295,40 @@ type IndexConfig struct {
 	// trip it. In crash-isolation mode it also bounds the worker
 	// round-trip.
 	MaxExtractMillis int `mapstructure:"max_extract_millis" yaml:"max_extract_millis,omitempty"`
+	// Transforms are pluggable pre-ingestion content processors. Each
+	// rewrites a matching file's bytes before the parser sees them —
+	// expanding minified bundles, normalising SVG/TOON, converting a
+	// PDF to markdown, etc. Empty by default.
+	Transforms []TransformRule `mapstructure:"transforms" yaml:"transforms,omitempty"`
 	// Coverage gates the per-domain coverage extractors (todos,
 	// licenses, ownership, function shape, etc.). Each sub-block has
 	// its own default; an empty Coverage block means "use the
 	// documented per-domain defaults" — cheap structural domains on,
 	// expensive ones off.
 	Coverage CoverageConfig `mapstructure:"coverage" yaml:"coverage,omitempty"`
+}
+
+// TransformRule declares a pluggable pre-ingestion content transform.
+// Before a matching file is parsed, its bytes are piped through the
+// command (file content on stdin, transformed content on stdout). This
+// is how non-native inputs reach the graph — minified bundles expanded,
+// SVG/TOON normalised, a PDF converted to markdown, and so on.
+type TransformRule struct {
+	// Name identifies the transform in logs.
+	Name string `mapstructure:"name" yaml:"name"`
+	// Extensions are the file extensions (with the dot, e.g. ".svg")
+	// this transform applies to. Empty means every file.
+	Extensions []string `mapstructure:"extensions" yaml:"extensions,omitempty"`
+	// Command is the transform program as argv. The file content is
+	// written to its stdin; its stdout replaces the content.
+	Command []string `mapstructure:"command" yaml:"command"`
+	// AsLanguage, when set, indexes matching files as this language
+	// even if their extension is not natively recognised — a rule with
+	// extensions [".pdf"] + as_language "markdown" lets a PDF→markdown
+	// command feed the markdown extractor.
+	AsLanguage string `mapstructure:"as_language" yaml:"as_language,omitempty"`
+	// TimeoutMillis bounds the transform subprocess; 0 uses a default.
+	TimeoutMillis int `mapstructure:"timeout_millis" yaml:"timeout_millis,omitempty"`
 }
 
 // CoverageConfig collects the per-domain coverage extraction gates.
