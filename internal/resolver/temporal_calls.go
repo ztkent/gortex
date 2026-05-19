@@ -76,6 +76,15 @@ func ResolveTemporalCalls(g *graph.Graph) int {
 	if g == nil {
 		return 0
 	}
+	// Serialise against other graph-wide passes that mutate Node.Meta
+	// (markTestSymbolsAndEmitEdges, detectClonesAndEmitEdges,
+	// reach.BuildIndex). stampTemporalRole below writes n.Meta on
+	// existing graph nodes; without this lock a concurrent reader
+	// (e.g. clone detection invoked from indexFile) trips the runtime's
+	// "concurrent map read and map write" check.
+	mu := g.ResolveMutex()
+	mu.Lock()
+	defer mu.Unlock()
 	idx := buildTemporalIndex(g)
 	resolved := 0
 	for _, e := range g.AllEdges() {

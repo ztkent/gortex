@@ -185,6 +185,15 @@ func detectClonesAndEmitEdges(g *graph.Graph, threshold float64) CloneDetectionS
 	if g == nil {
 		return stats
 	}
+	// Serialise against other graph-wide passes that mutate Node.Meta
+	// (markTestSymbolsAndEmitEdges, ResolveTemporalCalls, reach.BuildIndex,
+	// releases enrichment). Without this lock, the AllNodes walk below
+	// reads n.Meta while one of those writers mutates the same map and
+	// the runtime aborts with "concurrent map read and map write" — the
+	// observed daemon crash. Shares g.ResolveMutex() so all such passes
+	// rendezvous on the same lock the resolver already uses.
+	g.ResolveMutex().Lock()
+	defer g.ResolveMutex().Unlock()
 	var items []clones.Item
 	for _, n := range g.AllNodes() {
 		if n == nil || n.Meta == nil {

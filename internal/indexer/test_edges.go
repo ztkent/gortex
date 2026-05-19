@@ -29,6 +29,13 @@ func markTestSymbolsAndEmitEdges(g *graph.Graph) (markedTests int, edgesEmitted 
 	if g == nil {
 		return 0, 0
 	}
+	// Serialise Node.Meta mutation against other graph-wide passes
+	// (detectClonesAndEmitEdges, ResolveTemporalCalls, reach.BuildIndex).
+	// See clones.go for the rationale — without this lock the writes
+	// below race the readers and the runtime aborts with "concurrent
+	// map read and map write".
+	g.ResolveMutex().Lock()
+	defer g.ResolveMutex().Unlock()
 
 	// Pass 1: classify file nodes, then function/method nodes.
 	testFiles := map[string]bool{} // file node ID → is test file

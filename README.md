@@ -108,13 +108,13 @@ For Homebrew, package managers (`.deb` / `.rpm` / `.apk`), direct binary downloa
 
 Setup is split into two commands — `gortex install` runs once per machine, `gortex init` runs once per repo:
 
-- **`gortex install`** writes user-level artifacts: `~/.claude.json` MCP config, `~/.claude/skills/gortex-*` (tool-usage skills), `~/.claude/commands/gortex-*.md` (slash commands), `~/.gemini/antigravity/` Knowledge Items, and (optionally) user-level Claude Code hooks. Codebase-agnostic content lives here so it isn't duplicated into every repo.
+- **`gortex install`** writes user-level artifacts: `~/.claude.json` MCP config, `~/.claude/skills/gortex-*` (tool-usage skills), `~/.claude/commands/gortex-*.md` (slash commands), `~/.claude/agents/gortex-*.md` (Claude Code sub-agents — graph-only tool allowlist), `~/.gemini/antigravity/` Knowledge Items, and (optionally) user-level Claude Code hooks. Codebase-agnostic content lives here so it isn't duplicated into every repo.
 - **`gortex init`** writes per-repo artifacts: `.mcp.json`, `.claude/settings.{json,local.json}`, `CLAUDE.md` with the codebase overview and community routing, `.claude/skills/generated/` per-community SKILL.md files, and a marker-guarded community routing block in every other detected agent's per-repo instructions file (`AGENTS.md`, `.windsurfrules`, `GEMINI.md`, `.cursor/rules/gortex-communities.mdc`, etc.).
 
 ### One-time machine setup
 
 ```bash
-gortex install                      # interactive-free: MCP + skills + slash commands at ~/.claude/
+gortex install                      # interactive-free: MCP + skills + slash commands + sub-agents at ~/.claude/
 gortex install --start --track      # also spawn the daemon and track the current directory
 gortex install --no-hooks           # skip user-level hook installation
 
@@ -303,6 +303,9 @@ After `gortex install` (once per machine) and `gortex init` (once per repo), Cla
   - *Refactor & edit (enforce tool-call order) (6)* — `/gortex-refactor`, `/gortex-safe-edit`, `/gortex-rename`, `/gortex-extract-function`, `/gortex-fix-all`, `/gortex-add-test`. These wrap the speculative-execution (`preview_edit` / `simulate_chain`) and LSP code-actions (`get_code_actions` / `apply_code_action` / `fix_all_in_file`) paths so the agent does not bypass the safety steps by calling `Edit` / `Write` directly.
   - *Review & operate (graph-grounded playbooks) (5)* — `/gortex-pr-review`, `/gortex-architecture-review`, `/gortex-quality-audit`, `/gortex-incident-investigation`, `/gortex-episode-replay`. These wrap the discovery + impact + memory surfaces into ordered playbooks so postmortems, audits, and PR reviews are graph-grounded.
 - **Tool-usage skills:** the same 19 are installed as model-invoked skills to `~/.claude/skills/` by `gortex install` — one copy per user, used across every repo
+- **Sub-agents (2):** installed to `~/.claude/agents/` by `gortex install`. Claude Code auto-routes matching prompts to them; each runs in a fresh context window and returns a single summary, keeping the parent's context clean. Tool allowlists are pinned to gortex graph tools only — Bash / Grep / Glob are unavailable to the sub-agent by construction.
+  - `gortex-search` — locate code, trace call paths, explore architecture
+  - `gortex-impact` — assess blast radius before editing (`verify_change`, `simulate_chain`, `check_guards`, `get_test_targets`)
 - **PreToolUse hook:** automatic graph context + graph-tool suggestions on Read/Grep/Glob
 - **PreCompact hook:** condensed orientation snapshot injected before context compaction so the agent resumes without re-exploring
 - **Stop hook:** post-task diagnostics — tests to run, guard violations, dead code, and contract issues on the changed symbols — injected as context before the agent hands off

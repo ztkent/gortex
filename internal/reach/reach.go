@@ -12,7 +12,6 @@ package reach
 
 import (
 	"sort"
-	"sync"
 	"sync/atomic"
 
 	"github.com/zzet/gortex/internal/graph"
@@ -88,16 +87,6 @@ type Stats struct {
 // incremental rebuilds. Bumped on every BuildIndex / ClearIndex call.
 var buildCounter uint64
 
-// buildMu serialises BuildIndex / ClearIndex calls. The watcher fires
-// patchGraph (and our rebuild) concurrently in storm mode, and
-// AllNodes + Node.Meta writes are not safe to interleave across
-// goroutines. The mutex is on the package, not the graph, because in
-// the daemon there is one graph + one indexer + one watcher and the
-// build cost is bounded enough that the lock contention never
-// matters; cross-graph callers (tests) serialise per their own
-// fixtures.
-var buildMu sync.Mutex
-
 // BuildIndex precomputes per-depth incoming reachability sets for
 // every impact-seed node in g and stores them under Node.Meta as
 // []string slices keyed reach_d1 / reach_d2 / reach_d3. Tiers are
@@ -118,8 +107,9 @@ func BuildIndex(g *graph.Graph) *Stats {
 	if g == nil {
 		return &Stats{}
 	}
-	buildMu.Lock()
-	defer buildMu.Unlock()
+	mu := g.ResolveMutex()
+	mu.Lock()
+	defer mu.Unlock()
 	build := atomic.AddUint64(&buildCounter, 1)
 	stats := &Stats{Build: build}
 
@@ -268,8 +258,9 @@ func ClearIndex(g *graph.Graph) {
 	if g == nil {
 		return
 	}
-	buildMu.Lock()
-	defer buildMu.Unlock()
+	mu := g.ResolveMutex()
+	mu.Lock()
+	defer mu.Unlock()
 	atomic.AddUint64(&buildCounter, 1)
 	for _, n := range g.AllNodes() {
 		if n == nil || n.Meta == nil {
