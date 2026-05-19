@@ -2,7 +2,7 @@
    
 # Gortex
 
-### Code intelligence engine that indexes repositories into an in-memory knowledge graph  
+### Code graph and intelligence engine that indexes repositories  
 
 #### and exposes it via CLI, MCP Server, and web UI.
 
