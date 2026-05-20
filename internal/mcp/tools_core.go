@@ -597,6 +597,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithString("kind", mcp.Description("Filter to one or more node kinds (comma-separated). Standard kinds: function, method, type, interface, variable, constant, field, file, package, import, contract. Coverage kinds: param, closure, enum_member, generic_param, module, table, column, config_key, flag, event, migration, fixture, todo, team, license, release.")),
 			mcp.WithString("assist", mcp.Description("LLM assist mode: \"auto\" (default — engages on natural-language queries, skips identifier lookups), \"on\" (force engage), \"off\" (bypass), \"deep\" (on + a body-grounded verification pass that reads candidate code and HONESTLY drops irrelevant matches — slower, may return empty results when nothing genuinely matches). Requires an LLM provider configured via `llm.provider` (local / anthropic / openai / ollama / claudecli / gemini / bedrock / deepseek); behaves as \"off\" when none is available.")),
 			mcp.WithBoolean("debug", mcp.Description("When true, attach a `rerank` block to the response carrying per-candidate scores and per-signal contributions from the 11-signal rerank pipeline (bm25, semantic, fan_in, fan_out, churn, community, minhash, api_signature, type_signature, recency, feedback) plus the active per-signal weight map. Off by default; enable to inspect ranking decisions or tune `.gortex.yaml::search::weights`.")),
+			mcp.WithString("query_class", mcp.Description("Advisory hint that tunes the bm25-vs-semantic balance of the rerank: \"auto\" (default — detect from query shape), \"symbol\" (identifier / API lookup — BM25-heavy), \"concept\" (natural-language description — balanced), \"path\" (file-path query — most BM25-heavy), \"signature\" (type/function-signature fragment — BM25-leaning). The class actually used is echoed back as `query_class` in the response.")),
 		),
 		s.handleSearchSymbols,
 	)
@@ -934,6 +935,20 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 	// in the codebase. Cold queries with no session data fall back
 	// to a structural-only pass.
 	rctx := s.buildRerankContext(ctx, q)
+	// Per-class rerank weighting: detect the query class (or honour an
+	// explicit query_class hint) and pin it on the rerank Context so
+	// the pipeline scales the bm25 / semantic blend accordingly.
+	queryClass := rerank.ClassifyQuery(q)
+	if qcArg := strings.TrimSpace(req.GetString("query_class", "")); qcArg != "" {
+		parsed, ok := rerank.ParseQueryClass(qcArg)
+		if !ok {
+			return mcp.NewToolResultError("invalid query_class: " + qcArg + " (want auto, symbol, concept, path, or signature)"), nil
+		}
+		if parsed != rerank.QueryClassUnknown {
+			queryClass = parsed
+		}
+	}
+	rctx.QueryClass = queryClass
 	var rerankBreakdown []*rerank.Candidate
 	nodes = applyRerankBoosts(s, nodes, q, rctx, &rerankBreakdown)
 
@@ -982,9 +997,10 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 		results = append(results, n.Brief())
 	}
 	resp := map[string]any{
-		"results":   results,
-		"total":     total,
-		"truncated": end < total,
+		"results":     results,
+		"total":       total,
+		"truncated":   end < total,
+		"query_class": queryClass.String(),
 	}
 	if nextCursor != "" {
 		resp["next_cursor"] = nextCursor

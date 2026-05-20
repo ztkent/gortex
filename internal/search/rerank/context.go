@@ -19,6 +19,13 @@ type Context struct {
 	// the overlay's shadow graph just like base.
 	Graph graph.Reader
 
+	// QueryClass is the detected shape of the query (symbol / concept
+	// / path / signature). It scales the bm25 and semantic signal
+	// weights inside Pipeline.Rerank. The zero value QueryClassUnknown
+	// tells Rerank to auto-detect via ClassifyQuery; a caller — the
+	// search_symbols query_class argument — may pin it instead.
+	QueryClass QueryClass
+
 	// CommunityOf maps a node ID to its detected community ID. When
 	// nil, the community signal contributes 0.
 	CommunityOf func(nodeID string) string

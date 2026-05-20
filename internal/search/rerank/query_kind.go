@@ -5,6 +5,74 @@ import (
 	"unicode"
 )
 
+// QueryClass is the detected shape of a search query. The class tunes
+// the bm25 ↔ semantic blend in two places: the per-signal weight
+// scaling inside Pipeline.Rerank, and the α value of the hybrid
+// alpha-fusion path in internal/search/hybrid.go. Identifier and path
+// queries lean on exact-token (BM25) evidence; natural-language
+// queries give the semantic channel its full weight.
+type QueryClass int
+
+const (
+	// QueryClassUnknown is the zero value — "not yet classified". A
+	// caller that leaves it unset lets Pipeline.Rerank auto-detect.
+	QueryClassUnknown QueryClass = iota
+	// QueryClassSymbol is a single identifier-shaped token: a symbol
+	// or API name (validateToken, HTTPServer, pkg.Type). Exact-token
+	// BM25 evidence dominates.
+	QueryClassSymbol
+	// QueryClassConcept is a natural-language description of intent
+	// ("how does auth refresh", "validate user token"). The semantic
+	// channel earns its keep here. This is the neutral baseline class.
+	QueryClassConcept
+	// QueryClassPath is a file-path-shaped query (internal/auth/token.go,
+	// auth/handler). Path components are exact tokens and the semantic
+	// channel is near-useless, so BM25 leans hardest of all classes.
+	QueryClassPath
+	// QueryClassSignature is a type- or function-signature fragment
+	// ("func(ctx) error", "(string) bool"). Structural keywords carry
+	// the signal: BM25-leaning but less extreme than a bare path.
+	QueryClassSignature
+)
+
+// String returns the lowercase class name used by the search_symbols
+// query_class argument and surfaced back on the response.
+func (q QueryClass) String() string {
+	switch q {
+	case QueryClassSymbol:
+		return "symbol"
+	case QueryClassConcept:
+		return "concept"
+	case QueryClassPath:
+		return "path"
+	case QueryClassSignature:
+		return "signature"
+	default:
+		return "unknown"
+	}
+}
+
+// ParseQueryClass maps the search_symbols query_class argument to a
+// QueryClass. "" and "auto" map to QueryClassUnknown — the signal to
+// auto-detect. The bool is false for an unrecognised value so the
+// caller can reject it with a clear error.
+func ParseQueryClass(s string) (QueryClass, bool) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "auto":
+		return QueryClassUnknown, true
+	case "symbol":
+		return QueryClassSymbol, true
+	case "concept":
+		return QueryClassConcept, true
+	case "path":
+		return QueryClassPath, true
+	case "signature":
+		return QueryClassSignature, true
+	default:
+		return QueryClassUnknown, false
+	}
+}
+
 // Hybrid retrieval blend weights for the BM25 ↔ semantic mix used by
 // the alpha-fusion path in internal/search/hybrid.go. Lower α leans
 // toward BM25 (identifier-style queries where exact tokens dominate);
@@ -25,6 +93,14 @@ const (
 	// contribute roughly equally — semantic catches synonymous
 	// wording, BM25 catches literal keywords.
 	AlphaNL = 0.5
+	// AlphaPath weights BM25 vs semantic for file-path queries. The
+	// most BM25-heavy blend: path components are exact tokens and the
+	// semantic channel mostly contributes noise.
+	AlphaPath = 0.15
+	// AlphaSignature weights BM25 vs semantic for type/function-
+	// signature fragments. BM25-leaning — structural keywords are
+	// literal — but less extreme than a bare path.
+	AlphaSignature = 0.35
 )
 
 // IsSymbolQuery returns true when the query looks like a code
@@ -113,17 +189,113 @@ func hasIdentifierChar(s string) bool {
 	return false
 }
 
-// AlphaFor returns the recommended α blend value for the query. Use
-// in hybrid retrieval to choose between AlphaSymbol (BM25-heavy) and
-// AlphaNL (balanced). The α blend semantics are
-// `final = α × text_score + (1-α) × vector_score` — lower α gives
-// BM25 less weight relative to semantic. We flip that convention so
-// symbol queries (BM25-favored) carry the SMALLER α and NL queries
-// carry the LARGER α; the alphaFuse implementation in hybrid.go uses
-// `final = (1-α) × text_rrf + α × vector_rrf` to match.
-func AlphaFor(query string) float64 {
-	if IsSymbolQuery(query) {
-		return AlphaSymbol
+// ClassifyQuery detects the QueryClass of a query with cheap
+// structural heuristics — no LLM, no graph walk. Checks run in
+// precedence order: signature markers (parentheses, arrows) are the
+// most distinctive, then a path-separated single token, then the
+// identifier-shape rubric IsSymbolQuery uses, and finally the
+// natural-language default. An empty query classifies as concept.
+func ClassifyQuery(query string) QueryClass {
+	q := strings.TrimSpace(query)
+	if q == "" {
+		return QueryClassConcept
 	}
-	return AlphaNL
+	if looksLikeSignature(q) {
+		return QueryClassSignature
+	}
+	if looksLikePath(q) {
+		return QueryClassPath
+	}
+	if IsSymbolQuery(q) {
+		return QueryClassSymbol
+	}
+	return QueryClassConcept
+}
+
+// looksLikeSignature reports whether the query carries an unambiguous
+// type/function-signature marker — a parenthesis or a Go/JS-style
+// return or lambda arrow. Natural-language queries virtually never do.
+func looksLikeSignature(q string) bool {
+	if strings.ContainsAny(q, "()") {
+		return true
+	}
+	return strings.Contains(q, "->") || strings.Contains(q, "=>")
+}
+
+// looksLikePath reports whether the query is a single whitespace-free
+// token carrying a directory separator — "internal/auth/token.go",
+// "auth/handler". A "::" or bare "." qualifier is NOT a path: those
+// stay in the symbol class.
+func looksLikePath(q string) bool {
+	if strings.ContainsAny(q, " \t\n") {
+		return false
+	}
+	if !strings.ContainsAny(q, "/\\") {
+		return false
+	}
+	return hasIdentifierChar(q)
+}
+
+// AlphaFor returns the recommended α blend value for the query. It
+// classifies the query, then defers to AlphaForClass.
+func AlphaFor(query string) float64 {
+	return AlphaForClass(ClassifyQuery(query))
+}
+
+// AlphaForClass returns the α blend for a known class. The α-fusion
+// formula in hybrid.go is `final = (1-α)·text_rrf + α·vector_rrf`, so
+// a smaller α leans toward BM25. QueryClassUnknown falls back to the
+// natural-language blend.
+func AlphaForClass(c QueryClass) float64 {
+	switch c {
+	case QueryClassSymbol:
+		return AlphaSymbol
+	case QueryClassPath:
+		return AlphaPath
+	case QueryClassSignature:
+		return AlphaSignature
+	default: // QueryClassConcept, QueryClassUnknown
+		return AlphaNL
+	}
+}
+
+// classWeights holds the per-class scaling applied to the bm25 and
+// semantic rerank signals. Every other signal scales by 1.0 — the
+// per-class lever tunes only the text-vs-semantic balance and leaves
+// the structural and session signals untouched.
+type classWeights struct {
+	bm25     float64
+	semantic float64
+}
+
+// classWeightTable is the tuned per-class multiplier set. Concept is
+// the neutral 1.0/1.0 baseline, so natural-language queries score
+// exactly as they did before per-class weighting existed; the
+// identifier, path, and signature classes push BM25 up and the
+// semantic channel down by amounts that grow with how literal the
+// query is.
+var classWeightTable = map[QueryClass]classWeights{
+	QueryClassConcept:   {bm25: 1.00, semantic: 1.00},
+	QueryClassSymbol:    {bm25: 1.20, semantic: 0.65},
+	QueryClassPath:      {bm25: 1.25, semantic: 0.45},
+	QueryClassSignature: {bm25: 1.10, semantic: 0.80},
+}
+
+// ClassWeightMultiplier returns the factor applied to a signal's
+// configured weight for a given query class. Only the bm25 and
+// semantic signals are class-sensitive; every other signal — and an
+// unknown class — returns 1.0.
+func ClassWeightMultiplier(c QueryClass, signal string) float64 {
+	cw, ok := classWeightTable[c]
+	if !ok {
+		return 1.0
+	}
+	switch signal {
+	case SignalBM25:
+		return cw.bm25
+	case SignalSemantic:
+		return cw.semantic
+	default:
+		return 1.0
+	}
 }

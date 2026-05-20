@@ -91,6 +91,13 @@ func (p *Pipeline) Rerank(query string, cands []*Candidate, ctx *Context) []*Can
 	if ctx == nil {
 		ctx = &Context{}
 	}
+	// Auto-detect the query class once per call when the caller has
+	// not pinned one. The class scales the bm25 / semantic weights so
+	// identifier and path queries lean on exact-token evidence while
+	// natural-language queries give the semantic channel its full say.
+	if ctx.QueryClass == QueryClassUnknown {
+		ctx.QueryClass = ClassifyQuery(query)
+	}
 	ctx.prepare(cands)
 
 	for _, c := range cands {
@@ -111,7 +118,7 @@ func (p *Pipeline) Rerank(query string, cands []*Candidate, ctx *Context) []*Can
 				raw = 1
 			}
 			c.Signals[sig.Name()] = raw
-			total += w * raw
+			total += w * ClassWeightMultiplier(ctx.QueryClass, sig.Name()) * raw
 		}
 		c.Score = total
 	}
