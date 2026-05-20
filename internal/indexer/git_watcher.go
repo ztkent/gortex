@@ -258,7 +258,25 @@ func (gw *GitWatcher) applyChanges(changes []gitChange) int {
 			}
 			n++
 		case 'D':
-			gw.indexer.EvictFile(filepath.Join(gw.repoPath, c.Path))
+			// A 'D' in the diff means the file left git tracking, not
+			// necessarily the disk. A file un-tracked (git rm --cached)
+			// or absent from the new branch but kept on disk is
+			// "untracked but visible" and must stay indexed. Only a
+			// file genuinely gone from disk is evicted; one still on
+			// disk is re-indexed unless it is now excluded.
+			abs := filepath.Join(gw.repoPath, c.Path)
+			_, statErr := os.Stat(abs)
+			switch {
+			case statErr != nil:
+				gw.indexer.EvictFile(abs)
+			case gw.indexer.shouldExclude(abs, gw.repoPath, false):
+				gw.indexer.EvictFile(abs)
+			default:
+				if err := gw.indexer.IndexFileNoResolve(abs); err != nil {
+					gw.logger.Warn("git-watcher: re-index of now-untracked file failed",
+						zap.String("path", c.Path), zap.Error(err))
+				}
+			}
 			n++
 		case 'R':
 			// Rename: evict the old path, index the new one. Git

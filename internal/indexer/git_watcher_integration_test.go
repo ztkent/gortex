@@ -166,3 +166,95 @@ func TestGitWatcher_NoopWhenHeadUnchanged(t *testing.T) {
 	// Give any unexpected drain a window to fire.
 	time.Sleep(200 * time.Millisecond)
 }
+
+// TestGitWatcher_DeletedClassification checks the 'D' diff status is
+// classified by what is on disk, not by what git tracks: a file gone
+// from disk is evicted, but a file removed from tracking yet still on
+// disk ("untracked but visible") must stay indexed.
+func TestGitWatcher_DeletedClassification(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "ondisk.go"), "package main\n\nfunc OnDisk() {}\n")
+	writeFile(t, filepath.Join(dir, "gone.go"), "package main\n\nfunc Gone() {}\n")
+
+	g := graph.New()
+	idx := newTestIndexer(g)
+	_, err := idx.Index(dir)
+	require.NoError(t, err)
+	require.NotEmpty(t, g.FindNodesByName("OnDisk"))
+	require.NotEmpty(t, g.FindNodesByName("Gone"))
+
+	gw, err := NewGitWatcher(dir, idx, zap.NewNop())
+	require.NoError(t, err)
+	defer func() { _ = gw.Stop() }()
+
+	// gone.go is genuinely removed from disk; ondisk.go merely left
+	// git tracking. Both arrive as a 'D' in the diff.
+	require.NoError(t, os.Remove(filepath.Join(dir, "gone.go")))
+	gw.applyChanges([]gitChange{
+		{Status: 'D', Path: "gone.go"},
+		{Status: 'D', Path: "ondisk.go"},
+	})
+
+	assert.Empty(t, g.FindNodesByName("Gone"),
+		"a file gone from disk must be evicted on a 'D'")
+	assert.NotEmpty(t, g.FindNodesByName("OnDisk"),
+		"a file un-tracked but still on disk must stay indexed on a 'D'")
+}
+
+// TestGitWatcher_UntrackedFileStaysIndexed is the end-to-end proof for
+// the untracked-but-visible case: `git rm --cached` removes a file
+// from tracking but leaves it on disk, the commit moves HEAD, and the
+// watcher's diff reports the file as deleted. The reconcile must keep
+// the still-present file indexed rather than evict it.
+func TestGitWatcher_UntrackedFileStaysIndexed(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git binary not available in PATH")
+	}
+
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init", "-q", "-b", "main")
+	runGit(t, repoDir, "config", "user.email", "test@example.com")
+	runGit(t, repoDir, "config", "user.name", "Test")
+	runGit(t, repoDir, "config", "commit.gpgsign", "false")
+
+	writeFile(t, filepath.Join(repoDir, "core.go"), "package main\nfunc Core() {}\n")
+	writeFile(t, filepath.Join(repoDir, "generated.go"), "package main\nfunc Generated() {}\n")
+	runGit(t, repoDir, "add", ".")
+	runGit(t, repoDir, "commit", "-q", "-m", "init")
+
+	g := graph.New()
+	idx := New(g, newTestRegistry(), config.IndexConfig{Workers: 1}, zap.NewNop())
+	idx.search = search.NewBM25()
+	idx.SetRootPath(repoDir)
+	_, err := idx.IndexCtx(testCtx(), repoDir)
+	require.NoError(t, err)
+	require.NotEmpty(t, g.GetFileNodes("generated.go"))
+
+	gw, err := NewGitWatcher(repoDir, idx, zap.NewNop())
+	require.NoError(t, err)
+	gw.debounce = 50 * time.Millisecond
+	drained := make(chan int, 1)
+	gw.drained = func(n int) {
+		select {
+		case drained <- n:
+		default:
+		}
+	}
+	require.NoError(t, gw.Start())
+	t.Cleanup(func() { _ = gw.Stop() })
+
+	// Stop tracking generated.go but keep it on disk, then commit so
+	// HEAD moves and the watcher fires. The diff reports a 'D'.
+	runGit(t, repoDir, "rm", "--cached", "-q", "generated.go")
+	runGit(t, repoDir, "commit", "-q", "-m", "untrack generated.go")
+
+	select {
+	case <-drained:
+	case <-time.After(5 * time.Second):
+		t.Fatal("git watcher did not reconcile within timeout")
+	}
+
+	assert.NotEmpty(t, g.GetFileNodes("generated.go"),
+		"a file removed from git tracking but still on disk must stay indexed")
+	assert.NotEmpty(t, g.GetFileNodes("core.go"), "core.go is untouched")
+}
