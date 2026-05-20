@@ -125,6 +125,12 @@ type Server struct {
 	artifactEntries []config.ArtifactEntry
 	artifactList    []artifacts.Artifact
 
+	// namedQueries holds the config-defined `queries:` bundles —
+	// reusable detector selections runnable via analyze kind=named.
+	// Installed via SetNamedQueries; merged with the built-in
+	// bundles at call time.
+	namedQueries []config.NamedQuery
+
 	// session / symHistory / tokenStats are the shared-default per-client
 	// state for the embedded stdio path (one implicit client per process).
 	// Tool handlers reach per-session activity via sessionFor(ctx); that

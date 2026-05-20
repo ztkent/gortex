@@ -77,6 +77,27 @@ type ArtifactEntry struct {
 	Name string `mapstructure:"name" yaml:"name,omitempty"`
 }
 
+// NamedQuery is one row of the `queries:` block — a named, reusable
+// bundle of structural detectors. Running it (`analyze kind=named
+// name=<name>`) fans every selected detector across the codebase and
+// aggregates the matches. A detector joins the bundle when it carries
+// one of the Tags or its name is listed in Detectors.
+type NamedQuery struct {
+	// Name is the bundle identifier passed to `analyze kind=named`.
+	Name string `mapstructure:"name" yaml:"name"`
+	// Description is a human-readable summary of the bundle's intent.
+	Description string `mapstructure:"description" yaml:"description,omitempty"`
+	// Tags selects every detector carrying any of these tags
+	// (e.g. injection, secrets, crypto).
+	Tags []string `mapstructure:"tags" yaml:"tags,omitempty"`
+	// Detectors selects detectors by exact name — for pulling in a
+	// specific rule (including a user rule from rule_files).
+	Detectors []string `mapstructure:"detectors" yaml:"detectors,omitempty"`
+	// Severity is an optional minimum severity floor — info | warning
+	// | error. Detectors below it are dropped from the bundle.
+	Severity string `mapstructure:"severity" yaml:"severity,omitempty"`
+}
+
 // LayerRule defines one architecture layer: the files that belong to
 // it and the layers it may or may not depend on.
 type LayerRule struct {
@@ -340,8 +361,11 @@ type Config struct {
 	// Artifacts is the non-code knowledge manifest — schemas, API
 	// specs, infra configs, and ADRs surfaced as KindArtifact nodes.
 	Artifacts []ArtifactEntry `mapstructure:"artifacts" yaml:"artifacts,omitempty"`
-	Multi     MultiRepoConfig `mapstructure:"multi"    yaml:"multi,omitempty"`
-	Semantic  SemanticConfig  `mapstructure:"semantic" yaml:"semantic,omitempty"`
+	// Queries are named, reusable detector bundles runnable via
+	// `analyze kind=named`.
+	Queries  []NamedQuery    `mapstructure:"queries" yaml:"queries,omitempty"`
+	Multi    MultiRepoConfig `mapstructure:"multi"    yaml:"multi,omitempty"`
+	Semantic SemanticConfig  `mapstructure:"semantic" yaml:"semantic,omitempty"`
 	// LLM configures the LLM service that backs the `ask` MCP tool and
 	// the search-assist passes. Empty by default — daemon skips LLM
 	// wiring entirely when the active provider has no model configured.

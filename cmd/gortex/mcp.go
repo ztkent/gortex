@@ -371,6 +371,7 @@ func runMCP(cmd *cobra.Command, args []string) error {
 	srv := gortexmcp.NewServer(eng, g, idx, nil, logger, cfg.Guards.Rules, multiOpts...)
 	srv.SetArchitecture(cfg.Architecture)
 	srv.SetArtifacts(cfg.Artifacts)
+	srv.SetNamedQueries(cfg.Queries)
 	srv.SetBind(bind)
 
 	// Wire semantic manager to MCP server for stats reporting.

@@ -61,6 +61,7 @@ func runEvalServer(cmd *cobra.Command, args []string) error {
 	srv := gortexmcp.NewServer(eng, g, idx, nil, logger, cfg.Guards.Rules)
 	srv.SetArchitecture(cfg.Architecture)
 	srv.SetArtifacts(cfg.Artifacts)
+	srv.SetNamedQueries(cfg.Queries)
 
 	// Index the repository if --index is provided, with cache support.
 	if evalIndex != "" {

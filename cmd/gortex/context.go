@@ -88,6 +88,7 @@ func runContext(cmd *cobra.Command, args []string) error {
 	srv := gortexmcp.NewServer(eng, g, idx, nil, logger, cfg.Guards.Rules)
 	srv.SetArchitecture(cfg.Architecture)
 	srv.SetArtifacts(cfg.Artifacts)
+	srv.SetNamedQueries(cfg.Queries)
 
 	toolResult, err := srv.ExportContext(cmd.Context(), contextTask, contextEntryPoint, contextFormat, contextMaxSymbols, contextBudget)
 	if err != nil {

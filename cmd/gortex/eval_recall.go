@@ -231,6 +231,7 @@ func runEvalRecall(_ *cobra.Command, _ []string) error {
 		srv := gortexmcp.NewServer(eng, g, idx, nil, zap.NewNop(), cfg.Guards.Rules)
 		srv.SetArchitecture(cfg.Architecture)
 		srv.SetArtifacts(cfg.Artifacts)
+		srv.SetNamedQueries(cfg.Queries)
 		srv.RunAnalysis()
 		provider := func(q string, extras map[string]any, limit int) []string {
 			return srv.WinnowForEval(q, extras, limit)
