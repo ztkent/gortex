@@ -583,7 +583,7 @@ func (s *Server) registerCoreTools() {
 	s.addTool(
 		mcp.NewTool("search_symbols",
 			mcp.WithDescription("Use instead of Grep to find symbols across the whole codebase. Supports natural language queries with camelCase-aware tokenization and BM25 ranking — 'validate token auth' finds validateToken, AuthMiddleware, parseJWT."),
-			mcp.WithString("query", mcp.Required(), mcp.Description("Search query — can be symbol name, concept, or multiple keywords")),
+			mcp.WithString("query", mcp.Required(), mcp.Description("Search query — symbol name, concept, or keywords. Also accepts inline field-qualified clauses: `kind:function lang:go path:internal/ repo:gortex project:web validateToken` — recognised fields are kind, lang (aliases ts/js/py/rs/…), path, repo, project; everything else is free text. A field-qualified query that matches nothing retries on the free text alone (response carries `filters_relaxed: true`).")),
 			mcp.WithNumber("limit", mcp.Description("Max results (default: 20)")),
 			mcp.WithString("cursor", mcp.Description("Opaque pagination cursor returned in `next_cursor` from a previous call. Pass it back to fetch the next page. Omit for the first page.")),
 			mcp.WithBoolean("paginate", mcp.Description("When true, the server caps each page at the project default budget and returns `next_cursor` for any tail. Implies the caller will follow `next_cursor` to walk the rest. Default false (full result inline; transport spills to disk if oversized).")),
@@ -855,6 +855,14 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 	sess := s.sessionFor(ctx)
 	sess.recordSearch(q)
 
+	// Field-qualified query syntax: lift `kind:` / `lang:` / `path:` /
+	// `repo:` / `project:` clauses out of the query string. The
+	// residual free text drives search, rerank, and classification;
+	// the clauses become post-filters and scope, merged with the
+	// explicit kind / repo / project arguments.
+	fq := parseFieldQuery(q)
+	q = fq.Text
+
 	// Apply server-default scope merged with caller args. `workspace`
 	// / `project` args win per-field; empty falls through to the
 	// server's --workspace flag. SearchSymbolsScoped over-fetches and
@@ -863,6 +871,9 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 	// + 10) so the post-filter slack still leaves a full page.
 	workspaceArg := req.GetString("workspace", "")
 	projectArg := req.GetString("project", "")
+	if projectArg == "" {
+		projectArg = fq.Project
+	}
 	scopeWS, scopeProj := s.resolveQueryScope(ctx, workspaceArg, projectArg)
 	scope := query.QueryOptions{WorkspaceID: scopeWS, ProjectID: scopeProj}
 
@@ -904,9 +915,29 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 	// kind filter so callers can scope to a single new node kind
 	// (todo, license, team, module, …). Comma-separated list —
 	// case-insensitive — applied post-search so BM25 ranking is
-	// preserved within the kept set.
-	if kindArg := strings.TrimSpace(req.GetString("kind", "")); kindArg != "" {
+	// preserved within the kept set. The explicit `kind` argument
+	// wins; an in-query `kind:` clause fills in when it is absent.
+	kindArg := strings.TrimSpace(req.GetString("kind", ""))
+	if kindArg == "" {
+		kindArg = fq.Kind
+	}
+	if kindArg != "" {
 		nodes = filterNodesByKind(nodes, kindArg)
+	}
+	// lang: / path: / repo: clauses from the field-qualified syntax.
+	nodes = applyFieldFilters(nodes, fq)
+
+	// Fuzzy fallback: a field-qualified query that filtered down to
+	// nothing retries on the free text alone (still inside the
+	// caller's repo / project scope), so an over-narrow or typo'd
+	// clause degrades to a useful result set instead of an empty one.
+	filtersRelaxed := false
+	if len(nodes) == 0 && q != "" && (kindArg != "" || fq.hasFieldFilters()) {
+		relaxed := filterNodes(s.engineFor(ctx).SearchSymbolsScoped(q, fetchLimit, scope), allowed)
+		if len(relaxed) > 0 {
+			nodes = relaxed
+			filtersRelaxed = true
+		}
 	}
 
 	// LLM rerank runs AFTER kind/repo filters so the model only sees
@@ -1010,6 +1041,9 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 	}
 	if nextCursor != "" {
 		resp["next_cursor"] = nextCursor
+	}
+	if filtersRelaxed {
+		resp["filters_relaxed"] = true
 	}
 	// When LLM assist engaged, expose a small debug surface so callers
 	// (and the agent itself) can see what the model contributed.
