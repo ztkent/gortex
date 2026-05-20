@@ -207,3 +207,39 @@ func TestIncrementalReindex_FailedFileSurfacedAndRetried(t *testing.T) {
 	assert.Empty(t, res2.FailedFiles, "the file indexes cleanly once readable")
 	assert.NotEmpty(t, g.FindNodesByName("Bad"))
 }
+
+// TestIncrementalReindex_MerkleMode exercises the BLAKE3 Merkle change
+// detector: a content edit is re-indexed, but a file merely touched
+// (new mtime, identical content) is not — the content-addressed tree
+// ignores the mtime false positive that the bare-mtime path would
+// re-index needlessly.
+func TestIncrementalReindex_MerkleMode(t *testing.T) {
+	t.Setenv("GORTEX_MERKLE", "1")
+
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "edited.go"), "package main\n\nfunc Edited() {}\n")
+	writeFile(t, filepath.Join(dir, "touched.go"), "package main\n\nfunc Touched() {}\n")
+
+	g := graph.New()
+	idx := newTestIndexer(g)
+	_, err := idx.Index(dir)
+	require.NoError(t, err)
+	require.NotEmpty(t, g.FindNodesByName("Edited"))
+	require.NotEmpty(t, g.FindNodesByName("Touched"))
+	require.FileExists(t, filepath.Join(dir, ".gortex", "merkle.json"),
+		"a full index in Merkle mode must persist a baseline tree")
+
+	// Edit one file's content; touch the other without changing it.
+	bumpMtime(t, filepath.Join(dir, "edited.go"),
+		"package main\n\nfunc Edited() {}\n\nfunc AlsoEdited() {}\n")
+	future := time.Now().Add(2 * time.Second)
+	require.NoError(t, os.Chtimes(filepath.Join(dir, "touched.go"), future, future))
+
+	res, err := idx.IncrementalReindex(dir)
+	require.NoError(t, err)
+
+	assert.NotEmpty(t, g.FindNodesByName("AlsoEdited"),
+		"a content edit must be re-indexed under Merkle mode")
+	assert.Equal(t, 1, res.StaleFileCount,
+		"only the content-changed file is stale; a bare touch is not")
+}
