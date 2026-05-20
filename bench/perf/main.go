@@ -194,14 +194,14 @@ func renderMarkdown(rows []repoRow) string {
 	var b strings.Builder
 	fmt.Fprintln(&b, "# Reference-repo perf benchmark")
 	fmt.Fprintln(&b)
-	fmt.Fprintln(&b, "| repo | LoC | files | nodes | edges | cold-index | search p95 | impact p95 | impact p99 | incremental | DB size | budget |")
-	fmt.Fprintln(&b, "|------|----:|------:|------:|------:|-----------:|-----------:|-----------:|-----------:|------------:|--------:|:------:|")
+	fmt.Fprintln(&b, "| repo | LoC | files | nodes | edges | cold-index | search p95 | impact p95 | impact p99 | incremental | DB size | RSS | budget |")
+	fmt.Fprintln(&b, "|------|----:|------:|------:|------:|-----------:|-----------:|-----------:|-----------:|------------:|--------:|----:|:------:|")
 	for _, r := range rows {
 		if r.Error != "" && r.Files == 0 {
-			fmt.Fprintf(&b, "| %s | — | — | — | — | — | — | — | — | — | — | ✗ (%s) |\n", r.Slug, r.Error)
+			fmt.Fprintf(&b, "| %s | — | — | — | — | — | — | — | — | — | — | — | ✗ (%s) |\n", r.Slug, r.Error)
 			continue
 		}
-		fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n",
+		fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n",
 			r.Slug,
 			humanInt(int64(r.LoC)),
 			humanInt(int64(r.Files)),
@@ -213,6 +213,7 @@ func renderMarkdown(rows []repoRow) string {
 			fmtMs(r.ImpactP99Ms),
 			fmtMs(r.IncrementalMs),
 			fmtBytes(r.DBBytes),
+			fmtBytes(r.RSSBytes),
 			budgetMark(r),
 		)
 	}
@@ -228,7 +229,7 @@ func renderCSV(rows []repoRow) string {
 		"slug", "path", "loc", "files", "nodes", "edges",
 		"cold_index_ms", "search_p50_ms", "search_p95_ms",
 		"impact_p50_ms", "impact_p95_ms", "impact_p99_ms",
-		"incremental_ms", "db_bytes", "budget_violations", "skipped", "error",
+		"incremental_ms", "db_bytes", "rss_bytes", "budget_violations", "skipped", "error",
 	})
 	for _, r := range rows {
 		_ = w.Write([]string{
@@ -245,6 +246,7 @@ func renderCSV(rows []repoRow) string {
 			fmt.Sprintf("%.3f", r.ImpactP99Ms),
 			fmt.Sprintf("%.3f", r.IncrementalMs),
 			fmt.Sprintf("%d", r.DBBytes),
+			fmt.Sprintf("%d", r.RSSBytes),
 			fmt.Sprintf("%d", r.BudgetViolations),
 			r.Skipped, r.Error,
 		})

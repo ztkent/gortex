@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -61,6 +62,7 @@ type repoRow struct {
 	ImpactP99Ms      float64 `json:"impact_p99_ms"`
 	IncrementalMs    float64 `json:"incremental_ms"`
 	DBBytes          int64   `json:"db_bytes"`
+	RSSBytes         int64   `json:"rss_bytes"`
 	BudgetViolations int     `json:"budget_violations"`
 	Skipped          string  `json:"skipped,omitempty"`
 	Error            string  `json:"error,omitempty"`
@@ -147,7 +149,13 @@ func runRepo(spec repoSpec, queries []string, budget budgets) repoRow {
 	// --- 5. DB size ---------------------------------------------
 	row.DBBytes = estimateDBSize(g)
 
-	// --- 6. Budget gates ----------------------------------------
+	// --- 6. Resident memory -------------------------------------
+	// Measured with the graph, indexer (search index) and query
+	// engine all live — the same objects a `gortex daemon` holds for
+	// this repo.
+	row.RSSBytes = residentBytes()
+
+	// --- 7. Budget gates ----------------------------------------
 	if budget.ImpactP95Ms > 0 && row.ImpactP95Ms > budget.ImpactP95Ms {
 		row.BudgetViolations++
 	}
@@ -335,6 +343,19 @@ type countingWriter struct{ n int64 }
 func (c *countingWriter) Write(p []byte) (int, error) {
 	c.n += int64(len(p))
 	return len(p), nil
+}
+
+// residentBytes returns the Go heap currently retained — the
+// runtime.MemStats figure `gortex daemon status` reports as daemon
+// memory. A forced GC first drops the previous repo's graph so the
+// number reflects only this repo's retained graph + search index.
+// True OS RSS adds a fixed Go-runtime overhead (stacks, mcache, code)
+// on top that does not scale with repo size.
+func residentBytes() int64 {
+	runtime.GC()
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	return int64(m.HeapAlloc)
 }
 
 // pctMs returns the p-th percentile of a duration slice in

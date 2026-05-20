@@ -22,6 +22,9 @@ For each repo the harness captures:
   `Indexer.Index`, measure the delta
 - **DB size** — estimated on-disk byte cost of the graph (gob-shaped,
   matches what a daemon snapshot would weigh)
+- **RSS** — Go heap retained with the graph, indexer and query engine
+  live (`runtime.MemStats` after a forced GC); the figure
+  `gortex daemon status` reports as daemon memory
 
 Output: stacked markdown (default) + companion CSV / JSON when
 `-csv` / `-json` are passed. Per-row pass/fail markers; tail summary

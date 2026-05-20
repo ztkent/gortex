@@ -4,8 +4,8 @@ This document aggregates the five reproducible benchmark surfaces
 gortex ships:
 
 - **Reference-repo perf** — cold-index, search p95, impact p95/p99,
-  incremental reindex, on-disk DB size across `gin` / `nestjs` /
-  `react` (+ optional `linux`).
+  incremental reindex, on-disk DB size, daemon resident memory
+  across `gin` / `nestjs` / `react` (+ optional `linux`).
 - **Token efficiency** — 3-pipeline comparison (ripgrep+full-read,
   ripgrep+context, gortex `search_symbols` + `get_symbol_source`)
   plus recall@k by token budget against a hand-curated ground-truth
@@ -32,11 +32,11 @@ different absolute timings but the same relative shape.
 
 ## 1. Reference-repo perf
 
-**Last updated: 2026-05-18** · operator hardware: Apple M3 Max
+**Last updated: 2026-05-20** · operator hardware: Apple M3 Max
 
-| repo | LoC | files | nodes | edges | cold-index | search p95 | impact p95 | impact p99 | incremental | DB size | budget |
-|------|----:|------:|------:|------:|-----------:|-----------:|-----------:|-----------:|------------:|--------:|:------:|
-| nestjs (in-tree fixture) | — | 32 | 240 | 414 | 17.8ms | 0.09ms | 0.01ms | 0.01ms | 11.8ms | 92.3KB | ✓ |
+| repo | LoC | files | nodes | edges | cold-index | search p95 | impact p95 | impact p99 | incremental | DB size | RSS | budget |
+|------|----:|------:|------:|------:|-----------:|-----------:|-----------:|-----------:|------------:|--------:|----:|:------:|
+| nestjs (in-tree fixture) | — | 32 | 240 | 414 | 17.8ms | 0.09ms | 0.01ms | 0.01ms | 11.8ms | 92.3KB | 2.4MB | ✓ |
 
 _The full 3-repo run (gin + nestjs + react) requires network access
 to clone each repo on first invocation. The fixture row above
@@ -44,6 +44,13 @@ exercises the same harness path against the in-tree nestjs fixture
 so the contract is verifiable offline. The sub-millisecond impact
 analysis claim holds — impact p95 of 0.01ms is 100× under the 1.0ms
 budget._
+
+_The **RSS** column is the Go heap retained with the graph, indexer
+and query engine all live — the `runtime.MemStats` figure
+`gortex daemon status` reports as daemon memory, sampled after a
+forced GC so it reflects only the retained graph + search index.
+True OS resident set adds a fixed Go-runtime overhead (stacks,
+mcache, code) that does not scale with repo size._
 
 ### How to reproduce
 
