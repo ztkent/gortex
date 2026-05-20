@@ -199,18 +199,20 @@ versus an LLM-judged setup.
 
 | ranker  | R@1   | R@5   | R@20  | MRR   | p95 latency |
 |---------|------:|------:|------:|------:|------------:|
-| bm25    | 44.2% | 53.8% | 69.2% | 0.493 | 22.7ms      |
-| winnow  | 37.8% | 54.5% | 67.3% | 0.452 | 30.8ms      |
+| bm25    | 42.3% | 55.1% | 63.5% | 0.479 | 21.3ms      |
+| winnow  | 37.8% | 50.0% | 64.1% | 0.439 | 22.9ms      |
 | ripgrep |  0.0% | 17.3% | 29.5% | 0.061 | 162.2ms     |
 
-Per-tier R@5 (bm25): exact **93.7%** · concept 25.4% · multi_hop 30.0%.
+Per-tier R@5 (bm25): exact **96.8%** · concept 25.4% · multi_hop 30.0%.
 
 **Headline**: the `search_symbols` text path (`bm25`) lands
-**R@5 = 53.8%** / **R@20 = 69.2%**, and **93.7%** on exact
-symbol-name queries — 3.1× ripgrep's R@5 floor. The graph-aware
-`winnow` constraint chain edges it at R@5 (54.5%). The `semantic`
-and `rrf` rankers require `--embeddings` and are omitted here; the
-`graph` ranker scores only graph-traversal fixtures.
+**R@5 = 55.1%** / **R@20 = 63.5%**, and **96.8%** on exact
+symbol-name queries — 3.2× ripgrep's R@5 floor. Enabling Porter
+stemming (`GORTEX_FTS_STEMMING=1`) trades a little exact-tier
+precision for breadth — R@20 +5.7pp, exact-tier R@5 −3.1pp — so it
+ships opt-in. The `semantic` and `rrf` rankers require `--embeddings`
+and are omitted here; the `graph` ranker scores only graph-traversal
+fixtures.
 
 ### How to reproduce
 

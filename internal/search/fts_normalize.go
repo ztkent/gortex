@@ -10,25 +10,26 @@ import (
 
 // ftsStemmingEnabled gates the token-normalization pass — stopword
 // removal plus Porter stemming — applied to the full-text-search index
-// and query paths. Default ON: stemming is a recall win (a search for
-// "users" reaches "UserService", "indexing" reaches "indexer") and the
-// same normalization runs on both the posting list and the query, so
-// the two never disagree.
+// and query paths. Default OFF: on the recall fixture stemming trades
+// exact-symbol-lookup precision (exact-tier R@5 −3.1pp) for broader
+// recall (R@20 +5.7pp), so it ships as an opt-in rather than quietly
+// reranking every identifier query. Enable it with
+// GORTEX_FTS_STEMMING=1 (also true / yes / on).
 //
 // Read once at process start, like the bigram-typo flag: the index
 // built during a daemon's lifetime and every query against it share a
 // single setting, so a mid-session toggle can't desynchronise stemmed
-// postings from stemmed query terms. Set GORTEX_FTS_STEMMING=0 (also
-// false / no / off) to fall back to the raw camelCase/snake_case
-// subword tokens.
+// postings from stemmed query terms. When enabled, the same
+// normalization runs on both the posting list and the query, so the
+// two never disagree.
 var ftsStemmingEnabled = ftsStemmingFromEnv()
 
 func ftsStemmingFromEnv() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("GORTEX_FTS_STEMMING"))) {
-	case "0", "false", "no", "off", "n":
-		return false
+	case "1", "true", "yes", "on", "y":
+		return true
 	}
-	return true
+	return false
 }
 
 // ftsStopWords is the stopword set: English glue words that carry
