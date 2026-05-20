@@ -150,8 +150,21 @@ func (q *Quarantine) Save() error {
 	if err := os.MkdirAll(filepath.Dir(q.path), 0o755); err != nil {
 		return err
 	}
-	tmp := q.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil { //nolint:gosec // metadata, not secrets
+	// Unique temp name so concurrent Saves — the indexer re-indexes
+	// files in parallel through one shared quarantine — never clobber
+	// each other's in-flight write before the rename.
+	f, err := os.CreateTemp(filepath.Dir(q.path), ".quarantine-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
 	return os.Rename(tmp, q.path)

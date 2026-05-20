@@ -122,3 +122,49 @@ func TestStampParseErrorCount(t *testing.T) {
 	stampParseErrorCount(clean, 0) // zero count → no stamp
 	require.Nil(t, clean[0].Meta)
 }
+
+// TestSharedParsePool_Reused proves the crash-isolation pool is created
+// once and reused — the watcher path must not fork a fresh worker
+// subprocess per file.
+func TestSharedParsePool_Reused(t *testing.T) {
+	t.Setenv("GORTEX_PARSER_ISOLATION", "1")
+	t.Setenv(crashWorkerEnv, "1")
+
+	g := graph.New()
+	idx := newTestIndexer(g)
+	idx.SetRootPath(t.TempDir())
+	defer idx.CloseParsePool()
+
+	p1, _ := idx.sharedParsePool()
+	require.NotNil(t, p1)
+	p2, _ := idx.sharedParsePool()
+	require.Same(t, p1, p2, "sharedParsePool must return the same long-lived pool")
+}
+
+// TestIndexFile_CrashIsolationReusesPool re-indexes single files through
+// the crash-isolation path and confirms they all flow through one
+// persistent pool rather than a per-file worker subprocess.
+func TestIndexFile_CrashIsolationReusesPool(t *testing.T) {
+	t.Setenv("GORTEX_PARSER_ISOLATION", "1")
+	t.Setenv(crashWorkerEnv, "1")
+
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "a.go"), "package main\n\nfunc A() {}\n")
+	writeFile(t, filepath.Join(dir, "b.go"), "package main\n\nfunc B() {}\n")
+
+	g := graph.New()
+	idx := newTestIndexer(g)
+	_, err := idx.Index(dir) // cold index also anchors rootPath
+	require.NoError(t, err)
+	defer idx.CloseParsePool()
+
+	require.NoError(t, idx.IndexFile(filepath.Join(dir, "a.go")))
+	require.NotNil(t, idx.parsePool, "first IndexFile must create the shared pool")
+	first := idx.parsePool
+
+	require.NoError(t, idx.IndexFile(filepath.Join(dir, "b.go")))
+	require.Same(t, first, idx.parsePool, "second IndexFile must reuse the shared pool")
+
+	require.NotEmpty(t, g.FindNodesByName("A"))
+	require.NotEmpty(t, g.FindNodesByName("B"))
+}

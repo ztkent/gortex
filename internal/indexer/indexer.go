@@ -105,6 +105,13 @@ type Indexer struct {
 	rootPath      string
 	logger        *zap.Logger
 
+	// Crash-isolation parser pool, lazily created and then reused
+	// across single-file re-indexes so the watcher hot path never
+	// forks a worker subprocess per file.
+	parsePool   *crashpool.Pool
+	parseQuar   *crashpool.Quarantine
+	parsePoolMu sync.Mutex
+
 	// repoPrefix is set in multi-repo mode to prefix all file paths and node IDs.
 	// When empty, the indexer operates in single-repo mode (backward compatible).
 	repoPrefix string
@@ -1845,18 +1852,15 @@ func (idx *Indexer) indexFile(filePath string, resolve bool) error {
 
 	// Crash isolation for the incremental path: a file the user just
 	// saved that SIGSEGVs the parser is quarantined instead of taking
-	// the daemon down with it.
+	// the daemon down with it. The pool is long-lived and shared, so
+	// the watcher hot path never forks a worker subprocess per file.
 	var pool *crashpool.Pool
 	var quarantine *crashpool.Quarantine
 	if idx.crashIsolationEnabled() {
-		quarantine = crashpool.LoadQuarantine(filepath.Join(idx.rootPath, ".gortex", "parser-quarantine.json"))
-		if p, perr := idx.newParsePool(1); perr == nil {
-			pool = p
-			defer pool.Close()
-		}
+		pool, quarantine = idx.sharedParsePool()
 	}
 	result, skipped, err := idx.extractFile(pool, quarantine, absPath, relPath, lang, ext, src)
-	if quarantine != nil {
+	if quarantine != nil && quarantine.Len() > 0 {
 		_ = quarantine.Save()
 	}
 	if result == nil {

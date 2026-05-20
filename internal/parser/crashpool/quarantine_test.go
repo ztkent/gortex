@@ -3,6 +3,7 @@ package crashpool
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -85,4 +86,28 @@ func TestQuarantine_CorruptFileTolerated(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, []byte("{not json at all"), 0o644))
 	q := LoadQuarantine(path)
 	require.Equal(t, 0, q.Len()) // corrupt → treated as empty
+}
+
+// TestQuarantine_ConcurrentSave runs many Saves at once: a shared
+// quarantine is saved per indexed file across parallel re-indexes, so
+// the unique temp-file name must keep concurrent writes from
+// clobbering each other and leave a final file that decodes cleanly.
+func TestQuarantine_ConcurrentSave(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "q.json")
+	q := LoadQuarantine(path)
+	q.Add("bad.go", "SIGSEGV", 123)
+
+	var wg sync.WaitGroup
+	for range 16 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			require.NoError(t, q.Save())
+		}()
+	}
+	wg.Wait()
+
+	reloaded := LoadQuarantine(path)
+	require.Equal(t, 1, reloaded.Len())
+	require.True(t, reloaded.IsQuarantined("bad.go", 123))
 }

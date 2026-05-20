@@ -45,6 +45,50 @@ func (idx *Indexer) newParsePool(workers int) (*crashpool.Pool, error) {
 	return crashpool.NewPool(cfg)
 }
 
+// sharedParsePool returns the long-lived crash-isolation pool and the
+// quarantine, creating them on first use. Reusing one pool across
+// single-file re-indexes avoids forking a worker subprocess per file
+// on the watcher hot path — the dominant cost when crash isolation is
+// on. Returns (nil, nil) if no worker can spawn, so the caller falls
+// back to in-process extraction.
+func (idx *Indexer) sharedParsePool() (*crashpool.Pool, *crashpool.Quarantine) {
+	idx.parsePoolMu.Lock()
+	defer idx.parsePoolMu.Unlock()
+	if idx.parsePool != nil {
+		return idx.parsePool, idx.parseQuar
+	}
+	// A long-lived pool keeps idle workers resident, so cap the worker
+	// count well below the bulk-index width.
+	workers := idx.config.Workers
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > 4 {
+		workers = 4
+	}
+	p, err := idx.newParsePool(workers)
+	if err != nil {
+		idx.logger.Warn("indexer: crash-isolation pool unavailable; using in-process extraction",
+			zap.Error(err))
+		return nil, nil
+	}
+	idx.parsePool = p
+	idx.parseQuar = crashpool.LoadQuarantine(
+		filepath.Join(idx.rootPath, ".gortex", "parser-quarantine.json"))
+	return idx.parsePool, idx.parseQuar
+}
+
+// CloseParsePool tears down the long-lived crash-isolation pool if one
+// was created. It is safe to call when none exists, and idempotent.
+func (idx *Indexer) CloseParsePool() {
+	idx.parsePoolMu.Lock()
+	defer idx.parsePoolMu.Unlock()
+	if idx.parsePool != nil {
+		idx.parsePool.Close()
+		idx.parsePool = nil
+	}
+}
+
 // extractFile produces one file's graph contribution. With pool == nil
 // it calls the extractor in-process (the default). With a pool the
 // parse runs in a worker subprocess: a crash, hang, or panic quarantines
