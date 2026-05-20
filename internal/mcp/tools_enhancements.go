@@ -367,7 +367,7 @@ func (s *Server) handleCheckGuards(ctx context.Context, req mcp.CallToolRequest)
 		ids[i] = strings.TrimSpace(ids[i])
 	}
 
-	if len(s.guardRules) == 0 {
+	if len(s.guardRules) == 0 && s.architecture.IsEmpty() {
 		if s.isGCX(ctx, req) {
 			return s.gcxResponseWithBudget(req)(encodeCheckGuards(nil, true))
 		}
@@ -382,6 +382,7 @@ func (s *Server) handleCheckGuards(ctx context.Context, req mcp.CallToolRequest)
 	}
 
 	violations := analysis.EvaluateGuards(s.graph, s.guardRules, ids)
+	violations = append(violations, analysis.EvaluateArchitecture(s.graph, s.architecture, ids)...)
 
 	if isCompact(req) {
 		var b strings.Builder

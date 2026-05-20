@@ -24,6 +24,41 @@ type GuardsConfig struct {
 	Rules []GuardRule `mapstructure:"rules" yaml:"rules,omitempty"`
 }
 
+// ArchitectureConfig is the declarative architecture-rules block of
+// .gortex.yaml — the top-level `architecture:` key. It promotes the
+// flat guards: list into named layers with directional allow/deny
+// dependency constraints; check_guards evaluates it on every change
+// set. The flat guards: list keeps working unchanged alongside it.
+type ArchitectureConfig struct {
+	// Layers maps a layer name to its definition. A file belongs to
+	// the layer whose Paths globs match it — or, when a layer
+	// declares no Paths, whose name appears as a path segment.
+	Layers map[string]LayerRule `mapstructure:"layers" yaml:"layers,omitempty"`
+}
+
+// LayerRule defines one architecture layer: the files that belong to
+// it and the layers it may or may not depend on.
+type LayerRule struct {
+	// Paths are globs (with ** matching any number of path segments)
+	// selecting the files that belong to this layer. When empty the
+	// layer matches files whose path carries the layer name as a
+	// segment — so a terse `domain: {allow: [...]}` still works.
+	Paths []string `mapstructure:"paths" yaml:"paths,omitempty"`
+	// Allow whitelists the layers this layer may depend on; "*"
+	// permits any. A non-empty Allow makes every unlisted layer a
+	// violation.
+	Allow []string `mapstructure:"allow" yaml:"allow,omitempty"`
+	// Deny blacklists layers this layer must not depend on; "*"
+	// denies every cross-layer dependency not rescued by Allow.
+	Deny []string `mapstructure:"deny" yaml:"deny,omitempty"`
+}
+
+// IsEmpty reports whether no architecture rules are configured — the
+// signal for check_guards to skip the layered evaluation entirely.
+func (a ArchitectureConfig) IsEmpty() bool {
+	return len(a.Layers) == 0
+}
+
 // MultiRepoConfig holds workspace-discovery settings used by the
 // multi-repo bootstrapper. Carries the (formerly `workspace.auto_detect`)
 // flag — moved out from under `workspace:` because that key is now
@@ -251,14 +286,18 @@ type Config struct {
 	// workspaces. Only `mode: read-only` is accepted in iteration 1.
 	CrossWorkspaceDeps []CrossWorkspaceDep `mapstructure:"cross_workspace_deps" yaml:"cross_workspace_deps,omitempty"`
 
-	Index    IndexConfig     `mapstructure:"index"    yaml:"index,omitempty"`
-	Watch    WatchConfig     `mapstructure:"watch"    yaml:"watch,omitempty"`
-	Query    QueryConfig     `mapstructure:"query"    yaml:"query,omitempty"`
-	Search   SearchConfig    `mapstructure:"search"   yaml:"search,omitempty"`
-	MCP      MCPConfig       `mapstructure:"mcp"      yaml:"mcp,omitempty"`
-	Guards   GuardsConfig    `mapstructure:"guards"   yaml:"guards,omitempty"`
-	Multi    MultiRepoConfig `mapstructure:"multi"    yaml:"multi,omitempty"`
-	Semantic SemanticConfig  `mapstructure:"semantic" yaml:"semantic,omitempty"`
+	Index  IndexConfig  `mapstructure:"index"    yaml:"index,omitempty"`
+	Watch  WatchConfig  `mapstructure:"watch"    yaml:"watch,omitempty"`
+	Query  QueryConfig  `mapstructure:"query"    yaml:"query,omitempty"`
+	Search SearchConfig `mapstructure:"search"   yaml:"search,omitempty"`
+	MCP    MCPConfig    `mapstructure:"mcp"      yaml:"mcp,omitempty"`
+	Guards GuardsConfig `mapstructure:"guards"   yaml:"guards,omitempty"`
+	// Architecture is the declarative layer / allow-deny DSL. Empty
+	// by default; the flat Guards list above keeps working when it is
+	// unset.
+	Architecture ArchitectureConfig `mapstructure:"architecture" yaml:"architecture,omitempty"`
+	Multi        MultiRepoConfig    `mapstructure:"multi"    yaml:"multi,omitempty"`
+	Semantic     SemanticConfig     `mapstructure:"semantic" yaml:"semantic,omitempty"`
 	// LLM configures the LLM service that backs the `ask` MCP tool and
 	// the search-assist passes. Empty by default — daemon skips LLM
 	// wiring entirely when the active provider has no model configured.

@@ -369,6 +369,7 @@ func runMCP(cmd *cobra.Command, args []string) error {
 	eng.ApplyRerankWeights(cfg.Search.Weights)
 	gortexmcp.Version = version
 	srv := gortexmcp.NewServer(eng, g, idx, nil, logger, cfg.Guards.Rules, multiOpts...)
+	srv.SetArchitecture(cfg.Architecture)
 	srv.SetBind(bind)
 
 	// Wire semantic manager to MCP server for stats reporting.

@@ -414,6 +414,7 @@ func buildDaemonState(logger *zap.Logger) (*daemonState, error) {
 	eng.ApplyRerankWeights(cfg.Search.Weights)
 	gortexmcp.Version = version
 	srv := gortexmcp.NewServer(eng, g, idx, nil, logger, cfg.Guards.Rules, multiOpts...)
+	srv.SetArchitecture(cfg.Architecture)
 
 	// Editor-overlay manager. Idle TTL resolved via
 	// GORTEX_OVERLAY_IDLE_TTL > daemon.DefaultOverlayIdleTTL (30m).

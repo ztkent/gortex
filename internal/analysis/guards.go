@@ -13,6 +13,12 @@ type GuardViolation struct {
 	RuleName    string `json:"rule_name"`
 	Kind        string `json:"kind"`
 	Description string `json:"description"`
+	// Architecture-DSL fields. Populated only on layer / architecture
+	// rule violations; empty on the flat co-change / boundary kinds.
+	Violator  string `json:"violator,omitempty"`
+	LayerFrom string `json:"layer_from,omitempty"`
+	LayerTo   string `json:"layer_to,omitempty"`
+	EdgeType  string `json:"edge_type,omitempty"`
 }
 
 // EvaluateGuards checks the given guard rules against a set of changed symbol IDs

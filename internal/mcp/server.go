@@ -129,6 +129,7 @@ type Server struct {
 	sessions *sessionMap
 
 	guardRules       []config.GuardRule
+	architecture     config.ArchitectureConfig
 	contractRegistry *contracts.Registry
 	semanticMgr      *semantic.Manager
 	feedback         *feedbackManager
@@ -1279,6 +1280,14 @@ func (s *Server) getPageRank() *analysis.PageRankResult {
 	s.analysisMu.RLock()
 	defer s.analysisMu.RUnlock()
 	return s.pageRank
+}
+
+// SetArchitecture installs the declarative architecture-rules DSL so
+// check_guards evaluates layered violations alongside the flat guard
+// rules. Called by the server / daemon entrypoint right after
+// NewServer; a no-op effect when the config carries no layers.
+func (s *Server) SetArchitecture(arch config.ArchitectureConfig) {
+	s.architecture = arch
 }
 
 // WatchForReanalysis subscribes to hub events and re-runs analysis after
