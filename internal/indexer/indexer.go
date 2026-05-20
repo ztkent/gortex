@@ -1320,6 +1320,13 @@ func (idx *Indexer) applyRepoPrefix(nodes []*graph.Node, edges []*graph.Edge) {
 		n.ID = intern.String(prefix + n.ID)
 		n.FilePath = intern.String(prefix + n.FilePath)
 		n.RepoPrefix = idx.repoPrefix
+		// Name and Language are low-cardinality and recur across
+		// thousands of nodes — method/function names like String, New,
+		// Get… and the ~20 distinct languages. Interning collapses
+		// each to a single backing array; it also shrinks the byName
+		// secondary index, whose keys are these same strings.
+		n.Name = intern.String(n.Name)
+		n.Language = intern.String(n.Language)
 	}
 	for _, e := range edges {
 		e.From = intern.String(prefix + e.From)
