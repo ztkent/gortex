@@ -139,6 +139,41 @@ func TestIndex_RipgrepIgnoreFiles(t *testing.T) {
 	assert.Empty(t, g.FindNodesByName("SubDropped"), "sub/.rgignore should exclude sub/drop.go")
 }
 
+func TestEdgeSanityViolated(t *testing.T) {
+	// A populated index with no edges trips the check.
+	broken := &IndexResult{FileCount: 5, NodeCount: 40, EdgeCount: 0}
+	assert.True(t, broken.EdgeSanityViolated(),
+		"files+nodes but zero edges should violate the edge-sanity check")
+
+	// A healthy index does not.
+	healthy := &IndexResult{FileCount: 5, NodeCount: 40, EdgeCount: 60}
+	assert.False(t, healthy.EdgeSanityViolated(),
+		"an index with edges must not trip the check")
+
+	// An empty repo (no files) is not a violation — nothing to index.
+	empty := &IndexResult{FileCount: 0, NodeCount: 0, EdgeCount: 0}
+	assert.False(t, empty.EdgeSanityViolated(),
+		"an empty repo must not trip the check")
+
+	// nil is safe.
+	var nilResult *IndexResult
+	assert.False(t, nilResult.EdgeSanityViolated(), "nil result must not trip the check")
+}
+
+func TestIndex_EdgeSanityHolds(t *testing.T) {
+	// A real index of even a tiny repo produces edges, so the
+	// edge-sanity check passes — guards the invariant against false
+	// positives on legitimate indexes.
+	dir := setupTestDir(t)
+	g := graph.New()
+	idx := newTestIndexer(g)
+	result, err := idx.Index(dir)
+	require.NoError(t, err)
+	assert.False(t, result.EdgeSanityViolated(),
+		"a normal index must not trip the edge-sanity check (files=%d nodes=%d edges=%d)",
+		result.FileCount, result.NodeCount, result.EdgeCount)
+}
+
 func TestIndex_UnsupportedFile(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "readme.txt"), "hello world")

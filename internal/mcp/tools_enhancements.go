@@ -2540,6 +2540,21 @@ func (s *Server) buildIndexHealthPayload() map[string]any {
 		recommendation = "Health score below 80%. Run index_repository with path \".\" to re-index the codebase."
 	}
 
+	// Edgeless-index sanity check: a populated graph with files and
+	// symbol nodes but zero edges means edge extraction failed
+	// wholesale (a broken grammar, an aborted reindex). Even a single
+	// one-function file yields containment edges, so this only trips on
+	// a real regression.
+	edgesOK := !(totalDetected > 0 && stats.TotalNodes > 0 && stats.TotalEdges == 0)
+	if !edgesOK {
+		msg := "Index has files and symbol nodes but zero edges — edge extraction failed. Re-index with index_repository path \".\"; if it persists the language grammar may be broken."
+		if recommendation == "" {
+			recommendation = msg
+		} else {
+			recommendation = msg + " " + recommendation
+		}
+	}
+
 	result := map[string]any{
 		"health_score":         healthScore,
 		"total_detected":       totalDetected,
@@ -2548,6 +2563,7 @@ func (s *Server) buildIndexHealthPayload() map[string]any {
 		"last_index_time":      lastIndexStr,
 		"node_count":           stats.TotalNodes,
 		"edge_count":           stats.TotalEdges,
+		"edges_ok":             edgesOK,
 	}
 	if len(parseErrors) > 0 {
 		result["parse_failures"] = parseErrors

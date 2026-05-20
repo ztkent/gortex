@@ -71,6 +71,19 @@ type IndexResult struct {
 	Errors       []IndexError `json:"errors,omitempty"`
 }
 
+// EdgeSanityViolated reports the post-reindex sanity-check failure: an
+// index pass that observed source files and extracted symbol nodes from
+// them, yet produced zero edges. A populated graph with no edges still
+// looks indexed but answers every "who calls X" / "what imports Y"
+// query with nothing — a wholesale edge-extraction failure (a broken
+// grammar, an aborted reindex) worth surfacing rather than shipping
+// silently. Even a single one-function file yields containment edges,
+// so a real repo only trips this when extraction failed across the
+// board.
+func (r *IndexResult) EdgeSanityViolated() bool {
+	return r != nil && r.FileCount > 0 && r.NodeCount > 0 && r.EdgeCount == 0
+}
+
 // IndexError records a per-file parsing failure.
 type IndexError struct {
 	FilePath string `json:"file_path"`
@@ -1722,7 +1735,7 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 	reporter.Report("indexing complete", int(fileCount), len(files))
 
 	nodes, edges := idx.repoNodeEdgeCount()
-	return &IndexResult{
+	result := &IndexResult{
 		NodeCount:        nodes,
 		EdgeCount:        edges,
 		FileCount:        int(fileCount),
@@ -1730,7 +1743,9 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 		SkippedFiles:     len(skippedBySize) + int(skippedByTimeout),
 		DurationMs:       time.Since(start).Milliseconds(),
 		Errors:           errors,
-	}, nil
+	}
+	idx.warnIfEdgeSanityViolated(result)
+	return result, nil
 }
 
 // repoNodeEdgeCount returns this indexer's contribution to the graph,
@@ -1747,6 +1762,18 @@ func (idx *Indexer) repoNodeEdgeCount() (int, int) {
 	}
 	est := idx.graph.RepoMemoryEstimate(idx.repoPrefix)
 	return est.NodeCount, est.EdgeCount
+}
+
+// warnIfEdgeSanityViolated logs a loud warning when an index pass
+// produced files and symbol nodes but no edges — see
+// IndexResult.EdgeSanityViolated.
+func (idx *Indexer) warnIfEdgeSanityViolated(r *IndexResult) {
+	if r.EdgeSanityViolated() {
+		idx.logger.Warn("indexer: edge-sanity check failed — index has files and nodes but zero edges; edge extraction likely failed wholesale",
+			zap.Int("files", r.FileCount),
+			zap.Int("nodes", r.NodeCount),
+			zap.Int("edges", r.EdgeCount))
+	}
 }
 
 // IndexFile parses a single file and patches the graph (evict then
@@ -2337,13 +2364,15 @@ func (idx *Indexer) IncrementalReindex(root string) (*IndexResult, error) {
 	}
 
 	nodes, edges := idx.repoNodeEdgeCount()
-	return &IndexResult{
+	result := &IndexResult{
 		NodeCount:      nodes,
 		EdgeCount:      edges,
 		FileCount:      len(diskFiles),
 		StaleFileCount: len(staleFiles),
 		DurationMs:     time.Since(start).Milliseconds(),
-	}, nil
+	}
+	idx.warnIfEdgeSanityViolated(result)
+	return result, nil
 }
 
 // LastIndexTime returns the timestamp of the last full index.
