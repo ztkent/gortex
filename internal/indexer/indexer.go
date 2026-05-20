@@ -56,6 +56,12 @@ type IndexResult struct {
 	// duplicate FileCount). Used by the janitor / reconcile log to
 	// report "how much work did the snapshot delta require".
 	StaleFileCount int `json:"stale_file_count,omitempty"`
+	// FailedFiles lists files an incremental pass could not index even
+	// after one retry — a parse error, or a file locked or removed
+	// mid-pass. Their mtime is never recorded, so the next incremental
+	// pass retries them, and a caller can replay them explicitly.
+	// Empty on a clean pass and on full-index passes.
+	FailedFiles []string `json:"failed_files,omitempty"`
 	// QuarantinedFiles is the number of files held in the parser
 	// crash-isolation quarantine after this pass — files that
 	// SIGSEGV'd / hung / panicked the parser and were skipped with a
@@ -2325,11 +2331,29 @@ func (idx *Indexer) IncrementalReindex(root string) (*IndexResult, error) {
 		idx.mtimeMu.Unlock()
 	}
 
-	// Re-index stale files.
+	// Re-index stale files. A file that fails — most often because it
+	// was locked or mid-write when the walk caught it — is collected
+	// and retried once below. A failure that survives the retry is
+	// surfaced on IndexResult.FailedFiles so the caller can replay it;
+	// since a failed file's mtime is never recorded, it also stays
+	// stale for the next incremental pass.
+	var failedFiles []string
 	for _, f := range staleFiles {
 		if err := idx.IndexFile(f); err != nil {
 			idx.logger.Debug("incremental reindex: failed to index file",
 				zap.String("file", f), zap.Error(err))
+			failedFiles = append(failedFiles, f)
+		}
+	}
+	if len(failedFiles) > 0 {
+		retry := failedFiles
+		failedFiles = nil
+		for _, f := range retry {
+			if err := idx.IndexFile(f); err != nil {
+				idx.logger.Warn("incremental reindex: file failed after retry",
+					zap.String("file", f), zap.Error(err))
+				failedFiles = append(failedFiles, f)
+			}
 		}
 	}
 
@@ -2373,6 +2397,7 @@ func (idx *Indexer) IncrementalReindex(root string) (*IndexResult, error) {
 		EdgeCount:      edges,
 		FileCount:      len(diskFiles),
 		StaleFileCount: len(staleFiles),
+		FailedFiles:    failedFiles,
 		DurationMs:     time.Since(start).Milliseconds(),
 	}
 	idx.warnIfEdgeSanityViolated(result)

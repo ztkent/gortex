@@ -165,3 +165,45 @@ func TestIncrementalReindex_ConvergesToFullIndex(t *testing.T) {
 	assert.Equal(t, canonicalGraph(gB), canonicalGraph(gA),
 		"incremental reindex must converge to the same graph as a full index")
 }
+
+// TestIncrementalReindex_FailedFileSurfacedAndRetried checks the
+// failed-chunk replay surface: a stale file that cannot be indexed is
+// reported on IndexResult.FailedFiles (after one in-pass retry), its
+// mtime is left unrecorded so it stays stale, and a later pass
+// recovers it once the obstruction clears.
+func TestIncrementalReindex_FailedFileSurfacedAndRetried(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("an unreadable-file test is meaningless as root")
+	}
+
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "ok.go"), "package main\n\nfunc OK() {}\n")
+	bad := filepath.Join(dir, "bad.go")
+	writeFile(t, bad, "package main\n\nfunc Bad() {}\n")
+
+	g := graph.New()
+	idx := newTestIndexer(g)
+	_, err := idx.Index(dir)
+	require.NoError(t, err)
+	require.NotEmpty(t, g.FindNodesByName("Bad"))
+
+	// Make bad.go unreadable and stale: the incremental pass discovers
+	// it (stat works) but fails to read its content.
+	require.NoError(t, os.Chmod(bad, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(bad, 0o644) })
+	future := time.Now().Add(2 * time.Second)
+	require.NoError(t, os.Chtimes(bad, future, future))
+
+	res, err := idx.IncrementalReindex(dir)
+	require.NoError(t, err)
+	assert.Contains(t, res.FailedFiles, bad,
+		"an unreadable stale file must be surfaced on FailedFiles")
+
+	// Readable again: the file is still stale (its failed pass never
+	// recorded an mtime), so the next incremental pass recovers it.
+	require.NoError(t, os.Chmod(bad, 0o644))
+	res2, err := idx.IncrementalReindex(dir)
+	require.NoError(t, err)
+	assert.Empty(t, res2.FailedFiles, "the file indexes cleanly once readable")
+	assert.NotEmpty(t, g.FindNodesByName("Bad"))
+}
