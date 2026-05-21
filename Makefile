@@ -11,7 +11,7 @@ LDFLAGS   := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.d
 
 .PHONY: build build-onnx build-gomlx build-hugot build-windows \
        test bench bench-rpi bench-rpi-quick bench-rpi-profile bench-compare \
-       lint fmt clean install tag-release \
+       lint fmt clean install dev-link tag-release \
        deps-onnx deps-gomlx deps-hugot deps-vectors \
        claude-plugin claude-plugin-check
 
@@ -20,7 +20,7 @@ LDFLAGS   := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.d
 # ---------------------------------------------------------------------------
 
 build:
-	go build -ldflags '$(LDFLAGS)' -o $(BINARY) ./cmd/gortex/
+	go build -ldflags '$(LDFLAGS)' -tags llama -o $(BINARY) ./cmd/gortex/
 
 build-onnx: deps-onnx
 	go build -tags embeddings_onnx -ldflags '$(LDFLAGS)' -o $(BINARY) ./cmd/gortex/
@@ -78,6 +78,14 @@ clean:
 install:
 	go install -ldflags '$(LDFLAGS)' ./cmd/gortex/
 
+# dev-link builds the working tree and points the Homebrew shim at it so
+# `gortex` on $PATH runs the dev binary. Restarts the daemon so the new
+# binary takes over (an old daemon keeps a stale in-memory graph). Revert
+# with `brew reinstall gortex`.
+HOMEBREW_BIN ?= /opt/homebrew/bin/gortex
+dev-link: build
+	ln -sfn "$(CURDIR)/$(BINARY)" "$(HOMEBREW_BIN)"
+
 # tag-release stamps the working copy with a git tag that matches the
 # version currently in cmd/gortex/main.go. Workflow:
 #
@@ -122,11 +130,13 @@ build-rpi32:
 # (`brew install mingw-w64` on macOS, `apt install gcc-mingw-w64` on
 # Debian/Ubuntu). CGO stays on because tree-sitter needs a C/C++
 # compiler; the llama tag is omitted — the in-process llama.cpp backend
-# isn't part of the Windows build.
+# isn't part of the Windows build. `-extldflags -static` links the
+# mingw-w64 C/C++ runtime (libstdc++, libgcc, winpthread) into the .exe
+# so it runs on a stock Windows box without bundled DLLs.
 build-windows:
 	CGO_ENABLED=1 GOOS=windows GOARCH=amd64 \
 		CC=x86_64-w64-mingw32-gcc CXX=x86_64-w64-mingw32-g++ \
-		go build -ldflags '$(LDFLAGS)' -o gortex.exe ./cmd/gortex/
+		go build -ldflags '$(LDFLAGS) -extldflags "-static"' -o gortex.exe ./cmd/gortex/
 	@echo "✓ Built gortex.exe (windows/amd64)"
 
 # ---------------------------------------------------------------------------
