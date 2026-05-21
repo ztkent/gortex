@@ -29,13 +29,14 @@ const CurrentPreToolUseMatcher = "Read|Grep|Glob|Task|Bash|Edit|Write"
 // don't benefit from a post-call graph snapshot, so they're omitted.
 const CurrentPostToolUseMatcher = "Read|Grep|Glob"
 
-// HookModeDeny / HookModeEnrich are the two posture strings the
-// installer accepts. They mirror hooks.Mode without importing it (the
-// claudecode package is a leaf of the agents adapter tree and must stay
-// import-free of hooks).
+// HookModeDeny / HookModeEnrich / HookModeConsultUnlock are the posture
+// strings the installer accepts. They mirror hooks.Mode without
+// importing it (the claudecode package is a leaf of the agents adapter
+// tree and must stay import-free of hooks).
 const (
-	HookModeDeny   = "deny"
-	HookModeEnrich = "enrich"
+	HookModeDeny          = "deny"
+	HookModeEnrich        = "enrich"
+	HookModeConsultUnlock = "consult-unlock"
 )
 
 // normalizeHookMode maps user input to a canonical mode. Empty or
@@ -45,6 +46,8 @@ func normalizeHookMode(mode string) string {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case HookModeEnrich:
 		return HookModeEnrich
+	case HookModeConsultUnlock:
+		return HookModeConsultUnlock
 	default:
 		return HookModeDeny
 	}
@@ -53,13 +56,17 @@ func normalizeHookMode(mode string) string {
 // hookCommandWithMode appends `--mode=<mode>` to the base hook command
 // when mode is non-default. The deny mode is the historical default —
 // emitting it bare keeps existing settings.json diffs minimal during an
-// upgrade. Enrich mode is always emitted explicitly so the installed
-// command unambiguously declares its posture.
+// upgrade. Every other posture is emitted explicitly so the installed
+// command unambiguously declares itself.
 func hookCommandWithMode(base, mode string) string {
-	if normalizeHookMode(mode) == HookModeEnrich {
+	switch normalizeHookMode(mode) {
+	case HookModeEnrich:
 		return base + " --mode=enrich"
+	case HookModeConsultUnlock:
+		return base + " --mode=consult-unlock"
+	default:
+		return base
 	}
-	return base
 }
 
 // ResolveHookCommand returns the shell command to bake into Claude
@@ -411,10 +418,10 @@ func InstallHookWithMode(w io.Writer, settingsPath string, mode string, opts age
 		dedupGortexEntries(hooks, "SessionStart")
 
 	// PostToolUse is only present when mode=enrich. Removing it on a
-	// switch back to deny keeps settings.json clean — agents won't
-	// fire a no-op hook on every Read/Grep response.
+	// switch to any other posture keeps settings.json clean — agents
+	// won't fire a no-op hook on every Read/Grep response.
 	postToolUseRemoved := 0
-	if mode == HookModeDeny {
+	if mode != HookModeEnrich {
 		postToolUseRemoved = removeGortexHookEntries(hooks, "PostToolUse")
 	}
 
@@ -552,7 +559,7 @@ func InstallHookWithMode(w io.Writer, settingsPath string, mode string, opts age
 		changes = append(changes, "installed PostToolUse (enrich mode)")
 	}
 	if postToolUseRemoved > 0 {
-		changes = append(changes, "removed PostToolUse (switched to deny mode)")
+		changes = append(changes, fmt.Sprintf("removed PostToolUse (switched to %s mode)", mode))
 	}
 	if modeRewriteCount > 0 {
 		changes = append(changes, fmt.Sprintf("rewrote %d hook command(s) for mode=%s", modeRewriteCount, mode))

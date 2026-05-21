@@ -188,14 +188,16 @@ func extractCmd(t *testing.T, hooks map[string]any, event string, idx int) strin
 
 func TestNormalizeHookMode(t *testing.T) {
 	cases := map[string]string{
-		"":         HookModeDeny,
-		"deny":     HookModeDeny,
-		"DENY":     HookModeDeny,
-		"  deny  ": HookModeDeny,
-		"enrich":   HookModeEnrich,
-		"Enrich":   HookModeEnrich,
-		"unknown":  HookModeDeny, // safe fallback
-		"off":      HookModeDeny, // install flag handles disable separately
+		"":               HookModeDeny,
+		"deny":           HookModeDeny,
+		"DENY":           HookModeDeny,
+		"  deny  ":       HookModeDeny,
+		"enrich":         HookModeEnrich,
+		"Enrich":         HookModeEnrich,
+		"consult-unlock": HookModeConsultUnlock,
+		"Consult-Unlock": HookModeConsultUnlock,
+		"unknown":        HookModeDeny, // safe fallback
+		"off":            HookModeDeny, // install flag handles disable separately
 	}
 	for input, want := range cases {
 		t.Run(input, func(t *testing.T) {
@@ -210,6 +212,8 @@ func TestHookCommandWithMode(t *testing.T) {
 		"deny mode must NOT append --mode flag (back-compat with settings written before --hook-mode existed)")
 	assert.Equal(t, base+" --mode=enrich", hookCommandWithMode(base, HookModeEnrich),
 		"enrich mode must append --mode=enrich")
+	assert.Equal(t, base+" --mode=consult-unlock", hookCommandWithMode(base, HookModeConsultUnlock),
+		"consult-unlock mode must append --mode=consult-unlock")
 	assert.Equal(t, base, hookCommandWithMode(base, ""),
 		"empty mode defaults to deny — no flag")
 }

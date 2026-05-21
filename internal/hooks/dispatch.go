@@ -22,7 +22,15 @@ import (
 //     don't want their agent stopped mid-flow; the graph value still
 //     lands, just adjacent to the raw output rather than as a redirect.
 //
-// The two modes co-exist by selection — a user picks one per install via
+//   - ModeConsultUnlock ("consult-unlock"): the PreToolUse hook denies
+//     Read / Grep / Glob fallback only until the agent has queried the
+//     Gortex graph at least once this session. The first `mcp__gortex__*`
+//     tool call flips a per-session marker; from then on the deny is
+//     downgraded to soft `additionalContext` (same as ModeEnrich). The
+//     posture nudges the agent to consult the graph before falling back
+//     to raw file reads, then gets out of the way.
+//
+// The modes co-exist by selection — a user picks one per install via
 // `gortex install --hook-mode=<mode>`. Switching modes is a single
 // re-install; the Claude Code adapter rewrites the hook command and
 // adds / removes the PostToolUse entry to match.
@@ -33,15 +41,20 @@ const (
 	ModeDeny Mode = iota
 	// ModeEnrich augments tool output rather than denying it.
 	ModeEnrich
+	// ModeConsultUnlock denies fallback reads until the agent has
+	// consulted the Gortex graph once, then downgrades to soft context.
+	ModeConsultUnlock
 )
 
-// ParseMode resolves the string form ("deny" / "enrich") into a Mode.
-// Empty / unknown values fall through to ModeDeny so unset environments
-// keep the established behavior.
+// ParseMode resolves the string form into a Mode. Empty / unknown
+// values fall through to ModeDeny so unset environments keep the
+// established behavior.
 func ParseMode(s string) Mode {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "enrich":
 		return ModeEnrich
+	case "consult-unlock":
+		return ModeConsultUnlock
 	default:
 		return ModeDeny
 	}
@@ -53,6 +66,8 @@ func (m Mode) String() string {
 	switch m {
 	case ModeEnrich:
 		return "enrich"
+	case ModeConsultUnlock:
+		return "consult-unlock"
 	default:
 		return "deny"
 	}

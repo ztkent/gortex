@@ -58,8 +58,9 @@ func init() {
 	installCmd.Flags().BoolVar(&installHooks, "hooks", true, "install user-level Claude Code hooks; use --no-hooks to skip")
 	installCmd.Flags().BoolVar(&installNoHooks, "no-hooks", false, "skip user-level Claude Code hooks (inverse of --hooks)")
 	installCmd.Flags().StringVar(&installHookMode, "hook-mode", "deny",
-		"hook posture: 'deny' (PreToolUse redirects Grep/Glob/Read of indexed source) or 'enrich' "+
-			"(PreToolUse never denies; PostToolUse appends graph context after the tool runs — easier onboarding)")
+		"hook posture: 'deny' (PreToolUse redirects Grep/Glob/Read of indexed source), 'enrich' "+
+			"(PreToolUse never denies; PostToolUse appends graph context after the tool runs — easier onboarding), "+
+			"or 'consult-unlock' (deny fallback reads until the Gortex graph is queried once this session, then downgrade to soft context)")
 	installCmd.Flags().BoolVar(&installClaudeMd, "claude-md", true, "merge Gortex rule block into ~/.claude/CLAUDE.md; use --no-claude-md to skip")
 	installCmd.Flags().BoolVar(&installNoClaudeMd, "no-claude-md", false, "skip the ~/.claude/CLAUDE.md rule block (inverse of --claude-md)")
 	installCmd.Flags().BoolVar(&installStartDaemon, "start", false, "start the daemon immediately after setup (detached)")

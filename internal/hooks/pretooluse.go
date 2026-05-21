@@ -21,6 +21,13 @@ type HookInput struct {
 	ToolName      string         `json:"tool_name"`
 	ToolInput     map[string]any `json:"tool_input"`
 	CWD           string         `json:"cwd"`
+	// SessionID identifies the Claude Code session. Used to key the
+	// per-session state store (consult-unlock marker, nudge streak).
+	SessionID string `json:"session_id"`
+	// PermissionMode is the host's active permission posture
+	// ("default" / "acceptEdits" / "plan" / "bypassPermissions" / "auto").
+	// Drives the auto-approve branch for Gortex's own MCP tools.
+	PermissionMode string `json:"permission_mode"`
 }
 
 // HookOutput is the JSON structure the hook writes to stdout.
@@ -55,6 +62,13 @@ func RunPreToolUse(gortexPort int) {
 	runPreToolUse(data, gortexPort, ModeDeny)
 }
 
+// gortexMCPToolPrefix is the namespace Claude Code gives Gortex's own
+// MCP tools (server name "gortex"). A tool call whose name starts with
+// this prefix is a graph query — the in-process hook sees it like any
+// other tool call, which is what lets the consult-unlock handshake and
+// the adaptive-nudge streak reset work without an external signal.
+const gortexMCPToolPrefix = "mcp__gortex__"
+
 // runPreToolUse is the bytes-accepting helper used by both RunPreToolUse and
 // the generic Run dispatcher. In ModeEnrich the deny branch is downgraded
 // to an additionalContext message — the agent is informed about the graph
@@ -70,6 +84,21 @@ func runPreToolUse(data []byte, gortexPort int, mode Mode) {
 		return
 	}
 
+	isGortexMCP := strings.HasPrefix(input.ToolName, gortexMCPToolPrefix)
+
+	// Consult-unlock handshake: any Gortex MCP tool call records that
+	// the agent has consulted the graph this session. The hook sees the
+	// MCP call in-process, so the marker is fully self-contained. The
+	// call itself is a no-op pass-through — nothing to enrich.
+	if mode == ModeConsultUnlock && isGortexMCP {
+		st := loadSessionState(input.SessionID)
+		if !st.GraphConsulted {
+			st.GraphConsulted = true
+			saveSessionState(input.SessionID, st)
+		}
+		return
+	}
+
 	result := enrich(input, gortexPort)
 
 	// In enrich mode no PreToolUse call is ever denied. The agent
@@ -78,11 +107,20 @@ func runPreToolUse(data []byte, gortexPort int, mode Mode) {
 	// actual graph value lands in the PostToolUse handler that sees
 	// the tool's response.
 	if mode == ModeEnrich && result.deny {
-		downgraded := result.reason
-		if downgraded == "" {
-			downgraded = result.context
+		result = enrichResult{context: downgradeReason(result)}
+	}
+
+	// Consult-unlock mode: a deny stays hard until the agent has
+	// queried the graph at least once this session. After the first
+	// mcp__gortex__* call the marker is set and the deny is downgraded
+	// to soft context (same shape as ModeEnrich). Before that the deny
+	// holds, but its reason explains exactly how to unlock fallback.
+	if mode == ModeConsultUnlock && result.deny {
+		if loadSessionState(input.SessionID).GraphConsulted {
+			result = enrichResult{context: downgradeReason(result)}
+		} else {
+			result.reason = consultUnlockReason(result.reason)
 		}
-		result = enrichResult{context: downgraded}
 	}
 
 	if result.context == "" && !result.deny {
@@ -102,11 +140,37 @@ func runPreToolUse(data []byte, gortexPort int, mode Mode) {
 		output.HookSpecificOutput.AdditionalContext = result.context
 	}
 
+	emitPreToolUse(output)
+}
+
+// emitPreToolUse marshals a PreToolUse HookOutput to stdout. A marshal
+// failure is swallowed — a hook must never block Claude Code's flow.
+func emitPreToolUse(output HookOutput) {
 	out, err := json.Marshal(output)
 	if err != nil {
 		return
 	}
 	fmt.Print(string(out))
+}
+
+// downgradeReason picks the human text to surface when a deny is
+// softened to additionalContext: the deny reason if present, else the
+// advisory context. Shared by ModeEnrich and ModeConsultUnlock.
+func downgradeReason(result enrichResult) string {
+	if result.reason != "" {
+		return result.reason
+	}
+	return result.context
+}
+
+// consultUnlockReason augments a hard deny reason with the one-line
+// instruction for unlocking fallback file reads under ModeConsultUnlock.
+func consultUnlockReason(reason string) string {
+	const unlock = "\n[Gortex] consult-unlock: query the Gortex graph once (any mcp__gortex__ tool) to unlock fallback file reads for the rest of this session."
+	if reason == "" {
+		return strings.TrimPrefix(unlock, "\n")
+	}
+	return reason + unlock
 }
 
 func enrich(input HookInput, port int) enrichResult {
