@@ -623,10 +623,25 @@ type MultiRepoOptions struct {
 	ScopeProject string
 }
 
+// serverInstructions is the server-level `instructions` field returned
+// in the MCP initialize response. MCP clients surface it to the agent
+// as guidance on how to drive this server — the place to say "prefer
+// the graph tools over raw file reads, and where to start."
+const serverInstructions = `Gortex is a code-intelligence graph server — it indexes repositories into a queryable knowledge graph. Prefer its graph tools over raw file reads and text search:
+
+- Start any task with smart_context: it assembles the minimal relevant working set (symbols, sources, edit plan) in one call.
+- Use search_symbols (BM25, camelCase-aware) instead of grep; find_usages / get_callers for references and callers; get_symbol_source to read one symbol without its whole file.
+- Before editing, call get_editing_context on the file; for refactors use edit_symbol / rename_symbol / batch_edit.
+- The cold tools/list shows a core set — call tools_search to discover the rest of the catalogue on demand.
+- Pass format:"gcx" to list-shaped tools for a compact, round-trippable wire format (~27% fewer tokens).`
+
 // NewServer creates an MCP server with all Gortex tools registered.
 func NewServer(engine *query.Engine, g *graph.Graph, idx *indexer.Indexer, watcher *indexer.Watcher, logger *zap.Logger, guardRules []config.GuardRule, opts ...MultiRepoOptions) *Server {
 	s := &Server{
 		mcpServer: server.NewMCPServer("gortex", Version,
+			// Surface "how to drive this server" to MCP clients in the
+			// initialize response — see serverInstructions.
+			server.WithInstructions(serverInstructions),
 			// listChanged=true: tools_search promotes deferred tools
 			// into the live MCP server on demand, which fires
 			// notifications/tools/list_changed. Lazy-aware clients
