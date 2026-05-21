@@ -713,7 +713,7 @@ func (mi *MultiIndexer) reExportsFor(src, srcPath string) []reExportEdge {
 	}
 	out := make([]reExportEdge, len(tsRe))
 	for i, re := range tsRe {
-		out[i] = reExportEdge{star: re.star, names: re.names, fromFile: re.fromFile}
+		out[i] = reExportEdge(re)
 	}
 	return out
 }

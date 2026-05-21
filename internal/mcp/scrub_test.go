@@ -21,7 +21,7 @@ func TestScrubControlChars(t *testing.T) {
 		{"NUL dropped", "before\x00after", "beforeafter"},
 		{"carriage return dropped", "overwrite\rme", "overwriteme"},
 		{"DEL dropped", "a\x7fb", "ab"},
-		{"C1 control dropped", "ab", "ab"},
+		{"C1 control dropped", "a\u009bb", "ab"},
 		{"ANSI color stripped", "\x1b[31mred\x1b[0m text", "red text"},
 		{"ANSI cursor-move stripped", "x\x1b[2Ky", "xy"},
 		{"bare ESC sequence stripped", "a\x1bMb", "ab"},
