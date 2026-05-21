@@ -267,15 +267,20 @@ These wrap the discovery + impact + memory surfaces into ordered playbooks so po
 
 ## Tools Reference
 
+> The server registers 120+ MCP tools, but ` + "`tools/list`" + ` shows only a core set — the rest load lazily. Call ` + "`tools_search`" + ` to discover and load any tool by keyword; ` + "`tool_profile`" + ` reports the active profile. The tables below curate the high-traffic set.
+
 ### Core Navigation
 | Tool | What it gives you |
 |------|-------------------|
 | graph_stats | Node/edge counts by kind and language — session start orientation |
 | search_symbols | Find symbols by keyword (BM25 + camelCase-aware). Use instead of Grep |
+| search_text | Trigram-accelerated literal / regex text search — the fast grep replacement for raw string matches the symbol index won't catch |
 | winnow_symbols | Structured constraint chain: kind, language, community, path_prefix, min_fan_in, min_churn — returns ranked rows with per-axis score contributions. Use when free-text search is too coarse |
 | get_symbol | Single symbol: location, signature, edges. Use instead of Read |
 | get_file_summary | All symbols + imports in a file. Use instead of Read |
 | get_editing_context | **Primary pre-edit tool.** Symbols, signatures, callers, callees for a file |
+| get_architecture | One-shot architectural snapshot — languages, communities, hotspots, processes. Pass ` + "`resolution`" + ` (symbol/file/package/service/system) for a hierarchical multi-resolution rollup |
+| gortex_wakeup | Paste-ready ~500-token markdown digest of the codebase — fastest cold-start orientation |
 
 ### Graph Traversal
 | Tool | What it gives you |
@@ -299,6 +304,7 @@ These wrap the discovery + impact + memory surfaces into ordered playbooks so po
 | edit_file | String-replace any file (markdown / config / spec / source) by absolute or repo-relative path. No pre-Read required. Atomic write (temp+rename), auto-reindex. ` + "`replace_all`" + ` for many occurrences; ` + "`dry_run`" + ` to preview. |
 | write_file | Create or overwrite any file by absolute or repo-relative path. No pre-Read required. Atomic write, creates parent dirs, auto-reindex. ` + "`dry_run`" + ` to preview. |
 | rename_symbol | Coordinated rename: generates edits for definition + all references |
+| safe_delete_symbol | Deletion with a pre-flight safety check — refuses (or warns) when live callers / implementors still reference the symbol |
 | get_recent_changes | Files/symbols changed since timestamp (watch mode) |
 
 ### Agent-Optimized (token efficiency)
@@ -319,12 +325,17 @@ These wrap the discovery + impact + memory surfaces into ordered playbooks so po
 | get_communities | Functional clusters via Louvain community detection (with id: returns single community details) |
 | get_processes | Discovered execution flows (with id: returns single process step-by-step trace) |
 | detect_changes | Git diff -> affected symbols -> blast radius |
+| get_surprising_connections | Edges ranked by an anomaly score — the unexpected couplings worth a second look |
+| get_knowledge_gaps | Under-documented / under-tested areas the graph can see but the docs can't |
+| get_coupling_metrics | Per-symbol coupling metrics (afferent / efferent, instability) |
+| get_churn_rate | Per-symbol git-commit density — how often a symbol actually changes |
+| get_extraction_candidates | Functions ranked by extract-function value — long / complex / duplicated bodies |
 
 ### Proactive Safety
 | Tool | What it gives you |
 |------|-------------------|
 | verify_change | Checks proposed signature changes against all callers and interface implementors |
-| check_guards | Evaluates project guard rules (.gortex.yaml) against changed symbols |
+| check_guards | Evaluates project guard rules against changed symbols — co-change / boundary rules, declarative architecture layers (allow / deny), and dependency-cone rules (max_fan_out, deny_callers_outside) from ` + "`.gortex.yaml`" + ` |
 
 ### Dataflow (CPG-lite)
 | Tool | What it gives you |
@@ -335,7 +346,7 @@ These wrap the discovery + impact + memory surfaces into ordered playbooks so po
 ### Structural Code Search
 | Tool | What it gives you |
 |------|-------------------|
-| search_ast (detector mode) | Bundled cross-language anti-pattern rules. Pass ` + "`detector: \"<name>\"`" + ` for one of: ` + "`error-not-wrapped`" + ` (Go), ` + "`sql-string-concat`" + ` (Go/Python/JS/TS/Ruby), ` + "`weak-crypto`" + ` (Go/Python), ` + "`panic-in-library`" + ` (Go), ` + "`goroutine-without-recover`" + ` (Go), ` + "`http-client-no-timeout`" + ` (Go), ` + "`hardcoded-secret`" + ` (Go/Python/JS/TS/Ruby), ` + "`empty-catch`" + ` (Java/JS/TS/Python), ` + "`java-string-equality`" + ` (Java), ` + "`python-mutable-default-arg`" + ` (Python). Each match returns the enclosing ` + "`symbol_id`" + ` so you can chain into ` + "`find_usages`" + ` / ` + "`apply_code_action`" + `. Test files excluded by default. |
+| search_ast (detector mode) | Bundled cross-language anti-pattern detectors — representative subset below; ` + "`analyze kind=sast`" + ` runs the full CWE/OWASP-tagged security rule library and ` + "`list_inspections`" + ` shows the complete menu. Pass ` + "`detector: \"<name>\"`" + ` for one of: ` + "`error-not-wrapped`" + ` (Go), ` + "`sql-string-concat`" + ` (Go/Python/JS/TS/Ruby), ` + "`weak-crypto`" + ` (Go/Python), ` + "`panic-in-library`" + ` (Go), ` + "`goroutine-without-recover`" + ` (Go), ` + "`http-client-no-timeout`" + ` (Go), ` + "`hardcoded-secret`" + ` (Go/Python/JS/TS/Ruby), ` + "`empty-catch`" + ` (Java/JS/TS/Python), ` + "`java-string-equality`" + ` (Java), ` + "`python-mutable-default-arg`" + ` (Python). Each match returns the enclosing ` + "`symbol_id`" + ` so you can chain into ` + "`find_usages`" + ` / ` + "`apply_code_action`" + `. Test files excluded by default. |
 | search_ast (raw pattern) | Tree-sitter S-expression queries. Pass ` + "`pattern: \"...\"`" + ` + ` + "`language: \"...\"`" + `. Capture nodes with ` + "`@name`" + `, anchor with ` + "`@match`" + `, predicates ` + "`(#eq? @x \"literal\")`" + ` / ` + "`(#match? @x \"regex\")`" + `. Example: ` + "`((call_expression function: (identifier) @fn) @match (#eq? @fn \"panic\"))`" + ` finds every direct ` + "`panic()`" + ` call. |
 | search_ast (graph filters) | Combine the structural match with graph predicates ast-grep can't express: ` + "`path_prefix`" + ` / ` + "`repo`" + ` / ` + "`project`" + ` / ` + "`ref`" + ` / ` + "`min_fan_in_of_enclosing_func`" + `. The last narrows results to load-bearing code by dropping matches in functions with few callers. |
 
@@ -354,10 +365,28 @@ These wrap the discovery + impact + memory surfaces into ordered playbooks so po
 | apply_code_action | Apply a single CodeAction → WorkspaceEdit on disk. Atomic temp+rename; supports both legacy ` + "`changes`" + ` and modern ` + "`documentChanges`" + ` shapes; UTF-16 column math correctly maps LSP positions onto the byte offset in the source. |
 | fix_all_in_file | One-shot ` + "`source.fixAll`" + ` over an entire file. Bundles every server-suggested fix in a single round-trip. |
 
+### Notifications (session push topics)
+| Tool | What it gives you |
+|------|-------------------|
+| subscribe_diagnostics / unsubscribe_diagnostics | Push ` + "`notifications/diagnostics`" + ` from running language servers (see above) |
+| subscribe_graph_invalidated / unsubscribe_graph_invalidated | Push ` + "`notifications/graph_invalidated`" + ` when the graph is rebuilt — re-run stale queries instead of polling |
+| subscribe_daemon_health / unsubscribe_daemon_health | Push ` + "`notifications/daemon_health`" + ` — daemon readiness / warmup / memory transitions |
+| subscribe_stale_refs / unsubscribe_stale_refs | Push ` + "`notifications/stale_refs`" + ` when watched files drift the graph out from under cached symbol IDs |
+| subscribe_workspace_readiness / unsubscribe_workspace_readiness | Push ` + "`notifications/workspace_readiness`" + ` as repos finish indexing in multi-repo mode |
+
+### Knowledge & Memory
+| Tool | What it gives you |
+|------|-------------------|
+| save_note / query_notes / distill_session | Per-session scratchpad — decisions and findings that survive context compaction |
+| store_memory / query_memories / surface_memories | Cross-session, symbol-linked development memory — invariants / gotchas / decisions every future agent in the workspace inherits. ` + "`surface_memories`" + ` ranks them against your working set |
+| edit_memory / rename_memory | Amend or re-anchor an existing development memory |
+| notebook_save / notebook_show / notebook_list / notebook_find | Repository-local persistent notebook for longer-form notes |
+| search_artifacts / get_artifact | Search and fetch non-code knowledge files (DB schemas, API specs, ADRs, infra configs) registered via the ` + "`.gortex.yaml`" + ` ` + "`artifacts:`" + ` manifest and indexed as ` + "`artifact`" + ` nodes |
+
 ### Code Quality
 | Tool | What it gives you |
 |------|-------------------|
-| analyze | Unified graph analysis. Supported kinds: dead_code, hotspots, cycles, would_create_cycle, todos, blame, coverage, stale_code, ownership, coverage_gaps, coverage_summary, stale_flags, releases, cgo_users, wasm_users, orphan_tables, unreferenced_tables, channel_ops, goroutine_spawns, field_writers, annotation_users, config_readers, event_emitters, error_surface, external_calls, routes, models, components, k8s_resources, images, kustomize, cross_repo, dbt_models |
+| analyze | Unified graph-analysis dispatcher (57 kinds). Structural: dead_code, hotspots, cycles, would_create_cycle, clusters, concepts, role, connectivity_health, edge_audit, constructors_missing_fields. Quality / security: health_score, impact, sast, hygiene, unsafe_patterns, named. Churn / ownership: todos, stale_code, ownership, fixes_history, blame. Coverage / releases: coverage, coverage_gaps, coverage_summary, releases. Schema / SQL: orphan_tables, unreferenced_tables, sql_call_sites, sql_rebuild, dbt_models, models. Flags / interop: stale_flags, cgo_users, wasm_users. Edge-driven: channel_ops, race_writes, unclosed_channels, goroutine_spawns, field_writers, annotation_users, config_readers, env_var_users, event_emitters, log_events, string_emitters, error_surface, external_calls, tests_as_edges. Web / infra: routes, components, k8s_resources, images, kustomize, pubsub. Cross-repo: cross_repo. Extensible: domain |
 | analyze kind=dead_code | Symbols with zero incoming edges (excludes entry points, tests, exports) |
 | analyze kind=hotspots | Over-coupled symbols ranked by fan-in, fan-out, and community crossings |
 | analyze kind=cycles | Tarjan's SCC with severity classification |
@@ -391,9 +420,28 @@ These wrap the discovery + impact + memory surfaces into ordered playbooks so po
 | analyze kind=kustomize | KindKustomization overlay tree with base / resource fan-out; ` + "`dir`" + ` filter |
 | analyze kind=cross_repo | Repo-boundary-crossing calls / implements / extends edges grouped by (source repo → target repo, relation); ` + "`repo`" + ` / ` + "`base_kind`" + ` / ` + "`path_prefix`" + ` filters |
 | analyze kind=dbt_models | dbt / SQLMesh models, seeds, snapshots, sources (KindTable) with column count + EdgeDependsOn lineage fan-in/out; ` + "`framework`" + ` / ` + "`type`" + ` / ` + "`materialized`" + ` / ` + "`name`" + ` filters |
+| analyze kind=impact | Composite 0-100 change-impact score + risk label over 5 axes (PageRank, reach, complexity, co-change, community span); ` + "`ids`" + ` / ` + "`path_prefix`" + ` / ` + "`min_score`" + ` filters |
+| analyze kind=health_score | Composite per-symbol health 0-100 + A-F grade (coverage / complexity / recency / churn); ` + "`grade`" + ` filter, ` + "`roll_up`" + ` file or repo |
+| analyze kind=sast / hygiene | Bandit-parity SAST library — 190+ rules across 8 languages, CWE + OWASP tagged; ` + "`severity`" + ` / ` + "`cwe`" + ` / ` + "`tag`" + ` / ` + "`detector`" + ` filters |
+| analyze kind=unsafe_patterns | Panic-prone / undefined-behavior primitive scan across all languages |
+| analyze kind=named | Runs a named query bundle — built-ins cover sql-injection, command-injection, hardcoded-secrets, weak-crypto, xss, ssrf, xxe, path-traversal, unsafe-deserialization, debug-leftovers; repo bundles come from ` + "`.gortex.yaml`" + ` ` + "`queries`" + ` |
+| analyze kind=clusters | Community detection as an analyzer — ` + "`algorithm`" + ` = leiden / louvain / spectral, ` + "`min_size`" + ` |
+| analyze kind=concepts / role | Concept clusters mined over the graph; per-symbol architectural-role classification |
+| analyze kind=connectivity_health | Graph-extraction quality — isolated nodes, leaf / source / sink counts, dead-weight-by-file. Distinct from dead_code (which is symbol-level reachability) |
+| analyze kind=edge_audit | Graph-completeness / edge-sanity diagnostic — missing or suspect edges |
+| analyze kind=constructors_missing_fields | Constructors that leave one or more struct fields unset |
+| analyze kind=race_writes / unclosed_channels | Concurrent-write race detection; channels that are opened but never closed |
+| analyze kind=env_var_users | EdgeReadsConfig restricted to env-var keys, grouped by variable |
+| analyze kind=sql_call_sites / sql_rebuild | EdgeQueries grouped by calling symbol with table read/write split; sql_rebuild re-derives the SQL table layer from the string-literal registry |
+| analyze kind=log_events / string_emitters | Logging-call sites and string-literal emission sites surfaced as events |
+| analyze kind=fixes_history | Mines git for bug-fix commits and ranks fix-prone files |
+| analyze kind=tests_as_edges | View over the test->code EdgeTests layer; ` + "`group_by`" + ` symbol or test |
+| analyze kind=domain | Results of pluggable TOML domain-extractor rules — project-specific node/edge kinds |
 | index_health | Health score, parse failures, stale files, language coverage |
 | get_symbol_history | Symbols modified this session with counts; flags churning (3+ edits) |
 | gortex enrich blame\|coverage\|releases\|all (CLI) | Bulk-stamp the graph with the metadata that stale_*/coverage_*/ownership/releases analyzers need |
+| list_inspections | Lists the uniform inspection rules available — the menu for ` + "`run_inspections`" + ` |
+| run_inspections | Runs a chosen set of inspection rules over the graph and returns ranked findings |
 
 ### Code Generation
 | Tool | What it gives you |
@@ -432,15 +480,19 @@ These wrap the discovery + impact + memory surfaces into ordered playbooks so po
 **Node kinds:**
 - Code structure: file, package, function, method, type, interface, field, variable, constant, import, contract, param, closure, enum_member, generic_param
 - Coverage extensions: module (ecosystem deps), table / column (db schema), config_key (env/viper/cli), flag (feature flags), event (logs/metrics/spans), migration, fixture (test data), todo (TODO/FIXME comments), team (CODEOWNERS), license, release (tag boundaries)
+- Knowledge & infra: artifact (non-code knowledge files — DB schemas / API specs / ADRs / infra configs registered via the ` + "`.gortex.yaml`" + ` ` + "`artifacts:`" + ` manifest), string (string-literal registry), image (container images), resource (Kubernetes / infra resources)
 
 **Edge kinds:**
 - Calls / structure: calls, imports, defines, implements, extends, references, member_of, instantiates, provides, consumes, composes, aliases, typed_as, returns, captures, param_of
+- Modules: depends_on_module, package_workspace_member (package-manager workspace root → member package)
 - Concurrency: spawns (goroutine/async/promise), sends / recvs (channels)
 - Mutation: reads / writes (fields), reads_config / writes_config
 - Dataflow (CPG-lite, ` + "`flow_between`" + ` / ` + "`taint_paths`" + `): value_flow (intra-procedural assignment / return / range), arg_of (caller arg → callee param), returns_to (callee → assignment LHS)
-- Metadata: annotated (decorators), emits (events + pub/sub publish), listens_on (pub/sub subscribe), throws (errors), queries (SQL), reads_col / writes_col, toggles_flag, depends_on_module, matches (fixtures), generated_by, tests (test → tested symbol), covered_by, owns (CODEOWNERS), authored, licensed_as
+- Metadata: annotated (decorators), emits (events + pub/sub publish), listens_on (pub/sub subscribe), throws (errors), queries (SQL), reads_col / writes_col, toggles_flag, matches (fixtures), generated_by, tests (test → tested symbol), covered_by, owns (CODEOWNERS), authored, licensed_as
 - Similarity: similar_to (function/method near-duplicate — MinHash + LSH clone detection, ` + "`find_clones`" + `)
 - Cross-repo: cross_repo_calls / cross_repo_implements / cross_repo_extends (parallel edges materialised when a calls/implements/extends edge crosses a repo boundary, ` + "`analyze kind=cross_repo`" + `)
+
+Edge **provenance** (which extractor minted an edge) is part of edge identity — two edges between the same nodes with different origins are distinct. ` + "`graph_stats`" + ` surfaces ` + "`edge_identity_revisions`" + ` as a tamper-evidence counter, and navigation results carry concurrency-safety hints where the graph can infer them.
 `
 
 const commandExplore = `# Exploring Codebases with Gortex
@@ -1337,14 +1389,16 @@ Use this when the user wants a structured pass over a repo / directory looking f
 17. analyze({kind: "orphan_tables"})                                   -> Tables queried but missing a migration
 18. analyze({kind: "unreferenced_tables"})                             -> Tables provided by a migration with zero readers
 19. analyze({kind: "stale_flags"})                                     -> Dead-rollout flag candidates (rerun with smaller window if noisy)
-20. search_ast({detector: "<one of: error-not-wrapped | sql-string-concat |  -> Cross-language anti-pattern sweep
-                weak-crypto | panic-in-library | goroutine-without-recover |
-                http-client-no-timeout | hardcoded-secret | empty-catch |
-                java-string-equality | python-mutable-default-arg>"})
-21. audit_agent_config                                                 -> Stale references in CLAUDE.md / AGENTS.md / .cursor/rules — config drift
-22. contracts({action: "check"})                                       -> Orphan providers / consumers; HTTP / gRPC / topics / env drift
-23. analyze({kind: "ownership", path_prefix: "<dir>/"})                -> Per-author rollup — who to ping per finding
-24. export_context({format: "markdown",                                -> Hand the audit packet to PR / Slack / wiki
+20. analyze({kind: "sast", path_prefix: "<dir>/", severity: "high"})   -> CWE/OWASP-tagged security scan — 190+ rules across 8 languages
+21. analyze({kind: "named", name: "<bundle>"})                         -> Named query bundles — sql-injection, hardcoded-secrets, ssrf, xxe, weak-crypto, …
+22. analyze({kind: "unsafe_patterns", path_prefix: "<dir>/"})          -> Panic-prone / undefined-behavior primitives across all languages
+23. search_ast({detector: "<lang-specific detector>"})                -> Targeted structural anti-pattern sweep (see list_inspections for the menu)
+24. analyze({kind: "health_score", path_prefix: "<dir>/",             -> Composite per-file health grade — ranks the worst files first
+             roll_up: "file"})
+25. audit_agent_config                                                 -> Stale references in CLAUDE.md / AGENTS.md / .cursor/rules — config drift
+26. contracts({action: "check"})                                       -> Orphan providers / consumers; HTTP / gRPC / topics / env drift
+27. analyze({kind: "ownership", path_prefix: "<dir>/"})                -> Per-author rollup — who to ping per finding
+28. export_context({format: "markdown",                                -> Hand the audit packet to PR / Slack / wiki
                     sections: ["findings", "ownership", "priorities"]})
 ` + "```" + `
 
@@ -1354,7 +1408,7 @@ Findings are not equal. Rank by:
 
 | Tier | Filter                                                                                   | Why this matters first |
 | ---- | ---------------------------------------------------------------------------------------- | ---------------------- |
-| **P0** | ` + "`race_writes`" + ` / ` + "`unclosed_channels`" + ` / ` + "`weak-crypto`" + ` / ` + "`hardcoded-secret`" + ` / ` + "`http-client-no-timeout`" + ` | Correctness / security |
+| **P0** | ` + "`analyze kind=sast severity=high`" + ` / ` + "`analyze kind=named`" + ` / ` + "`race_writes`" + ` / ` + "`unclosed_channels`" + ` / ` + "`weak-crypto`" + ` / ` + "`hardcoded-secret`" + ` / ` + "`http-client-no-timeout`" + ` | Correctness / security |
 | **P1** | ` + "`cycles severity=severe`" + ` / ` + "`orphan_tables`" + ` / ` + "`contracts({action: check})`" + ` orphans / ` + "`audit_agent_config`" + ` stale refs | Real bugs latent in the graph |
 | **P2** | ` + "`dead_code`" + ` ∩ ` + "`find_clones dead_only=true`" + ` / ` + "`stale_flags`" + ` / ` + "`stale_code`" + ` | Deletion candidates — easy ROI |
 | **P3** | ` + "`hotspots top=20`" + ` / ` + "`coverage_gaps min_pct=0 max_pct=20`" + ` / ` + "`error_surface`" + ` widening | Refactor targets |
@@ -1362,9 +1416,9 @@ Findings are not equal. Rank by:
 
 Always pair every P0 / P1 finding with ` + "`analyze kind=ownership`" + ` on its path so the audit packet pings the right reviewer.
 
-## Cross-language anti-pattern sweep
+## Security & anti-pattern sweep
 
-` + "`search_ast`" + ` ships 10 bundled detectors covering the common cross-language smells:
+` + "`analyze kind=sast`" + ` is the comprehensive pass — 190+ CWE/OWASP-tagged rules across 8 languages, filterable by ` + "`severity`" + ` / ` + "`cwe`" + ` / ` + "`tag`" + `. ` + "`analyze kind=named`" + ` runs focused query bundles (sql-injection, hardcoded-secrets, ssrf, xxe, …). ` + "`search_ast`" + ` then targets specific structural smells — a representative subset of its bundled detectors:
 
 | Detector                          | Languages                            |
 | --------------------------------- | ------------------------------------ |
@@ -1411,7 +1465,7 @@ The output of a quality audit is a prioritised markdown packet, not a one-line "
 - ` + "`gortex enrich blame coverage releases all`" + ` (CLI) before the audit — temporal + coverage analyzers need ` + "`meta.last_authored`" + ` / ` + "`meta.coverage_pct`" + ` / ` + "`meta.added_in`" + `
 - Walk the analyzers in the order above — earlier ones surface highest-priority findings
 - Pair every finding with ` + "`analyze kind=ownership`" + ` so the audit packet has a routing column
-- Run the ` + "`search_ast`" + ` detectors that match the repo's languages; skip the ones that don't
+- ` + "`analyze kind=sast`" + ` is the security backbone; add ` + "`search_ast`" + ` detectors for the language-specific smells it doesn't cover
 - ` + "`audit_agent_config`" + ` catches stale references in the team's CLAUDE.md / AGENTS.md / IDE config — config drift is a real-world finding
 - Rank by the P0..P4 tiers; do not hand the user a flat list
 - ` + "`export_context format=markdown`" + ` for the packet
