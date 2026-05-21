@@ -41,9 +41,32 @@ func (s *Server) registerPrompts() {
 	)
 }
 
+// promptArg reads a prompts/get argument defensively. mcp-go leaves
+// Params.Arguments nil when the client sends a request with no
+// `arguments` object; reading a nil map is safe in Go, but routing
+// every access through this helper makes the empty-args contract
+// explicit — and trims surrounding whitespace — rather than relying
+// on library behaviour that a future mcp-go bump could change.
+func promptArg(req mcp.GetPromptRequest, key string) string {
+	if req.Params.Arguments == nil {
+		return ""
+	}
+	return strings.TrimSpace(req.Params.Arguments[key])
+}
+
+// validPreCommitScopes are the git-diff scopes handlePromptPreCommit
+// accepts. An empty or unrecognised scope falls back to "all" rather
+// than reaching analysis.MapGitDiff with junk.
+var validPreCommitScopes = map[string]bool{
+	"unstaged": true,
+	"staged":   true,
+	"all":      true,
+	"compare":  true,
+}
+
 func (s *Server) handlePromptPreCommit(ctx context.Context, req mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
-	scope := req.Params.Arguments["scope"]
-	if scope == "" {
+	scope := promptArg(req, "scope")
+	if !validPreCommitScopes[scope] {
 		scope = "all"
 	}
 
@@ -243,7 +266,7 @@ func (s *Server) handlePromptOrientation(ctx context.Context, _ mcp.GetPromptReq
 }
 
 func (s *Server) handlePromptSafeToChange(ctx context.Context, req mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
-	idsStr := req.Params.Arguments["ids"]
+	idsStr := promptArg(req, "ids")
 	if idsStr == "" {
 		return promptError("ids argument is required"), nil
 	}

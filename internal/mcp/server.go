@@ -1368,6 +1368,10 @@ func (s *Server) MCPServer() *server.MCPServer {
 // session context burn for token-economical clients while keeping
 // the full surface reachable through a one-call discovery hop.
 func (s *Server) addTool(tool mcp.Tool, handler server.ToolHandlerFunc) {
+	// Scrub control characters / ANSI escapes out of the tool's text
+	// before it reaches any client's tools/list rendering. tool is a
+	// value copy, so this mutates only the registered instance.
+	scrubToolText(&tool)
 	if s.lazy != nil && s.lazy.IsDeferred(tool.Name) {
 		s.lazy.Register(tool, handler)
 		return
