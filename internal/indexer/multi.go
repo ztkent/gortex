@@ -97,6 +97,15 @@ type MultiIndexer struct {
 	// dominant restart cost. After warmup it restores the cached index
 	// once via ImportVectorIndex and clears the flag.
 	skipVectorBuild bool
+
+	// embedChunkOpts is the AST sub-chunking configuration propagated
+	// to every per-repo Indexer this MultiIndexer constructs. The zero
+	// value leaves the chunker on its built-in defaults.
+	embedChunkOpts embedding.ChunkOptions
+
+	// embedMaxSymbols overrides the vector-index size cap propagated to
+	// every per-repo Indexer. Zero keeps the built-in default.
+	embedMaxSymbols int
 }
 
 // SetEmbedder installs the embedding provider every per-repo indexer
@@ -163,10 +172,46 @@ func (mi *MultiIndexer) newPerRepoIndexer(cfg config.IndexConfig) *Indexer {
 	idx.SetDeferGlobalPasses(mi.deferGlobalPasses)
 	idx.SetDeferResolve(mi.deferResolve)
 	idx.SetSkipVectorBuild(mi.skipVectorBuild)
+	idx.SetEmbeddingChunkOptions(mi.embedChunkOpts)
+	idx.SetEmbeddingMaxSymbols(mi.embedMaxSymbols)
 	if mi.resolverLSPHelper != nil {
 		idx.SetResolverLSPHelper(mi.resolverLSPHelper)
 	}
 	return idx
+}
+
+// SetEmbeddingChunkOptions installs the AST sub-chunking configuration
+// every per-repo Indexer this MultiIndexer constructs should use, and
+// re-applies it to every per-repo Indexer already built. Call before
+// IndexAll / TrackRepo so the warmup indexers pick it up.
+func (mi *MultiIndexer) SetEmbeddingChunkOptions(opts embedding.ChunkOptions) {
+	mi.mu.Lock()
+	mi.embedChunkOpts = opts
+	live := make([]*Indexer, 0, len(mi.indexers))
+	for _, idx := range mi.indexers {
+		live = append(live, idx)
+	}
+	mi.mu.Unlock()
+	for _, idx := range live {
+		idx.SetEmbeddingChunkOptions(opts)
+	}
+}
+
+// SetEmbeddingMaxSymbols installs the vector-index size cap every
+// per-repo Indexer this MultiIndexer constructs should use, and
+// re-applies it to every per-repo Indexer already built. Zero keeps
+// the built-in default.
+func (mi *MultiIndexer) SetEmbeddingMaxSymbols(n int) {
+	mi.mu.Lock()
+	mi.embedMaxSymbols = n
+	live := make([]*Indexer, 0, len(mi.indexers))
+	for _, idx := range mi.indexers {
+		live = append(live, idx)
+	}
+	mi.mu.Unlock()
+	for _, idx := range live {
+		idx.SetEmbeddingMaxSymbols(n)
+	}
 }
 
 // SetSkipVectorBuild controls whether per-repo Indexers constructed

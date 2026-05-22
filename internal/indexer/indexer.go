@@ -169,6 +169,16 @@ type Indexer struct {
 	// vectors when an embedder is present.
 	skipVectorBuild bool
 
+	// embedChunkOpts tunes the AST sub-chunking buildSearchIndex applies
+	// to large symbols before embedding. The zero value makes the
+	// chunker fall back to its package defaults.
+	embedChunkOpts embedding.ChunkOptions
+
+	// embedMaxSymbols overrides the built-in cap on how many texts the
+	// vector index will hold before buildSearchIndex skips the embed
+	// pass. Zero keeps the built-in default.
+	embedMaxSymbols int
+
 	// semanticMgr is the optional semantic enrichment manager.
 	semanticMgr *semantic.Manager
 
@@ -746,6 +756,18 @@ func (idx *Indexer) SetEmbedder(p embedding.Provider) { idx.embedder = p }
 // vector index, so the graph is not needlessly re-embedded. When false
 // (the default) an indexer with an embedder set always builds vectors.
 func (idx *Indexer) SetSkipVectorBuild(skip bool) { idx.skipVectorBuild = skip }
+
+// SetEmbeddingChunkOptions tunes the AST sub-chunking applied to large
+// symbols before embedding (threshold and window line counts). The
+// zero value leaves the chunker on its built-in defaults.
+func (idx *Indexer) SetEmbeddingChunkOptions(opts embedding.ChunkOptions) {
+	idx.embedChunkOpts = opts
+}
+
+// SetEmbeddingMaxSymbols overrides the cap on how many texts the vector
+// index will hold before buildSearchIndex skips the embed pass. Zero
+// keeps the built-in default.
+func (idx *Indexer) SetEmbeddingMaxSymbols(n int) { idx.embedMaxSymbols = n }
 
 // SetSemanticManager sets the semantic enrichment manager.
 // When set, the indexer runs semantic enrichment after resolution.
@@ -2235,6 +2257,134 @@ func embeddingDimsOrDefault(p embedding.Provider) int {
 	return 384
 }
 
+// collectEmbedTexts walks the nodes and produces the parallel texts /
+// ids slices the embedding pass consumes, plus a chunkMap recording
+// which synthetic IDs are chunks of which symbol.
+//
+// A symbol whose source span exceeds the configured chunk threshold is
+// read from disk and split into AST windows by embedding.ChunkSymbol;
+// each window contributes one text (its body, prefixed with the
+// symbol's kind + name for a little lexical grounding) under a
+// synthetic ID "<symbolID>#chunkK", and chunkMap[syntheticID] = symbolID.
+// A symbol below the threshold — or one whose file can't be read —
+// contributes a single metadata text under its own ID, exactly as the
+// pre-chunking pipeline did. The returned skipped count is the number
+// of nodes dropped by the SkipEmbed rules.
+func (idx *Indexer) collectEmbedTexts(nodes []*graph.Node) (texts []string, ids []string, chunkMap map[string]string, skipped int) {
+	chunkMap = make(map[string]string)
+	opts := idx.embedChunkOpts
+	threshold := opts.ThresholdLines
+	if threshold <= 0 {
+		threshold = embedding.DefaultChunkThresholdLines
+	}
+	// fileCache memoizes one os.ReadFile per source file — many symbols
+	// share a file, and the chunker only needs the bytes once.
+	fileCache := make(map[string][]byte)
+	readFile := func(graphPath string) []byte {
+		if cached, ok := fileCache[graphPath]; ok {
+			return cached
+		}
+		var data []byte
+		if abs := idx.ResolveFilePath(graphPath); abs != "" {
+			if b, err := os.ReadFile(abs); err == nil {
+				data = b
+			}
+		}
+		fileCache[graphPath] = data // cache misses too (nil) — don't re-stat
+		return data
+	}
+
+	for _, n := range nodes {
+		if n.Kind == graph.KindFile || n.Kind == graph.KindImport {
+			continue
+		}
+		if config.ShouldSkipEmbed(idx.config.SkipEmbed, n.Language, string(n.Kind)) {
+			skipped++
+			continue
+		}
+		sig, _ := n.Meta["signature"].(string)
+		metaText := fmt.Sprintf("%s %s %s %s", n.Kind, n.Name, sig, n.FilePath)
+
+		// Decide whether to sub-chunk: the symbol must declare a
+		// multi-line span past the threshold and its file must be
+		// readable. Anything else falls back to the metadata vector.
+		span := n.EndLine - n.StartLine + 1
+		body := extractSymbolBody(n, readFile, threshold)
+		if span <= threshold || len(body) == 0 {
+			texts = append(texts, metaText)
+			ids = append(ids, n.ID)
+			continue
+		}
+
+		windows := embedding.ChunkSymbol(body, n.Language, n.ID, opts)
+		if len(windows) <= 1 {
+			// The chunker decided one window was enough (short body,
+			// no splitter, parse failure) — embed it as a single
+			// metadata + body vector under the symbol's own ID.
+			texts = append(texts, metaText+" "+windows[0].Text)
+			ids = append(ids, n.ID)
+			continue
+		}
+		for _, w := range windows {
+			chunkID := fmt.Sprintf("%s#chunk%d", n.ID, w.WindowIndex)
+			texts = append(texts, fmt.Sprintf("%s %s %s", n.Kind, n.Name, w.Text))
+			ids = append(ids, chunkID)
+			chunkMap[chunkID] = n.ID
+		}
+	}
+	return texts, ids, chunkMap, skipped
+}
+
+// extractSymbolBody returns the source text of a symbol's span, read
+// from its file via readFile and sliced by the node's 1-based
+// StartLine..EndLine. Returns nil when the file is unreadable, the
+// line range is unusable, or the symbol is at or below the threshold
+// (small symbols never need their body — the caller embeds metadata).
+func extractSymbolBody(n *graph.Node, readFile func(string) []byte, threshold int) []byte {
+	if n.StartLine <= 0 || n.EndLine < n.StartLine {
+		return nil
+	}
+	if n.EndLine-n.StartLine+1 <= threshold {
+		return nil
+	}
+	data := readFile(n.FilePath)
+	if len(data) == 0 {
+		return nil
+	}
+	return sliceLines(data, n.StartLine, n.EndLine)
+}
+
+// sliceLines returns the bytes of the 1-based inclusive line range
+// [start,end] of src. An out-of-range request is clamped; an empty
+// result is returned for a range that lands entirely past EOF.
+func sliceLines(src []byte, start, end int) []byte {
+	if start < 1 {
+		start = 1
+	}
+	line := 1
+	startByte := -1
+	endByte := len(src)
+	for i := 0; i < len(src); i++ {
+		if line == start && startByte < 0 {
+			startByte = i
+		}
+		if src[i] == '\n' {
+			line++
+			if line == end+1 {
+				endByte = i + 1 // include the trailing newline
+				break
+			}
+		}
+	}
+	if startByte < 0 {
+		return nil
+	}
+	if endByte < startByte {
+		endByte = len(src)
+	}
+	return src[startByte:endByte]
+}
+
 // buildSearchIndex populates the search backend from the current graph.
 // When an embedder is set, also builds a vector index and wraps both
 // in a HybridBackend with RRF fusion.
@@ -2298,22 +2448,14 @@ func (idx *Indexer) buildSearchIndex() {
 	// YAML/TOML/shell config vars) are kept in the text index but
 	// excluded from the vector index — embedding them is pure cost
 	// with no semantic payoff and on big monorepos dominates RAM.
-	var texts []string
-	var ids []string
-	var skipped int
-	for _, n := range nodes {
-		if n.Kind == graph.KindFile || n.Kind == graph.KindImport {
-			continue
-		}
-		if config.ShouldSkipEmbed(idx.config.SkipEmbed, n.Language, string(n.Kind)) {
-			skipped++
-			continue
-		}
-		sig, _ := n.Meta["signature"].(string)
-		text := fmt.Sprintf("%s %s %s %s", n.Kind, n.Name, sig, n.FilePath)
-		texts = append(texts, text)
-		ids = append(ids, n.ID)
-	}
+	//
+	// A symbol whose source span exceeds the chunk threshold is split
+	// into AST windows: each window is embedded as its own vector under
+	// a synthetic ID ("<symbolID>#chunkK"), and chunkMap records the
+	// chunk → parent mapping so query-time de-chunking maps a chunk hit
+	// back to the symbol. A small symbol stays a single metadata-only
+	// vector under its own ID. chunkMap is empty when nothing was split.
+	texts, ids, chunkMap, skipped := idx.collectEmbedTexts(nodes)
 	if skipped > 0 {
 		idx.logger.Info("skipped embedding for low-value nodes",
 			zap.Int("count", skipped),
@@ -2339,16 +2481,23 @@ func (idx *Indexer) buildSearchIndex() {
 	// without changing steady-state behaviour. On a true hang the
 	// caller can still cancel the parent indexing call.
 	const (
-		embedMaxSymbols   = 100_000
-		embedChunkSize    = 500
-		embedChunkTimeout = 5 * time.Minute
+		defaultEmbedMaxSymbols = 100_000
+		embedChunkSize         = 500
+		embedChunkTimeout      = 5 * time.Minute
 	)
 
+	// The cap is over the embeddable-text count, which with AST
+	// sub-chunking can exceed the symbol count. embedding.max_symbols
+	// overrides the built-in default for users with memory headroom.
+	embedMaxSymbols := defaultEmbedMaxSymbols
+	if idx.embedMaxSymbols > 0 {
+		embedMaxSymbols = idx.embedMaxSymbols
+	}
 	if len(texts) > embedMaxSymbols {
-		idx.logger.Warn("vector index disabled — symbol count exceeds threshold",
-			zap.Int("symbols", len(texts)),
+		idx.logger.Warn("vector index disabled — embedding text count exceeds threshold",
+			zap.Int("texts", len(texts)),
 			zap.Int("threshold", embedMaxSymbols),
-			zap.String("hint", "BM25 text search remains active; raise threshold via Indexer config if you have memory headroom"))
+			zap.String("hint", "BM25 text search remains active; raise embedding.max_symbols if you have memory headroom"))
 		return
 	}
 
@@ -2416,6 +2565,12 @@ func (idx *Indexer) buildSearchIndex() {
 			vecBackend.Add(ids[i], vec)
 		}
 	}
+	// Install the chunk → parent-symbol mapping so HybridBackend can
+	// de-chunk vector hits back to symbols at query time. Empty when no
+	// symbol was large enough to split.
+	if len(chunkMap) > 0 {
+		vecBackend.SetChunkMap(chunkMap)
+	}
 
 	// Wrap text + vector into hybrid backend, swapping it in atomically
 	// so any concurrent searches keep seeing a coherent backend.
@@ -2435,7 +2590,8 @@ func (idx *Indexer) buildSearchIndex() {
 	}
 	sw.Swap(search.NewHybrid(inner, vecBackend, idx.embedder))
 	idx.logger.Info("vector index built",
-		zap.Int("symbols", vecBackend.Count()),
+		zap.Int("vectors", vecBackend.Count()),
+		zap.Int("chunk_vectors", len(chunkMap)),
 		zap.Int("dimensions", dims))
 }
 

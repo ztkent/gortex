@@ -174,6 +174,8 @@ func runMCP(cmd *cobra.Command, args []string) error {
 	}
 	if embedder != nil {
 		idx.SetEmbedder(embedder)
+		idx.SetEmbeddingChunkOptions(embeddingChunkOptions(cfg))
+		idx.SetEmbeddingMaxSymbols(cfg.Embedding.MaxSymbols)
 	}
 
 	// Locals carrying N5 hot-path wiring out of the optional
@@ -329,6 +331,8 @@ func runMCP(cmd *cobra.Command, args []string) error {
 		mi = indexer.NewMultiIndexer(g, reg, idx.Search(), cm, logger)
 		if embedder != nil {
 			mi.SetEmbedder(embedder)
+			mi.SetEmbeddingChunkOptions(embeddingChunkOptions(cfg))
+			mi.SetEmbeddingMaxSymbols(cfg.Embedding.MaxSymbols)
 		}
 		if mcpResolverLSPRegistry != nil {
 			mi.SetResolverLSPHelper(mcpResolverLSPRegistry)

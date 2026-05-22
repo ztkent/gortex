@@ -113,3 +113,16 @@ func buildConfiguredEmbedder(embCfg config.EmbeddingConfig, why string) (embeddi
 	}
 	return p, fmt.Sprintf("%s — %s", provider, why), nil
 }
+
+// embeddingChunkOptions translates the chunking knobs of an
+// EmbeddingConfig into the embedding package's ChunkOptions. Zero
+// values pass through — the chunker substitutes its own defaults.
+func embeddingChunkOptions(cfg *config.Config) embedding.ChunkOptions {
+	if cfg == nil {
+		return embedding.ChunkOptions{}
+	}
+	return embedding.ChunkOptions{
+		ThresholdLines: cfg.Embedding.ChunkThresholdLines,
+		WindowLines:    cfg.Embedding.ChunkWindowLines,
+	}
+}

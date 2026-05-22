@@ -347,6 +347,8 @@ func buildDaemonState(logger *zap.Logger) (*daemonState, error) {
 	}
 	if embedder != nil {
 		idx.SetEmbedder(embedder)
+		idx.SetEmbeddingChunkOptions(embeddingChunkOptions(cfg))
+		idx.SetEmbeddingMaxSymbols(cfg.Embedding.MaxSymbols)
 	}
 
 	cm, err := config.NewConfigManager("")
@@ -362,6 +364,8 @@ func buildDaemonState(logger *zap.Logger) (*daemonState, error) {
 		// daemon-tracked repos end up with text-only search.
 		if embedder != nil {
 			mi.SetEmbedder(embedder)
+			mi.SetEmbeddingChunkOptions(embeddingChunkOptions(cfg))
+			mi.SetEmbeddingMaxSymbols(cfg.Embedding.MaxSymbols)
 			// When the snapshot already carries the workspace vector
 			// index and its dimensionality matches the active embedder,
 			// run the warmup re-index with vector building skipped —

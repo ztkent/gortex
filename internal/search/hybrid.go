@@ -101,10 +101,39 @@ func (h *HybridBackend) searchChannels(query string, limit int) ([]SearchResult,
 		defer cancel()
 		queryVec, err := h.embedder.Embed(ctx, query)
 		if err == nil && queryVec != nil {
-			vecIDs = h.vector.Search(queryVec, limit*2)
+			// When symbols are sub-chunked, one symbol owns several
+			// vectors, so a fixed top-k under-counts distinct symbols.
+			// Over-fetch, then de-chunk down to limit*2 distinct symbols.
+			fetch := limit * 2
+			if h.vector.HasChunks() {
+				fetch = limit * 8
+			}
+			vecIDs = h.dechunkVectorIDs(h.vector.Search(queryVec, fetch), limit*2)
 		}
 	}
 	return textResults, vecIDs
+}
+
+// dechunkVectorIDs maps raw vector-search hits — which may be synthetic
+// chunk IDs — back to their parent symbol IDs, drops duplicates so a
+// symbol appears once, and truncates to want results. Rank order is
+// preserved: the first (best-ranked) chunk hit fixes the symbol's
+// position. When no symbol is chunked this is a cheap copy + truncate.
+func (h *HybridBackend) dechunkVectorIDs(rawIDs []string, want int) []string {
+	out := make([]string, 0, len(rawIDs))
+	seen := make(map[string]struct{}, len(rawIDs))
+	for _, raw := range rawIDs {
+		symbolID, _ := h.vector.ResolveChunk(raw)
+		if _, dup := seen[symbolID]; dup {
+			continue
+		}
+		seen[symbolID] = struct{}{}
+		out = append(out, symbolID)
+		if len(out) >= want {
+			break
+		}
+	}
+	return out
 }
 
 // Count returns the text backend document count.

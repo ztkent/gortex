@@ -176,6 +176,8 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	}
 	if embedder != nil {
 		idx.SetEmbedder(embedder)
+		idx.SetEmbeddingChunkOptions(embeddingChunkOptions(cfg))
+		idx.SetEmbeddingMaxSymbols(cfg.Embedding.MaxSymbols)
 	}
 
 	// N5 hot-path locals — see daemon_state.go / mcp.go for context.
@@ -330,6 +332,8 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		mi = indexer.NewMultiIndexer(g, reg, idx.Search(), cm, logger)
 		if embedder != nil {
 			mi.SetEmbedder(embedder)
+			mi.SetEmbeddingChunkOptions(embeddingChunkOptions(cfg))
+			mi.SetEmbeddingMaxSymbols(cfg.Embedding.MaxSymbols)
 		}
 		if serverResolverLSPRegistry != nil {
 			mi.SetResolverLSPHelper(serverResolverLSPRegistry)
