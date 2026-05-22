@@ -269,11 +269,15 @@ func encodeSearchSymbols(nodes []*graph.Node, total, limit int) ([]byte, error) 
 
 // encodeGetSymbolSource emits a single row carrying the node
 // metadata plus the full source. Source is escaped line-by-line.
-func encodeGetSymbolSource(node *graph.Node, source string, fromLine int, etag string) ([]byte, error) {
+func encodeGetSymbolSource(node *graph.Node, source string, fromLine int, etag, omissionKinds string) ([]byte, error) {
 	var buf bytes.Buffer
+	meta := []string{"etag", etag}
+	if omissionKinds != "" {
+		meta = append(meta, "omissions", omissionKinds)
+	}
 	enc := newGCX(&buf, "get_symbol_source",
 		[]string{"id", "kind", "name", "path", "start_line", "end_line", "from_line", "sig", "etag", "source"},
-		"etag", etag,
+		meta...,
 	)
 	if err := enc.WriteRow(
 		node.ID,
@@ -1090,7 +1094,7 @@ func encodeContractsCheck(result contracts.MatchResult) ([]byte, error) {
 // encodeEditingContext emits four sections: defines, imports,
 // called_by, calls. File metadata (id, language, etag) lives in the
 // defines-section header so there is no single-row wrapper section.
-func encodeEditingContext(file map[string]any, defines, imports, calledBy, calls []map[string]any, etag string) ([]byte, error) {
+func encodeEditingContext(file map[string]any, defines, imports, calledBy, calls []map[string]any, etag, omissionKinds string) ([]byte, error) {
 	var buf bytes.Buffer
 
 	// file_id (the path) is not echoed in the header: paths on macOS /
@@ -1102,11 +1106,17 @@ func encodeEditingContext(file map[string]any, defines, imports, calledBy, calls
 		language = fmt.Sprint(v)
 	}
 
-	defEnc := newGCX(&buf, "get_editing_context.defines",
-		[]string{"id", "kind", "name", "line", "sig"},
+	defMeta := []string{
 		"etag", etag,
 		"language", language,
 		"count", fmt.Sprintf("%d", len(defines)),
+	}
+	if omissionKinds != "" {
+		defMeta = append(defMeta, "omissions", omissionKinds)
+	}
+	defEnc := newGCX(&buf, "get_editing_context.defines",
+		[]string{"id", "kind", "name", "line", "sig"},
+		defMeta...,
 	)
 	for _, d := range defines {
 		if err := defEnc.WriteRow(

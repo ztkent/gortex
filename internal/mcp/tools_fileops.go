@@ -598,6 +598,7 @@ func (s *Server) handleReadFile(ctx context.Context, req mcp.CallToolRequest) (*
 	}
 
 	originalBytes := len(content)
+	isBinary := looksBinary(content)
 	bodiesElided := false
 	var keptSymbols []string
 	language := s.detectLanguageForPath(ctx, absPath, relPath)
@@ -656,6 +657,25 @@ func (s *Server) handleReadFile(ctx context.Context, req mcp.CallToolRequest) (*
 	}
 	if salienceTruncated {
 		result["salience_truncated"] = true
+	}
+
+	// Omission notes: tell the model what the payload deliberately
+	// leaves out or reshapes, so it does not reason about absent code.
+	omissions := pathOmissions(relPath)
+	if isBinary {
+		omissions = append(omissions, omission("binary",
+			"file is binary — the content field holds raw bytes, not source text"))
+	}
+	if bodiesElided {
+		omissions = append(omissions, omission("compressed",
+			"function and method bodies replaced with elided stubs; signatures and structure kept"))
+	}
+	if salienceTruncated {
+		omissions = append(omissions, omission("truncated",
+			"oversized source reduced toward its control-flow skeleton; runs of leaf statements collapsed"))
+	}
+	if len(omissions) > 0 {
+		result["omissions"] = omissions
 	}
 
 	etag := computeETag(result)

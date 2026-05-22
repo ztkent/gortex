@@ -86,7 +86,7 @@ func TestEncodeSearchSymbols_SkipsFileAndImport(t *testing.T) {
 func TestEncodeGetSymbolSource_EmbeddedNewlinesRoundTrip(t *testing.T) {
 	node := newTestNode("f.go::Foo", "Foo", graph.KindFunction, "f.go", 10)
 	src := "func Foo() {\n\tfmt.Println(\"x\\ty\")\n}"
-	payload, err := encodeGetSymbolSource(node, src, 9, "etag123")
+	payload, err := encodeGetSymbolSource(node, src, 9, "etag123", "")
 	require.NoError(t, err)
 
 	dec := wire.NewDecoder(strings.NewReader(string(payload)))
@@ -339,7 +339,7 @@ func TestEncodeEditingContext_FourSectionsWithFileMeta(t *testing.T) {
 	calls := []map[string]any{
 		{"id": "pkg/baz.go::Baz", "name": "Baz", "file_path": "pkg/baz.go", "start_line": 3},
 	}
-	payload, err := encodeEditingContext(file, defines, imports, calledBy, calls, "etag-xyz")
+	payload, err := encodeEditingContext(file, defines, imports, calledBy, calls, "etag-xyz", "")
 	require.NoError(t, err)
 
 	dec := wire.NewDecoder(strings.NewReader(string(payload)))

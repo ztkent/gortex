@@ -421,8 +421,16 @@ func (s *Server) handleGetEditingContext(ctx context.Context, req mcp.CallToolRe
 		return notModifiedResult(etag), nil
 	}
 
+	// Omission notes: flag vendored/generated provenance and body
+	// compression so the model doesn't over-trust the payload.
+	omissions := pathOmissions(fp)
+	if sourceCompressed != "" {
+		omissions = append(omissions, omission("compressed",
+			"source_compressed replaces function and method bodies with elided stubs; signatures kept"))
+	}
+
 	if s.isGCX(ctx, req) {
-		return s.gcxResponseWithBudget(req)(encodeEditingContext(out.File, out.Defines, out.Imports, out.CalledBy, out.Calls, etag))
+		return s.gcxResponseWithBudget(req)(encodeEditingContext(out.File, out.Defines, out.Imports, out.CalledBy, out.Calls, etag, omissionKindsCSV(omissions)))
 	}
 
 	// Add etag to response by marshaling to map.
@@ -440,6 +448,9 @@ func (s *Server) handleGetEditingContext(ctx context.Context, req mcp.CallToolRe
 		if len(keptSymbols) > 0 {
 			result["kept_symbols"] = keptSymbols
 		}
+	}
+	if len(omissions) > 0 {
+		result["omissions"] = omissions
 	}
 	if s.isTOON(ctx, req) {
 		return returnTOON(result)
@@ -660,6 +671,21 @@ func (s *Server) handleGetSymbolSource(ctx context.Context, req mcp.CallToolRequ
 		result["salience_truncated"] = true
 	}
 
+	// Omission notes: flag what the payload leaves out or reshapes so
+	// the model doesn't reason about absent code.
+	omissions := pathOmissions(node.FilePath)
+	if bodiesElided {
+		omissions = append(omissions, omission("compressed",
+			"function and method bodies replaced with elided stubs; signatures and structure kept"))
+	}
+	if salienceTruncated {
+		omissions = append(omissions, omission("truncated",
+			"oversized source reduced toward its control-flow skeleton; runs of leaf statements collapsed"))
+	}
+	if len(omissions) > 0 {
+		result["omissions"] = omissions
+	}
+
 	// ETag conditional fetch.
 	etag := computeETag(result)
 	if ifNoneMatch := req.GetString("if_none_match", ""); ifNoneMatch != "" && ifNoneMatch == etag {
@@ -668,7 +694,7 @@ func (s *Server) handleGetSymbolSource(ctx context.Context, req mcp.CallToolRequ
 	result["etag"] = etag
 
 	if s.isGCX(ctx, req) {
-		return s.gcxResponseWithBudget(req)(encodeGetSymbolSource(node, source, startLine, etag))
+		return s.gcxResponseWithBudget(req)(encodeGetSymbolSource(node, source, startLine, etag, omissionKindsCSV(omissions)))
 	}
 	if s.isTOON(ctx, req) {
 		return returnTOON(result)
