@@ -671,7 +671,7 @@ func (s *Server) detectLanguageForPath(ctx context.Context, absPath, relPath str
 		if n, _ := f.Read(buf); n > 0 {
 			head = buf[:n]
 		}
-		f.Close()
+		_ = f.Close()
 	}
 	if s.multiIndexer != nil {
 		for _, prefix := range s.multiIndexer.RepoPrefixes() {

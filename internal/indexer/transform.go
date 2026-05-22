@@ -107,7 +107,7 @@ func readSniffPrefix(path string) []byte {
 	if err != nil {
 		return nil
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	buf := make([]byte, sniffPrefixBytes)
 	n, _ := f.Read(buf)
 	if n <= 0 {

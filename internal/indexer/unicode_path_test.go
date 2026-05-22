@@ -22,8 +22,8 @@ import (
 
 // Non-ASCII filename fixtures. The accented-Latin name "café.go" is the
 // one with a genuine NFC/NFD split, so wherever a decomposed form is
-// needed the test derives it in code (decompose / decomposeKey) rather
-// than typing it, guaranteeing the two byte forms differ. CJK
+// needed the test derives it in code (decompose) rather than typing
+// it, guaranteeing the two byte forms differ. CJK
 // ideographs and Cyrillic letters have no canonical decomposition —
 // they are stable in every normal form — so they are written directly
 // (as \u escapes, keeping this source file pure-ASCII).
@@ -37,9 +37,6 @@ const (
 // decompose returns the NFD (canonically decomposed) form of s — the
 // byte form macOS APFS / HFS+ hands back for a filename.
 func decompose(s string) string { return norm.NFD.String(s) }
-
-// decomposeKey is decompose for an already-slash-form graph key.
-func decomposeKey(s string) string { return norm.NFD.String(s) }
 
 // goSrc returns a tiny compilable Go file declaring one uniquely-named
 // function, so a test can assert the symbol made it into the graph.
