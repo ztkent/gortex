@@ -257,6 +257,12 @@ type Server struct {
 	// closure wired in attachLazyRegistry). Nil only when the registry
 	// is explicitly disabled — see lazyEnabledFromEnv.
 	lazy *lazyToolRegistry
+
+	// toolBudgetOnce / toolBudgetCached memoise the project-size-scaled
+	// exploration-call budget appended to navigation tools' descriptions
+	// (see tool_budget.go). Computed once from the graph node count.
+	toolBudgetOnce   sync.Once
+	toolBudgetCached string
 }
 
 // sessionFor returns the session-scoped state for the current request.
@@ -1437,6 +1443,10 @@ func (s *Server) addTool(tool mcp.Tool, handler server.ToolHandlerFunc) {
 	// before it reaches any client's tools/list rendering. tool is a
 	// value copy, so this mutates only the registered instance.
 	scrubToolText(&tool)
+	// Embed a project-size-scaled exploration-call budget in navigation
+	// tools' descriptions so the model self-throttles. Runs before the
+	// deferred-vs-live split so a tool keeps the hint after promotion.
+	s.annotateToolBudget(&tool)
 	if s.lazy != nil && s.lazy.IsDeferred(tool.Name) {
 		s.lazy.Register(tool, handler)
 		return
