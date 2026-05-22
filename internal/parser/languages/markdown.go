@@ -78,6 +78,11 @@ func (e *MarkdownExtractor) Extract(filePath string, src []byte) (*parser.Extrac
 	}
 	walk(root)
 
+	// Second pass: emit first-class KindDoc prose-section nodes --
+	// one per heading-delimited region, carrying the section body so
+	// it is searchable, not just the heading text.
+	e.extractProseSections(root, src, filePath, fileNode.ID, result)
+
 	return result, nil
 }
 

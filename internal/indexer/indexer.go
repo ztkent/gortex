@@ -330,6 +330,21 @@ func (idx *Indexer) swappable() *search.Swappable {
 	panic("indexer: search backend is not *search.Swappable — invariant violated")
 }
 
+// searchIndexFields returns the text fields fed to the BM25 search
+// backend for a node. For an ordinary code symbol that is its
+// name, file path, and signature. For a KindDoc prose-section node
+// the body is what carries the search signal, so the section text
+// (Meta["section_text"]) is indexed alongside the breadcrumb name
+// -- a prose query then ranks the section, not just a heading match.
+func searchIndexFields(n *graph.Node) []string {
+	if n.Kind == graph.KindDoc {
+		body, _ := n.Meta["section_text"].(string)
+		return []string{n.Name, n.FilePath, body}
+	}
+	sig, _ := n.Meta["signature"].(string)
+	return []string{n.Name, n.FilePath, sig}
+}
+
 // shouldIndexForSearch reports whether a node should be added to the
 // text search index (BM25/Bleve). File and Import nodes are never
 // searchable symbols. Beyond that, config.SkipSearch filters out
@@ -340,6 +355,12 @@ func (idx *Indexer) swappable() *search.Swappable {
 // this predicate so they can't drift.
 func (idx *Indexer) shouldIndexForSearch(n *graph.Node) bool {
 	if n.Kind == graph.KindFile || n.Kind == graph.KindImport {
+		return false
+	}
+	// Prose-section nodes are searchable only when prose indexing is
+	// enabled (search.index_prose); the rest of the graph is
+	// unaffected by the toggle.
+	if n.Kind == graph.KindDoc && !idx.config.IndexProse {
 		return false
 	}
 	if config.ShouldSkipSearch(idx.config.SkipSearch, n.Language, string(n.Kind)) {
@@ -360,10 +381,11 @@ func (idx *Indexer) shouldIndexForSearch(n *graph.Node) bool {
 // the goroutine race-free against subsequent Index calls' Meta-writing
 // passes (reach.BuildIndex, ResolveTemporalCalls, ...).
 type bleveUpgradeEntry struct {
-	id   string
-	name string
-	file string
-	sig  string
+	id string
+	// fields is the BM25 text payload for the node, as produced by
+	// searchIndexFields: name + file + signature for a code symbol,
+	// name + file + section body for a KindDoc prose section.
+	fields []string
 }
 
 // snapshotBleveEntries captures every node currently eligible for the
@@ -377,8 +399,7 @@ func (idx *Indexer) snapshotBleveEntries() []bleveUpgradeEntry {
 		if !idx.shouldIndexForSearch(n) {
 			continue
 		}
-		sig, _ := n.Meta["signature"].(string)
-		out = append(out, bleveUpgradeEntry{id: n.ID, name: n.Name, file: n.FilePath, sig: sig})
+		out = append(out, bleveUpgradeEntry{id: n.ID, fields: searchIndexFields(n)})
 	}
 	return out
 }
@@ -433,7 +454,7 @@ func (idx *Indexer) upgradeSearchToBleve(snapshot []bleveUpgradeEntry) {
 	// on the same Node objects. Reading sig from a live n.Meta here
 	// would race with those writes.
 	for _, e := range snapshot {
-		blv.Add(e.id, e.name, e.file, e.sig)
+		blv.Add(e.id, e.fields...)
 	}
 
 	// Preserve the vector index if one is wired up. The previous inner
@@ -2072,8 +2093,7 @@ func (idx *Indexer) indexFile(filePath string, resolve bool) error {
 		if !idx.shouldIndexForSearch(n) {
 			continue
 		}
-		sig, _ := n.Meta["signature"].(string)
-		idx.search.Add(n.ID, n.Name, n.FilePath, sig)
+		idx.search.Add(n.ID, searchIndexFields(n)...)
 	}
 
 	if resolve {
@@ -2584,8 +2604,7 @@ func (idx *Indexer) buildSearchIndex() {
 		if !idx.shouldIndexForSearch(n) {
 			continue
 		}
-		sig, _ := n.Meta["signature"].(string)
-		idx.search.Add(n.ID, n.Name, n.FilePath, sig)
+		idx.search.Add(n.ID, searchIndexFields(n)...)
 	}
 
 	// Build vector index if embedder is available.

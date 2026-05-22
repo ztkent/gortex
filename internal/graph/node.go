@@ -155,6 +155,17 @@ const (
 	// node links to every symbol it mentions via EdgeReferences so
 	// agents can pull the right schema or spec alongside the code.
 	KindArtifact NodeKind = "artifact"
+	// KindDoc represents one heading-delimited prose section of a
+	// documentation file (Markdown). Name is the breadcrumb heading
+	// path ("README.md > Setup > Build"); Meta["section_text"] holds
+	// the section's paragraph text with markdown syntax stripped, and
+	// the BM25 search index is fed that body so a prose query ranks
+	// the right section. ID convention:
+	// "<file>::doc:<slug-of-heading-path>" -- derived from the
+	// heading path, NOT line numbers, so an incremental reindex of an
+	// edited file keeps stable section identity. The owning file
+	// links to it via EdgeDefines.
+	KindDoc NodeKind = "doc"
 )
 
 var validNodeKinds = map[NodeKind]bool{
@@ -170,7 +181,7 @@ var validNodeKinds = map[NodeKind]bool{
 	KindFixture: true, KindTodo: true, KindTeam: true,
 	KindRelease: true, KindLicense: true, KindString: true,
 	KindResource: true, KindKustomization: true, KindImage: true,
-	KindArtifact: true,
+	KindArtifact: true, KindDoc: true,
 }
 
 type Node struct {
@@ -256,6 +267,18 @@ func (n *Node) Brief() map[string]any {
 	}
 	if v, ok := n.Meta["is_test_file"].(bool); ok && v {
 		b["is_test_file"] = true
+	}
+	// A prose-section node carries no signature -- surface a short
+	// snippet of its body text so a docs search result is
+	// self-describing without a follow-up read.
+	if n.Kind == KindDoc {
+		if txt, ok := n.Meta["section_text"].(string); ok && txt != "" {
+			const snippetCap = 160
+			if len(txt) > snippetCap {
+				txt = txt[:snippetCap] + "\u2026"
+			}
+			b["section"] = txt
+		}
 	}
 	// enclosing / enclosing_id name the symbol this node is declared
 	// inside -- the receiver type of a method, the struct of a field,

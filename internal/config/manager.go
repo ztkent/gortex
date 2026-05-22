@@ -178,6 +178,10 @@ func (cm *ConfigManager) GetRepoConfig(repoPrefix string) *Config {
 	} else {
 		out.Index.SkipSearch = DefaultSkipSearch()
 	}
+	// Prose indexing toggle -- propagated from search.index_prose so
+	// the indexer (which only sees IndexConfig) can honour it.
+	// Defaults to enabled when the key is unset.
+	out.Index.IndexProse = out.Search.IndexProseEnabled()
 	return out
 }
 

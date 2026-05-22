@@ -179,6 +179,9 @@ func (s *Server) handleResourceSchema(_ context.Context, req mcp.ReadResourceReq
 - variable  — variable, constant, field, property
 - import    — resolved or unresolved import target
 - package   — package, namespace, module
+- doc       — a heading-delimited Markdown prose section; Name is the
+              breadcrumb heading path, Meta["section_text"] holds the
+              section body. Searchable via search_symbols corpus:docs.
 
 ## Edge Kinds
 - calls        — function/method A calls function/method B

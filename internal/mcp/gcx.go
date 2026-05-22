@@ -91,6 +91,12 @@ func nodeShort(n *graph.Node) string {
 	if n == nil {
 		return ""
 	}
+	// A prose-section node's ID tail is the slugified heading path
+	// ("doc:readme-setup-build") -- noise. Its Name is the readable
+	// breadcrumb, so use that.
+	if n.Kind == graph.KindDoc {
+		return n.Name
+	}
 	if idx := strings.LastIndex(n.ID, "::"); idx >= 0 {
 		return n.ID[idx+2:]
 	}
@@ -101,6 +107,19 @@ func nodeShort(n *graph.Node) string {
 // back to "" when no signature was extracted.
 func nodeSig(n *graph.Node) string {
 	if n == nil || n.Meta == nil {
+		return ""
+	}
+	// Prose-section nodes carry no signature -- surface a short
+	// snippet of the section body in the sig column instead, so a
+	// docs hit is self-describing in the compact GCX output.
+	if n.Kind == graph.KindDoc {
+		if txt, ok := n.Meta["section_text"].(string); ok && txt != "" {
+			const snippetCap = 160
+			if len(txt) > snippetCap {
+				return txt[:snippetCap] + "\u2026"
+			}
+			return txt
+		}
 		return ""
 	}
 	if s, ok := n.Meta["signature"].(string); ok {

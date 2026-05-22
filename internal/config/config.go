@@ -273,9 +273,11 @@ func DefaultSkipSearch() []SkipEmbedRule {
 		// Template/markup variables — too noisy to index by name.
 		SkipEmbedRule{Language: "liquid", Kinds: []string{"variable"}},
 		SkipEmbedRule{Language: "jinja", Kinds: []string{"variable"}},
-		// Markdown variables are headings captured by the parser —
-		// heading text already lives in the graph as file structure;
-		// full-text-indexing it adds noise without recall.
+		// Markdown code-block `variable` nodes (one per fenced block)
+		// are noise -- searched by literal name, never by concept. The
+		// rule is scoped to `variable` ONLY: the first-class KindDoc
+		// prose-section nodes (kind "doc") are deliberately left IN the
+		// search index so a prose query ranks the right section.
 		SkipEmbedRule{Language: "markdown", Kinds: []string{"variable"}},
 		// Build-system variables (Makefile/Dockerfile ARG/ENV) are
 		// typically searched by literal name, not concept.
@@ -400,6 +402,11 @@ type IndexConfig struct {
 	// reads it here. Controls what goes into BM25/Bleve — unlike
 	// SkipEmbed it doesn't affect the graph or vector index.
 	SkipSearch []SkipEmbedRule `mapstructure:"-" yaml:"-"`
+	// IndexProse is the effective prose-indexing toggle resolved from
+	// Search.IndexProse -- same `-` (not on-disk) propagation pattern
+	// as SkipSearch. When false, Markdown KindDoc prose-section nodes
+	// are kept out of the BM25 search index. Defaults to true.
+	IndexProse bool `mapstructure:"-" yaml:"-"`
 	// MaxFileSize skips files larger than this during indexing. Zero
 	// (the default) disables the cap — full coverage is preferred so
 	// generated code like `*.pb.go`, schema files, and large data
@@ -827,6 +834,13 @@ type SearchConfig struct {
 	// words; the label itself joins the class. A label that names a
 	// curated word extends that curated class rather than forking it.
 	EquivalenceExtra map[string][]string `mapstructure:"equivalence_extra" yaml:"equivalence_extra,omitempty"`
+
+	// IndexProse controls whether Markdown prose-section (KindDoc)
+	// nodes are fed into the BM25 search index, so search_symbols
+	// with corpus:"docs" / "all" can return documentation hits. On
+	// by default (a nil pointer means "on"). Set false to keep prose
+	// out of the index entirely.
+	IndexProse *bool `mapstructure:"index_prose" yaml:"index_prose,omitempty"`
 }
 
 // Keyword-soup rewrite modes for SearchConfig.KeywordSoupRewrite.
@@ -841,6 +855,13 @@ const (
 // a nil EquivalenceClasses pointer (the unset state) means enabled.
 func (c SearchConfig) EquivalenceClassesEnabled() bool {
 	return c.EquivalenceClasses == nil || *c.EquivalenceClasses
+}
+
+// IndexProseEnabled reports whether Markdown prose-section nodes are
+// indexed for search. Defaults to true -- a nil IndexProse pointer
+// (the unset state) means enabled.
+func (c SearchConfig) IndexProseEnabled() bool {
+	return c.IndexProse == nil || *c.IndexProse
 }
 
 // EffectiveKeywordSoupRewrite folds the empty default into the
@@ -954,6 +975,9 @@ func Default() *Config {
 			Workers: runtime.NumCPU(),
 			// MaxFileSize: 0 = no cap. Opt-in knob for users who want
 			// to skip large generated/minified files.
+			// Prose indexing is on by default; the ConfigManager
+			// re-derives this from search.index_prose.
+			IndexProse: true,
 		},
 		Watch: WatchConfig{
 			Enabled:    false,
