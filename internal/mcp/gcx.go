@@ -1182,6 +1182,7 @@ func encodeSmartContext(result map[string]any) ([]byte, error) {
 	symEnc := newGCX(&buf, "smart_context.symbols",
 		[]string{"id", "kind", "name", "path", "line", "sig", "source"},
 		"count", fmt.Sprintf("%d", len(symbols)),
+		"etag", str(result["etag"]),
 	)
 	for _, s := range symbols {
 		if err := symEnc.WriteRow(

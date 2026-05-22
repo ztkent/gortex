@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"sort"
 
 	"github.com/zzet/gortex/internal/elide"
 	"github.com/zzet/gortex/internal/graph"
@@ -192,36 +193,56 @@ func (s *Server) manifestSymbolSource(ctx context.Context, n *graph.Node) string
 	return src
 }
 
+// ringScanLimit bounds how many callers/callees are scanned per focus
+// symbol. It is generous on purpose: a complete caller/callee set is
+// order-independent, so a value above almost every symbol's real fan
+// keeps the ring — and therefore the pack root — deterministic.
+const ringScanLimit = 64
+
 // manifestRing collects the distance-1 adjacency ring of the focus
-// set — direct callers and callees — skipping anything already
-// placed. Order is deterministic: focus order, callers before callees.
+// set — direct callers and callees, skipping anything already placed.
+// The ring is returned sorted by node ID so the manifest, its token
+// accounting, and its pack root are all deterministic across repeated
+// calls (the call-graph traversal itself does not promise an order).
 func (s *Server) manifestRing(ctx context.Context, focus []*graph.Node, exclude map[string]bool) []ringMember {
-	var ring []ringMember
-	seen := make(map[string]bool)
+	nodes := make(map[string]*graph.Node)
+	relation := make(map[string]string)
 	sessWS, _, _ := s.sessionScope(ctx)
-	add := func(n *graph.Node, rel string) {
-		if n == nil || n.Kind == graph.KindFile || exclude[n.ID] || seen[n.ID] {
+	consider := func(n *graph.Node, rel string) {
+		if n == nil || n.Kind == graph.KindFile || exclude[n.ID] {
 			return
 		}
-		seen[n.ID] = true
-		ring = append(ring, ringMember{node: n, relation: rel})
+		if _, dup := nodes[n.ID]; dup {
+			return // first relation seen wins
+		}
+		nodes[n.ID] = n
+		relation[n.ID] = rel
 	}
 	for _, f := range focus {
 		if f == nil {
 			continue
 		}
-		callers := s.engineFor(ctx).GetCallers(f.ID, query.QueryOptions{Depth: 1, Limit: 8, Detail: "brief", WorkspaceID: sessWS})
+		callers := s.engineFor(ctx).GetCallers(f.ID, query.QueryOptions{Depth: 1, Limit: ringScanLimit, Detail: "brief", WorkspaceID: sessWS})
 		for _, cn := range callers.Nodes {
 			if cn.ID != f.ID {
-				add(cn, "caller")
+				consider(cn, "caller")
 			}
 		}
-		callees := s.engineFor(ctx).GetCallChain(f.ID, query.QueryOptions{Depth: 1, Limit: 8, Detail: "brief", WorkspaceID: sessWS})
+		callees := s.engineFor(ctx).GetCallChain(f.ID, query.QueryOptions{Depth: 1, Limit: ringScanLimit, Detail: "brief", WorkspaceID: sessWS})
 		for _, cn := range callees.Nodes {
 			if cn.ID != f.ID {
-				add(cn, "callee")
+				consider(cn, "callee")
 			}
 		}
+	}
+	ids := make([]string, 0, len(nodes))
+	for id := range nodes {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	ring := make([]ringMember, 0, len(ids))
+	for _, id := range ids {
+		ring = append(ring, ringMember{node: nodes[id], relation: relation[id]})
 	}
 	return ring
 }

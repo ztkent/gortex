@@ -168,6 +168,7 @@ func (s *Server) registerCodingTools() {
 			mcp.WithString("fidelity", mcp.Description("Set to \"graded\" to add a context_manifest: focus symbols at full source, their caller/callee adjacency ring as elided signature stubs, and the keyword-match remainder as outline-only entries — all packed under one token budget. Default \"flat\" keeps the legacy relevant_symbols shape.")),
 			mcp.WithNumber("token_budget", mcp.Description("Token ceiling for the graded-fidelity manifest (default 8000). Entries are demoted full → compressed → outline as the budget fills. Ignored unless fidelity is \"graded\".")),
 			mcp.WithBoolean("estimate", mcp.Description("Dry-run: skip assembling the payload and return only a token-cost projection (projected_tokens plus per-tier counts) for the task at the chosen fidelity, so the caller can budget before fetching the real context.")),
+			mcp.WithString("if_none_match", mcp.Description("Pack-root etag from a previous smart_context response. When the recomputed pack root matches — nothing the pack covers has changed — the tool returns not_modified instead of resending the payload, turning a repeated call on an unchanged repo into a near-zero-token no-op.")),
 			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
 			mcp.WithNumber("max_bytes", mcp.Description("Cap the marshaled response at this many bytes. The longest list is trimmed; truncation metadata rides on the response. Omit for no cap.")),
 			mcp.WithString("repo", mcp.Description("Filter results to a specific repository prefix")),
@@ -1616,12 +1617,25 @@ func (s *Server) handleSmartContext(ctx context.Context, req mcp.CallToolRequest
 	for f := range fileSet {
 		filesToEdit = append(filesToEdit, f)
 	}
+	// Sorted so the assembled pack is byte-stable across identical
+	// calls — the pack-root etag below depends on it.
+	sort.Strings(filesToEdit)
 	for _, tf := range testFiles {
 		if !fileSet[tf] {
 			filesToEdit = append(filesToEdit, tf)
 		}
 	}
 	result["files_to_edit"] = filesToEdit
+
+	// Pack-root dedup: hash the assembled context pack. When the
+	// caller passes back the pack root it already holds and nothing
+	// the pack covers has changed, return not_modified instead of
+	// retransmitting the whole payload.
+	etag := computePackRoot(result)
+	if ifNoneMatch := req.GetString("if_none_match", ""); ifNoneMatch != "" && ifNoneMatch == etag {
+		return notModifiedResult(etag), nil
+	}
+	result["etag"] = etag
 
 	if s.isGCX(ctx, req) {
 		return s.gcxResponseWithBudget(req)(encodeSmartContext(result))
