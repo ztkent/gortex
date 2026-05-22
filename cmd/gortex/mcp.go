@@ -176,6 +176,7 @@ func runMCP(cmd *cobra.Command, args []string) error {
 		idx.SetEmbedder(embedder)
 		idx.SetEmbeddingChunkOptions(embeddingChunkOptions(cfg))
 		idx.SetEmbeddingMaxSymbols(cfg.Embedding.MaxSymbols)
+		idx.SetEmbeddingAPIConcurrency(cfg.Embedding.APIConcurrency)
 	}
 
 	// Locals carrying N5 hot-path wiring out of the optional
@@ -333,6 +334,7 @@ func runMCP(cmd *cobra.Command, args []string) error {
 			mi.SetEmbedder(embedder)
 			mi.SetEmbeddingChunkOptions(embeddingChunkOptions(cfg))
 			mi.SetEmbeddingMaxSymbols(cfg.Embedding.MaxSymbols)
+			mi.SetEmbeddingAPIConcurrency(cfg.Embedding.APIConcurrency)
 		}
 		if mcpResolverLSPRegistry != nil {
 			mi.SetResolverLSPHelper(mcpResolverLSPRegistry)

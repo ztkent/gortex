@@ -349,6 +349,7 @@ func buildDaemonState(logger *zap.Logger) (*daemonState, error) {
 		idx.SetEmbedder(embedder)
 		idx.SetEmbeddingChunkOptions(embeddingChunkOptions(cfg))
 		idx.SetEmbeddingMaxSymbols(cfg.Embedding.MaxSymbols)
+		idx.SetEmbeddingAPIConcurrency(cfg.Embedding.APIConcurrency)
 	}
 
 	cm, err := config.NewConfigManager("")
@@ -366,6 +367,7 @@ func buildDaemonState(logger *zap.Logger) (*daemonState, error) {
 			mi.SetEmbedder(embedder)
 			mi.SetEmbeddingChunkOptions(embeddingChunkOptions(cfg))
 			mi.SetEmbeddingMaxSymbols(cfg.Embedding.MaxSymbols)
+			mi.SetEmbeddingAPIConcurrency(cfg.Embedding.APIConcurrency)
 			// When the snapshot already carries the workspace vector
 			// index and its dimensionality matches the active embedder,
 			// run the warmup re-index with vector building skipped —

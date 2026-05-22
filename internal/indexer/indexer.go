@@ -179,6 +179,12 @@ type Indexer struct {
 	// pass. Zero keeps the built-in default.
 	embedMaxSymbols int
 
+	// embedAPIConcurrency bounds how many embedding requests run in
+	// parallel against an API-backed embedder. Zero keeps the built-in
+	// default. Ignored for in-process embedders, which serialise on an
+	// inference mutex.
+	embedAPIConcurrency int
+
 	// semanticMgr is the optional semantic enrichment manager.
 	semanticMgr *semantic.Manager
 
@@ -768,6 +774,11 @@ func (idx *Indexer) SetEmbeddingChunkOptions(opts embedding.ChunkOptions) {
 // index will hold before buildSearchIndex skips the embed pass. Zero
 // keeps the built-in default.
 func (idx *Indexer) SetEmbeddingMaxSymbols(n int) { idx.embedMaxSymbols = n }
+
+// SetEmbeddingAPIConcurrency overrides how many embedding requests run
+// in parallel against an API-backed embedder. Zero keeps the built-in
+// default. Has no effect on in-process embedders.
+func (idx *Indexer) SetEmbeddingAPIConcurrency(n int) { idx.embedAPIConcurrency = n }
 
 // SetSemanticManager sets the semantic enrichment manager.
 // When set, the indexer runs semantic enrichment after resolution.
@@ -2385,6 +2396,164 @@ func sliceLines(src []byte, start, end int) []byte {
 	return src[startByte:endByte]
 }
 
+// defaultEmbedAPIConcurrency bounds parallel embedding requests
+// against an API-backed embedder when embedding.api_concurrency is
+// unset. Four is a conservative default that overlaps round-trips
+// without tripping typical hosted-API rate limits.
+const defaultEmbedAPIConcurrency = 4
+
+// embedChunkBatch is one unit of work for the embedding pool: the
+// texts of one chunk plus the index that fixes where its vectors land
+// in the result slice. Carrying the index makes completion order
+// irrelevant — workers write by index, never append.
+type embedChunkBatch struct {
+	index int
+	texts []string
+}
+
+// embedAllChunks embeds every text, returning the vectors in the same
+// order as texts. The work is split into batches of batchSize texts.
+//
+// For an API-backed embedder the batches run through a bounded worker
+// pool — a hosted embedding round-trip dominates index time, so
+// overlapping requests is a real speedup. In-process embedders
+// (Hugot / ONNX / GoMLX / static) serialise on an inference mutex, so
+// concurrency buys them nothing and they keep the simple serial path.
+//
+// The abort-on-any-error contract is preserved in both modes: the
+// first batch failure cancels the group and embedAllChunks returns the
+// error with no partial result, exactly as the old serial loop did.
+// embedFn already layers the deadline-halving retry on top of each
+// batch.
+func (idx *Indexer) embedAllChunks(
+	texts []string,
+	batchSize int,
+	embedFn func(ctx context.Context, items []string) ([][]float32, error),
+) ([][]float32, error) {
+	if len(texts) == 0 {
+		return nil, nil
+	}
+
+	// Split into batches up front so both the serial and parallel
+	// paths iterate the same units.
+	var batches []embedChunkBatch
+	for start := 0; start < len(texts); start += batchSize {
+		end := start + batchSize
+		if end > len(texts) {
+			end = len(texts)
+		}
+		batches = append(batches, embedChunkBatch{index: len(batches), texts: texts[start:end]})
+	}
+
+	// Per-batch result slots, pre-sized so workers write by index and
+	// completion order never matters.
+	results := make([][][]float32, len(batches))
+
+	// Only run the pool for an embedder that declares itself safe and
+	// worthwhile to call concurrently — the API-backed provider, where
+	// overlapped HTTP round-trips are a real win. In-process backends
+	// (Hugot / ONNX / GoMLX) hold an inference mutex, so a pool would
+	// only add scheduling overhead; they keep the serial path.
+	apiBacked := false
+	if c, ok := idx.embedder.(interface{ Concurrent() bool }); ok {
+		apiBacked = c.Concurrent()
+	}
+	concurrency := idx.embedAPIConcurrency
+	if concurrency <= 0 {
+		concurrency = defaultEmbedAPIConcurrency
+	}
+	if concurrency > len(batches) {
+		concurrency = len(batches)
+	}
+
+	if !apiBacked || concurrency <= 1 {
+		// Serial path — unchanged behaviour for in-process embedders.
+		ctx := context.Background()
+		for _, b := range batches {
+			vecs, err := embedFn(ctx, b.texts)
+			if err != nil {
+				return nil, err
+			}
+			results[b.index] = vecs
+		}
+		return flattenEmbedResults(results), nil
+	}
+
+	// Parallel path — bounded worker pool for an API-backed embedder.
+	// A cancellable group context means the first failure stops every
+	// in-flight worker; the indexer's existing per-batch retry still
+	// runs underneath embedFn.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	jobs := make(chan embedChunkBatch)
+	var (
+		wg      sync.WaitGroup
+		errOnce sync.Once
+		firstErr error
+	)
+	fail := func(err error) {
+		errOnce.Do(func() {
+			firstErr = err
+			cancel() // abort siblings on the first error
+		})
+	}
+
+	for w := 0; w < concurrency; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for b := range jobs {
+				if ctx.Err() != nil {
+					return // group already aborted
+				}
+				vecs, err := embedFn(ctx, b.texts)
+				if err != nil {
+					fail(err)
+					return
+				}
+				// Write into the pre-sized slot — no shared append, so
+				// no lock and order is fixed by b.index.
+				results[b.index] = vecs
+			}
+		}()
+	}
+	idx.logger.Info("embedding vector index with a concurrent API pool",
+		zap.Int("workers", concurrency),
+		zap.Int("batches", len(batches)))
+
+	for _, b := range batches {
+		if ctx.Err() != nil {
+			break // stop feeding once aborted
+		}
+		select {
+		case jobs <- b:
+		case <-ctx.Done():
+		}
+	}
+	close(jobs)
+	wg.Wait()
+
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	return flattenEmbedResults(results), nil
+}
+
+// flattenEmbedResults concatenates per-batch vector slices back into a
+// single slice aligned with the original texts order.
+func flattenEmbedResults(results [][][]float32) [][]float32 {
+	total := 0
+	for _, r := range results {
+		total += len(r)
+	}
+	out := make([][]float32, 0, total)
+	for _, r := range results {
+		out = append(out, r...)
+	}
+	return out
+}
+
 // buildSearchIndex populates the search backend from the current graph.
 // When an embedder is set, also builds a vector index and wraps both
 // in a HybridBackend with RRF fusion.
@@ -2501,57 +2670,56 @@ func (idx *Indexer) buildSearchIndex() {
 		return
 	}
 
-	// embedWithRetry runs one chunk with the standard deadline; on
-	// context-deadline failure it splits the chunk in half and retries
-	// each half once. A single slow batch shouldn't throw away every
-	// already-embedded chunk and silently demote the backend to BM25.
-	var embedWithRetry func(items []string) ([][]float32, error)
-	embedWithRetry = func(items []string) ([][]float32, error) {
-		chunkCtx, cancel := context.WithTimeout(context.Background(), embedChunkTimeout)
+	// embedWithRetry runs one chunk under ctx; on a context-deadline
+	// failure it splits the chunk in half and retries each half once.
+	// A single slow batch shouldn't throw away every already-embedded
+	// chunk and silently demote the backend to BM25. ctx is the group
+	// context, so once one chunk fails everywhere the in-flight retries
+	// here see the cancellation and stop too.
+	var embedWithRetry func(ctx context.Context, items []string) ([][]float32, error)
+	embedWithRetry = func(ctx context.Context, items []string) ([][]float32, error) {
+		chunkCtx, cancel := context.WithTimeout(ctx, embedChunkTimeout)
 		out, err := idx.embedder.EmbedBatch(chunkCtx, items)
 		cancel()
 		if err == nil {
 			return out, nil
 		}
 		// Only retry on deadline-style failures; auth/protocol errors
-		// won't get better with smaller batches.
-		if !errors.Is(err, context.DeadlineExceeded) || len(items) <= 1 {
+		// won't get better with smaller batches. A cancellation from
+		// the group context (a sibling chunk already failed) is not a
+		// retry case either.
+		if ctx.Err() != nil || !errors.Is(err, context.DeadlineExceeded) || len(items) <= 1 {
 			return nil, err
 		}
 		idx.logger.Warn("embed chunk timed out, retrying with halved batch",
 			zap.Int("size", len(items)),
 			zap.Error(err))
 		mid := len(items) / 2
-		left, lerr := embedWithRetry(items[:mid])
+		left, lerr := embedWithRetry(ctx, items[:mid])
 		if lerr != nil {
 			return nil, lerr
 		}
-		right, rerr := embedWithRetry(items[mid:])
+		right, rerr := embedWithRetry(ctx, items[mid:])
 		if rerr != nil {
 			return nil, rerr
 		}
 		return append(left, right...), nil
 	}
 
-	vectors := make([][]float32, 0, len(texts))
-	for start := 0; start < len(texts); start += embedChunkSize {
-		end := start + embedChunkSize
-		if end > len(texts) {
-			end = len(texts)
-		}
-		chunkVecs, err := embedWithRetry(texts[start:end])
-		if err != nil {
-			// A partial vector index would mis-score later queries
-			// (some symbols semantically findable, others not) — bail
-			// to text-only search rather than ship an inconsistent
-			// hybrid backend.
-			idx.logger.Warn("vector index aborted on chunk failure",
-				zap.Int("offset", start),
-				zap.Int("chunk_size", end-start),
-				zap.Error(err))
-			return
-		}
-		vectors = append(vectors, chunkVecs...)
+	// Embed every chunk. For an API-backed embedder the chunks are run
+	// through a bounded worker pool (a hosted round-trip dominates
+	// indexing time, so overlapping requests is a real win); local
+	// in-process backends serialise on an inference mutex, so they keep
+	// the simple serial path. Either way the abort-on-any-error
+	// contract holds — one chunk failure means no vector index ships.
+	vectors, err := idx.embedAllChunks(texts, embedChunkSize, embedWithRetry)
+	if err != nil {
+		// A partial vector index would mis-score later queries (some
+		// symbols semantically findable, others not) — bail to
+		// text-only search rather than ship an inconsistent hybrid
+		// backend.
+		idx.logger.Warn("vector index aborted on chunk failure", zap.Error(err))
+		return
 	}
 
 	// Detect actual dimensions from first vector.

@@ -106,6 +106,11 @@ type MultiIndexer struct {
 	// embedMaxSymbols overrides the vector-index size cap propagated to
 	// every per-repo Indexer. Zero keeps the built-in default.
 	embedMaxSymbols int
+
+	// embedAPIConcurrency bounds parallel embedding requests against an
+	// API-backed embedder, propagated to every per-repo Indexer. Zero
+	// keeps the built-in default.
+	embedAPIConcurrency int
 }
 
 // SetEmbedder installs the embedding provider every per-repo indexer
@@ -174,6 +179,7 @@ func (mi *MultiIndexer) newPerRepoIndexer(cfg config.IndexConfig) *Indexer {
 	idx.SetSkipVectorBuild(mi.skipVectorBuild)
 	idx.SetEmbeddingChunkOptions(mi.embedChunkOpts)
 	idx.SetEmbeddingMaxSymbols(mi.embedMaxSymbols)
+	idx.SetEmbeddingAPIConcurrency(mi.embedAPIConcurrency)
 	if mi.resolverLSPHelper != nil {
 		idx.SetResolverLSPHelper(mi.resolverLSPHelper)
 	}
@@ -211,6 +217,24 @@ func (mi *MultiIndexer) SetEmbeddingMaxSymbols(n int) {
 	mi.mu.Unlock()
 	for _, idx := range live {
 		idx.SetEmbeddingMaxSymbols(n)
+	}
+}
+
+// SetEmbeddingAPIConcurrency installs the parallel-embedding-request
+// cap every per-repo Indexer this MultiIndexer constructs should use,
+// and re-applies it to every per-repo Indexer already built. Zero
+// keeps the built-in default; the cap only affects API-backed
+// embedders.
+func (mi *MultiIndexer) SetEmbeddingAPIConcurrency(n int) {
+	mi.mu.Lock()
+	mi.embedAPIConcurrency = n
+	live := make([]*Indexer, 0, len(mi.indexers))
+	for _, idx := range mi.indexers {
+		live = append(live, idx)
+	}
+	mi.mu.Unlock()
+	for _, idx := range live {
+		idx.SetEmbeddingAPIConcurrency(n)
 	}
 }
 
