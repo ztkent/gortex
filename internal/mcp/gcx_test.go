@@ -28,7 +28,7 @@ func newTestNode(id, name string, kind graph.NodeKind, path string, line int) *g
 func TestEncodeSearchSymbols_HeaderAndRows(t *testing.T) {
 	nodes := []*graph.Node{
 		newTestNode("a.go::Foo", "Foo", graph.KindFunction, "a.go", 10),
-		newTestNode("b.go::Bar", "Bar", graph.KindMethod, "b.go", 20),
+		newTestNode("b.go::Decoder.Bar", "Bar", graph.KindMethod, "b.go", 20),
 	}
 	payload, err := encodeSearchSymbols(nodes, 2, 10)
 	require.NoError(t, err)
@@ -37,7 +37,7 @@ func TestEncodeSearchSymbols_HeaderAndRows(t *testing.T) {
 	h, err := dec.Header()
 	require.NoError(t, err)
 	require.Equal(t, "search_symbols", h.Tool)
-	require.Equal(t, []string{"id", "kind", "name", "path", "path_abs", "line", "sig", "is_test", "test_role", "test_runner"}, h.Fields)
+	require.Equal(t, []string{"id", "kind", "name", "path", "path_abs", "line", "sig", "enclosing", "is_test", "test_role", "test_runner"}, h.Fields)
 	require.Equal(t, "2", h.Meta["total"])
 	require.Equal(t, "false", h.Meta["truncated"])
 
@@ -52,6 +52,9 @@ func TestEncodeSearchSymbols_HeaderAndRows(t *testing.T) {
 	require.Equal(t, "", rows[0]["path_abs"], "path_abs column present, empty when the node carries no resolved absolute path")
 	require.Equal(t, "false", rows[0]["is_test"])
 	require.Equal(t, "", rows[0]["test_role"])
+	// A top-level function has no enclosing owner; a method does.
+	require.Equal(t, "", rows[0]["enclosing"], "a top-level function has no enclosing owner")
+	require.Equal(t, "Decoder", rows[1]["enclosing"], "a method reports its receiver type as the enclosing owner")
 }
 
 func TestEncodeSearchSymbols_RespectsLimitAndTruncation(t *testing.T) {

@@ -73,3 +73,37 @@ func TestSearchText(t *testing.T) {
 	bad := callTool(t, srv, "search_text", map[string]any{})
 	require.True(t, bad.IsError)
 }
+
+// TestSearchText_EnclosingSymbol confirms each literal hit is
+// decorated with the graph symbol that encloses the matching line.
+func TestSearchText_EnclosingSymbol(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.go"),
+		[]byte("package app\n\nfunc Alpha() {\n\tprintln(\"needle_here\")\n}\n"), 0o644))
+
+	g := graph.New()
+	reg := parser.NewRegistry()
+	languages.RegisterAll(reg)
+	cfg := config.Default()
+	idx := indexer.New(g, reg, cfg.Index, zap.NewNop())
+	_, err := idx.Index(dir)
+	require.NoError(t, err)
+	eng := query.NewEngine(g)
+	srv := NewServer(eng, g, idx, nil, zap.NewNop(), nil)
+
+	res := callTool(t, srv, "search_text", map[string]any{"query": "needle_here"})
+	require.False(t, res.IsError)
+	var out struct {
+		Matches []struct {
+			Path       string `json:"path"`
+			Line       int    `json:"line"`
+			SymbolID   string `json:"symbol_id"`
+			SymbolName string `json:"symbol_name"`
+		} `json:"matches"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(res.Content[0].(mcplib.TextContent).Text), &out))
+	require.Len(t, out.Matches, 1)
+	require.Equal(t, "Alpha", out.Matches[0].SymbolName,
+		"the literal lands inside func Alpha -- search_text should report it as the enclosing symbol")
+	require.NotEmpty(t, out.Matches[0].SymbolID)
+}

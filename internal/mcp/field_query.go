@@ -115,3 +115,82 @@ func applyFieldFilters(nodes []*graph.Node, fq fieldQuery) []*graph.Node {
 	}
 	return out
 }
+
+// applyPathFilter narrows a node slice to those whose file path sits
+// under one of the given sub-paths. Unlike the inline `path:` clause
+// (a loose substring match via applyFieldFilters), this is an
+// ANCHORED, slash-segment-normalised prefix test: the path
+// "services/billing" matches "services/billing/invoice.go" but NOT
+// "other/services/billingX/y.go" -- the prefix must align on a
+// directory boundary at the start of the path.
+//
+// In multi-repo mode a node's FilePath is repo-prefixed
+// ("<repo>/services/billing/x.go"); the repo prefix is stripped
+// before matching so a sub-path is expressed relative to the repo
+// root regardless of repo mode.
+//
+// An empty paths slice is a no-op (every node passes). A node passes
+// when it matches ANY of the paths.
+func applyPathFilter(nodes []*graph.Node, paths []string) []*graph.Node {
+	norm := normalizePathPrefixes(paths)
+	if len(norm) == 0 {
+		return nodes
+	}
+	out := make([]*graph.Node, 0, len(nodes))
+	for _, n := range nodes {
+		if pathMatchesAnyPrefix(repoRelativePath(n), norm) {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// repoRelativePath returns a node's file path with its repo prefix
+// stripped and back-slashes normalised to forward slashes, so a
+// sub-path filter is always expressed relative to the repo root.
+func repoRelativePath(n *graph.Node) string {
+	p := strings.ReplaceAll(n.FilePath, "\\", "/")
+	if n.RepoPrefix != "" {
+		p = strings.TrimPrefix(p, n.RepoPrefix+"/")
+	}
+	return p
+}
+
+// normalizePathPrefixes cleans a set of sub-path filters: trims
+// whitespace, normalises separators, strips a leading "./" and any
+// leading/trailing slashes, and drops empties and duplicates.
+func normalizePathPrefixes(paths []string) []string {
+	var out []string
+	seen := map[string]struct{}{}
+	for _, p := range paths {
+		p = strings.ReplaceAll(strings.TrimSpace(p), "\\", "/")
+		p = strings.TrimPrefix(p, "./")
+		p = strings.Trim(p, "/")
+		if p == "" {
+			continue
+		}
+		if _, dup := seen[p]; dup {
+			continue
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+	return out
+}
+
+// pathMatchesAnyPrefix reports whether a repo-relative file path sits
+// under any of the (already-normalised) sub-path prefixes. A prefix
+// matches when the path equals it exactly or continues past it at a
+// slash boundary -- so "services/billing" matches
+// "services/billing/x.go" but not "services/billingX/x.go".
+func pathMatchesAnyPrefix(path string, prefixes []string) bool {
+	for _, pre := range prefixes {
+		if path == pre {
+			return true
+		}
+		if strings.HasPrefix(path, pre+"/") {
+			return true
+		}
+	}
+	return false
+}

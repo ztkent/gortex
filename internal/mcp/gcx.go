@@ -238,7 +238,7 @@ func encodeSearchSymbols(nodes []*graph.Node, total, limit int) ([]byte, error) 
 	}
 	var buf bytes.Buffer
 	enc := newGCX(&buf, "search_symbols",
-		[]string{"id", "kind", "name", "path", "path_abs", "line", "sig", "is_test", "test_role", "test_runner"},
+		[]string{"id", "kind", "name", "path", "path_abs", "line", "sig", "enclosing", "is_test", "test_role", "test_runner"},
 		"total", fmt.Sprintf("%d", total),
 		"truncated", boolString(truncated),
 	)
@@ -249,6 +249,7 @@ func encodeSearchSymbols(nodes []*graph.Node, total, limit int) ([]byte, error) 
 		if shouldSkipGraphNode(n) {
 			continue
 		}
+		_, encName := graph.EnclosingFromID(n.ID, n.Kind)
 		if err := enc.WriteRow(
 			n.ID,
 			string(n.Kind),
@@ -257,6 +258,7 @@ func encodeSearchSymbols(nodes []*graph.Node, total, limit int) ([]byte, error) 
 			n.AbsoluteFilePath,
 			n.StartLine,
 			nodeSig(n),
+			encName,
 			nodeIsTest(n),
 			nodeTestRole(n),
 			nodeTestRunner(n),

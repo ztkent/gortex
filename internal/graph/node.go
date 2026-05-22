@@ -1,5 +1,7 @@
 package graph
 
+import "strings"
+
 type NodeKind string
 
 const (
@@ -255,12 +257,86 @@ func (n *Node) Brief() map[string]any {
 	if v, ok := n.Meta["is_test_file"].(bool); ok && v {
 		b["is_test_file"] = true
 	}
+	// enclosing / enclosing_id name the symbol this node is declared
+	// inside -- the receiver type of a method, the struct of a field,
+	// the enum of a member, the function around a closure. Derived
+	// from the ID convention; absent for top-level symbols. Lets a
+	// search result say "Parse on type Decoder" without a follow-up
+	// call.
+	if eid, ename := EnclosingFromID(n.ID, n.Kind); ename != "" {
+		b["enclosing"] = ename
+		b["enclosing_id"] = eid
+	}
 	// AbsoluteFilePath is populated only on the per-response copies the
 	// MCP layer builds (see Server.withAbsPaths); empty on canonical nodes.
 	if n.AbsoluteFilePath != "" {
 		b["absolute_file_path"] = n.AbsoluteFilePath
 	}
 	return b
+}
+
+// EnclosingFromID derives a node's enclosing owner purely from its
+// ID and kind -- no graph access. It covers the kinds whose ID
+// convention embeds the owner:
+//
+//   - method  "<file>::<Owner>.<method>"      -> owner "<file>::<Owner>"
+//   - field   "<file>::<owner>.<field>"       -> owner "<file>::<owner>"
+//   - enum    "<file>::<EnumType>.<Member>"   -> owner "<file>::<EnumType>"
+//   - closure "<file>::<enclosing>#closure@N" -> owner "<file>::<enclosing>"
+//
+// For every other kind -- and for a method/field/closure whose ID
+// carries no owner segment -- both return values are empty. The
+// returned name is the owner's short (last-segment) name.
+//
+// This is the standalone derivation Node.Brief uses; callers with a
+// graph reader should prefer the richer EdgeMemberOf-based lookup,
+// which also resolves owners the ID does not name.
+func EnclosingFromID(id string, kind NodeKind) (ownerID, ownerName string) {
+	sep := strings.Index(id, "::")
+	if sep < 0 {
+		return "", ""
+	}
+	file, symbol := id[:sep], id[sep+2:]
+	switch kind {
+	case KindClosure:
+		// "<enclosing>#closure@<line>" -- the owner is the segment
+		// before the first '#'.
+		if h := strings.IndexByte(symbol, '#'); h > 0 {
+			owner := symbol[:h]
+			return file + "::" + owner, lastIDSegment(owner)
+		}
+		return "", ""
+	case KindMethod, KindField, KindEnumMember:
+		// "<Owner>.<member>" -- the owner is everything before the
+		// last '.'.
+		if dot := strings.LastIndexByte(symbol, '.'); dot > 0 {
+			owner := symbol[:dot]
+			return file + "::" + owner, lastIDSegment(owner)
+		}
+		return "", ""
+	default:
+		return "", ""
+	}
+}
+
+// lastIDSegment returns the last dotted segment of an identifier --
+// its human-facing short name.
+func lastIDSegment(s string) string {
+	if i := strings.LastIndexByte(s, '.'); i >= 0 {
+		return s[i+1:]
+	}
+	return s
+}
+
+// EnclosingShortName returns the human-facing short name of an
+// owner identifier or node ID -- its last "::"- or "."-separated
+// segment. Used when only an owner ID string is in hand and no node
+// was resolved.
+func EnclosingShortName(s string) string {
+	if i := strings.LastIndex(s, "::"); i >= 0 {
+		s = s[i+2:]
+	}
+	return lastIDSegment(s)
 }
 
 func ValidNodeKind(k NodeKind) bool {

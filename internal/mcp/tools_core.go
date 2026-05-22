@@ -60,14 +60,16 @@ func (s *Server) isTOON(ctx context.Context, req mcp.CallToolRequest) bool {
 
 // toonNodeRow is a TOON-optimized flat representation of a graph node.
 type toonNodeRow struct {
-	ID         string `toon:"id"`
-	Kind       string `toon:"kind"`
-	Name       string `toon:"name"`
-	FilePath   string `toon:"file_path"`
-	StartLine  int    `toon:"start_line"`
-	IsTest     bool   `toon:"is_test"`
-	TestRole   string `toon:"test_role"`
-	TestRunner string `toon:"test_runner,omitempty"`
+	ID          string `toon:"id"`
+	Kind        string `toon:"kind"`
+	Name        string `toon:"name"`
+	FilePath    string `toon:"file_path"`
+	StartLine   int    `toon:"start_line"`
+	Enclosing   string `toon:"enclosing,omitempty"`
+	EnclosingID string `toon:"enclosing_id,omitempty"`
+	IsTest      bool   `toon:"is_test"`
+	TestRole    string `toon:"test_role"`
+	TestRunner  string `toon:"test_runner,omitempty"`
 }
 
 // toonEdgeRow is a TOON-optimized flat representation of a graph edge.
@@ -118,15 +120,18 @@ func nodesToTOONRows(nodes []*graph.Node) []toonNodeRow {
 		isTest, _ := n.Meta["is_test"].(bool)
 		testRole, _ := n.Meta["test_role"].(string)
 		testRunner, _ := n.Meta["test_runner"].(string)
+		encID, encName := graph.EnclosingFromID(n.ID, n.Kind)
 		rows = append(rows, toonNodeRow{
-			ID:         n.ID,
-			Kind:       string(n.Kind),
-			Name:       n.Name,
-			FilePath:   n.FilePath,
-			StartLine:  n.StartLine,
-			IsTest:     isTest,
-			TestRole:   testRole,
-			TestRunner: testRunner,
+			ID:          n.ID,
+			Kind:        string(n.Kind),
+			Name:        n.Name,
+			FilePath:    n.FilePath,
+			StartLine:   n.StartLine,
+			Enclosing:   encName,
+			EnclosingID: encID,
+			IsTest:      isTest,
+			TestRole:    testRole,
+			TestRunner:  testRunner,
 		})
 	}
 	return rows
@@ -577,7 +582,13 @@ func compactNodes(nodes []*graph.Node) string {
 		if n.Kind == graph.KindFile || n.Kind == graph.KindImport {
 			continue
 		}
-		fmt.Fprintf(&b, "%s %s %s:%d\n", n.Kind, qualifiedName(n), n.FilePath, n.StartLine)
+		fmt.Fprintf(&b, "%s %s %s:%d", n.Kind, qualifiedName(n), n.FilePath, n.StartLine)
+		// Append the enclosing owner when the node is declared inside
+		// one -- a method on a type, a field of a struct, a closure.
+		if _, ename := graph.EnclosingFromID(n.ID, n.Kind); ename != "" {
+			fmt.Fprintf(&b, " (in %s)", ename)
+		}
+		b.WriteByte('\n')
 	}
 	return b.String()
 }
@@ -848,6 +859,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithString("ref", mcp.Description("Filter results to repositories with a specific reference tag")),
 			mcp.WithString("min_tier", mcp.Description(minTierParamDescription)),
 			mcp.WithBoolean("exclude_tests", mcp.Description("Drop references originating in test functions (set true to see only production usages)")),
+			mcp.WithString("group_by", mcp.Description("Set to \"file\" to bucket the usages by the file each reference originates in -- each group carries the per-file use count and the enclosing symbol of every reference. Omit for the default flat result.")),
 		),
 		s.handleFindUsages,
 	)
@@ -1735,10 +1747,86 @@ func (s *Server) handleFindUsages(ctx context.Context, req mcp.CallToolRequest) 
 	if len(sg.Edges) == 0 {
 		sg.Caveat = graph.CaveatForZeroEdge(s.graph, id)
 	}
+	// group_by:"file" buckets the usages by the file each reference
+	// originates in -- an opt-in shape for callers that want a
+	// per-file rollup. The flat SubGraph stays the default so
+	// existing consumers are unaffected.
+	if gb := strings.ToLower(strings.TrimSpace(req.GetString("group_by", ""))); gb == "file" {
+		return s.respondJSONOrTOON(ctx, req, groupUsagesByFile(sg))
+	}
 	if s.isGCX(ctx, req) {
 		return s.gcxResponseWithBudget(req)(encodeFindUsages(sg))
 	}
 	return s.returnSubGraph(ctx, req, sg)
+}
+
+// usageFileGroup is one file's worth of references from a
+// group_by:"file" find_usages response.
+type usageFileGroup struct {
+	File  string           `json:"file"`
+	Count int              `json:"count"`
+	Uses  []usageGroupItem `json:"uses"`
+}
+
+// usageGroupItem is one reference inside a usageFileGroup -- the
+// line it sits on plus the enclosing symbol.
+type usageGroupItem struct {
+	Line       int    `json:"line"`
+	EdgeKind   string `json:"edge_kind"`
+	SymbolID   string `json:"symbol_id,omitempty"`
+	SymbolName string `json:"symbol_name,omitempty"`
+}
+
+// groupUsagesByFile buckets a find_usages SubGraph by the file each
+// reference originates in. The `from` endpoint of every edge is the
+// usage site; its file path is the bucket key and the from-node's
+// name/ID is the enclosing symbol. Files are sorted by descending
+// use count, then by path for a stable order.
+func groupUsagesByFile(sg *query.SubGraph) map[string]any {
+	nodeByID := make(map[string]*graph.Node, len(sg.Nodes))
+	for _, n := range sg.Nodes {
+		nodeByID[n.ID] = n
+	}
+	groups := map[string]*usageFileGroup{}
+	for _, e := range sg.Edges {
+		from := nodeByID[e.From]
+		file := e.FilePath
+		if file == "" && from != nil {
+			file = from.FilePath
+		}
+		if file == "" {
+			file = "(unknown)"
+		}
+		g := groups[file]
+		if g == nil {
+			g = &usageFileGroup{File: file}
+			groups[file] = g
+		}
+		item := usageGroupItem{Line: e.Line, EdgeKind: string(e.Kind)}
+		if from != nil {
+			item.SymbolID = from.ID
+			item.SymbolName = from.Name
+		}
+		g.Uses = append(g.Uses, item)
+		g.Count++
+	}
+	out := make([]*usageFileGroup, 0, len(groups))
+	for _, g := range groups {
+		out = append(out, g)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Count != out[j].Count {
+			return out[i].Count > out[j].Count
+		}
+		return out[i].File < out[j].File
+	})
+	return map[string]any{
+		"grouped_by": "file",
+		"file_count": len(out),
+		"total_uses": len(sg.Edges),
+		"groups":     out,
+		"truncated":  sg.Truncated,
+	}
 }
 
 func (s *Server) handleGetCluster(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
