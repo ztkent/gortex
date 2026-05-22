@@ -74,6 +74,9 @@ func (s *Server) wrapToolHandler(h mcpserver.ToolHandlerFunc) mcpserver.ToolHand
 	// sees the real arguments and the real result (see sanitize.go).
 	h = s.sanitizeToolHandler(h)
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		// Tolerate hallucinated / mistyped parameter names before the
+		// handler reads arguments (e.g. "symbol" accepted as "id").
+		s.reconcileToolParams(&req)
 		view, err := s.buildOverlayViewForCtx(ctx)
 		if err != nil {
 			// Drift surfaces as a structured tool error result so the
