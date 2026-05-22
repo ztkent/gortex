@@ -115,22 +115,21 @@ func (s *Server) wrapToolHandler(h mcpserver.ToolHandlerFunc) mcpserver.ToolHand
 	}
 }
 
-// overlaySHAMatches re-computes the git blob SHA of an on-disk file
-// and compares it to the SHA the editor recorded at didOpen time.
-// Matches `git ls-files -s` / `git hash-object` output (i.e. blob
-// header `blob <len>\0<content>` then sha1), so editors can pass the
-// SHA they already have without any client-side reformatting.
-// Returns false on any read error: the safer default is "drift" —
-// the client re-reads and resubmits.
-func overlaySHAMatches(absPath, expected string) bool {
-	expected = strings.ToLower(strings.TrimSpace(expected))
-	if expected == "" {
-		return true
-	}
-	data, err := os.ReadFile(absPath)
-	if err != nil {
-		return false
-	}
+// errBaseSHADrift is the structured drift error returned by the
+// disk-write edit tools (edit_file / edit_symbol / write_file) when
+// the caller-supplied base_sha does not match the current on-disk
+// blob SHA. The message mirrors daemon.ErrOverlayDrift so callers
+// can pattern-match on a single substring across overlay-push and
+// plain-write paths: "re-read and resubmit".
+const errBaseSHADrift = "base_sha mismatch — re-read and resubmit"
+
+// gitBlobSHA computes the git blob SHA-1 of the given content. The
+// hash matches `git ls-files -s` / `git hash-object` output (i.e.
+// sha1 of "blob <len>\0<content>"), so editors can pass the SHA they
+// already have without any client-side reformatting. The returned
+// string is lowercase hex. This is the canonical drift-anchor helper
+// shared by overlay_push and the disk-write edit tools.
+func gitBlobSHA(data []byte) string {
 	h := sha1.New()
 	// hash.Hash.Write never errors; fmt.Fprintf returns (n, err)
 	// because it's the io.Writer interface, but the underlying
@@ -139,7 +138,29 @@ func overlaySHAMatches(absPath, expected string) bool {
 	// handling.
 	_, _ = fmt.Fprintf(h, "blob %d\x00", len(data))
 	_, _ = h.Write(data)
-	return hex.EncodeToString(h.Sum(nil)) == expected
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// normalizeExpectedSHA lowercases and trims a caller-supplied
+// base_sha so comparisons are case- and whitespace-insensitive.
+func normalizeExpectedSHA(s string) string {
+	return strings.ToLower(strings.TrimSpace(s))
+}
+
+// overlaySHAMatches re-computes the git blob SHA of an on-disk file
+// and compares it to the SHA the editor recorded at didOpen time.
+// Returns false on any read error: the safer default is "drift" —
+// the client re-reads and resubmits.
+func overlaySHAMatches(absPath, expected string) bool {
+	expected = normalizeExpectedSHA(expected)
+	if expected == "" {
+		return true
+	}
+	data, err := os.ReadFile(absPath)
+	if err != nil {
+		return false
+	}
+	return gitBlobSHA(data) == expected
 }
 
 // _ keeps sync.Mutex referenced by the package even after future

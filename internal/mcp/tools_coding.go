@@ -107,10 +107,11 @@ func (s *Server) registerCodingTools() {
 
 	s.addTool(
 		mcp.NewTool("edit_symbol",
-			mcp.WithDescription("Edit a symbol's source code directly by ID — no Read needed. Gortex resolves the file and line range, finds the old_source fragment, replaces it with new_source, and writes the file. Eliminates the Read→Edit roundtrip for ~80% of edits."),
+			mcp.WithDescription("Edit a symbol's source code directly by ID — no Read needed. Gortex resolves the file and line range, finds the old_source fragment, replaces it with new_source, and writes the file. Eliminates the Read→Edit roundtrip for ~80% of edits. Pass base_sha to guard against stale writes: if the on-disk file no longer matches the SHA you observed at read time, the call fails with `base_sha mismatch — re-read and resubmit` and the file is untouched. On success the response carries new_sha so you can pipeline the next edit without re-reading."),
 			mcp.WithString("id", mcp.Required(), mcp.Description("Symbol ID (e.g. server.go::NewServer)")),
 			mcp.WithString("old_source", mcp.Required(), mcp.Description("Exact source fragment to replace (must be unique within the symbol)")),
 			mcp.WithString("new_source", mcp.Required(), mcp.Description("Replacement source fragment")),
+			mcp.WithString("base_sha", mcp.Description("Optional git blob SHA-1 the caller observed at read time. When set, the call refuses to write if the on-disk file's current SHA differs (drift guard against silent clobbers).")),
 		),
 		s.handleEditSymbol,
 	)
@@ -130,22 +131,24 @@ func (s *Server) registerCodingTools() {
 
 	s.addTool(
 		mcp.NewTool("edit_file",
-			mcp.WithDescription("Edit any file (markdown, config, spec, template, source) by exact string replacement — no Read needed. Accepts absolute paths or paths relative to the indexed repo root. Writes atomically (temp+rename) and re-indexes the file so the graph stays fresh. Pass dry_run=true to validate the replacement without writing. Complements edit_symbol for non-code files that have no symbol ID."),
+			mcp.WithDescription("Edit any file (markdown, config, spec, template, source) by exact string replacement — no Read needed. Accepts absolute paths or paths relative to the indexed repo root. Writes atomically (temp+rename) and re-indexes the file so the graph stays fresh. Pass dry_run=true to validate the replacement without writing. Pass base_sha to guard against stale writes: if the on-disk file no longer matches the SHA you observed at read time, the call fails with `base_sha mismatch — re-read and resubmit` and the file is untouched. On success the response carries new_sha so you can pipeline the next edit without re-reading. Complements edit_symbol for non-code files that have no symbol ID."),
 			mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path, or repo-prefixed / repo-root-relative path")),
 			mcp.WithString("old_string", mcp.Required(), mcp.Description("Exact text to replace (must be unique unless replace_all=true)")),
 			mcp.WithString("new_string", mcp.Required(), mcp.Description("Replacement text")),
 			mcp.WithBoolean("replace_all", mcp.Description("Replace every occurrence instead of requiring uniqueness (default: false)")),
 			mcp.WithBoolean("dry_run", mcp.Description("Validate the replacement and report what would change without writing (default: false)")),
+			mcp.WithString("base_sha", mcp.Description("Optional git blob SHA-1 the caller observed at read time. When set, the call refuses to write if the on-disk file's current SHA differs (drift guard against silent clobbers).")),
 		),
 		s.handleEditFile,
 	)
 
 	s.addTool(
 		mcp.NewTool("write_file",
-			mcp.WithDescription("Create a new file or overwrite an existing one with the given content — no Read needed. Accepts absolute paths or paths relative to the indexed repo root. Writes atomically (temp+rename) and re-indexes the file so the graph stays fresh. Pass dry_run=true to report what would happen without writing. Use for new docs, configs, specs, scaffolded files; prefer edit_symbol or edit_file when a symbol/string target exists."),
+			mcp.WithDescription("Create a new file or overwrite an existing one with the given content — no Read needed. Accepts absolute paths or paths relative to the indexed repo root. Writes atomically (temp+rename) and re-indexes the file so the graph stays fresh. Pass dry_run=true to report what would happen without writing. Pass base_sha when overwriting to guard against stale writes: if the on-disk file no longer matches the SHA you observed at read time (or has been deleted), the call fails with `base_sha mismatch — re-read and resubmit` and the file is untouched. On success the response carries new_sha so you can pipeline the next edit without re-reading. Use for new docs, configs, specs, scaffolded files; prefer edit_symbol or edit_file when a symbol/string target exists."),
 			mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path, or repo-prefixed / repo-root-relative path")),
 			mcp.WithString("content", mcp.Required(), mcp.Description("Full file content")),
 			mcp.WithBoolean("dry_run", mcp.Description("Report would_create / would_overwrite without writing (default: false)")),
+			mcp.WithString("base_sha", mcp.Description("Optional git blob SHA-1 the caller observed at read time. When set, write_file refuses to overwrite a divergent on-disk file (or write to a path the caller expected to exist but no longer does). Drift guard against silent clobbers on existing files; leave empty when creating a new file.")),
 		),
 		s.handleWriteFile,
 	)
@@ -1910,6 +1913,7 @@ func (s *Server) handleEditSymbol(ctx context.Context, req mcp.CallToolRequest) 
 	if err != nil {
 		return mcp.NewToolResultError("new_source is required"), nil
 	}
+	baseSHA := normalizeExpectedSHA(req.GetString("base_sha", ""))
 
 	if oldSource == newSource {
 		return mcp.NewToolResultError("old_source and new_source are identical"), nil
@@ -1930,10 +1934,16 @@ func (s *Server) handleEditSymbol(ctx context.Context, req mcp.CallToolRequest) 
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 
-	// Read the entire file.
+	// Read the entire file ONCE — both the drift check and the
+	// patch operate on the same byte snapshot so a concurrent
+	// writer cannot wedge a diff between the SHA we accept and the
+	// content we splice into.
 	content, err := os.ReadFile(absPath)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("could not read file: %v", err)), nil
+	}
+	if baseSHA != "" && gitBlobSHA(content) != baseSHA {
+		return mcp.NewToolResultError(errBaseSHADrift), nil
 	}
 
 	fileStr := string(content)
@@ -2015,9 +2025,10 @@ func (s *Server) handleEditSymbol(ctx context.Context, req mcp.CallToolRequest) 
 	editStart := symbolStart + offset
 	editEnd := editStart + len(oldSource)
 	newContent := fileStr[:editStart] + newSource + fileStr[editEnd:]
+	newContentBytes := []byte(newContent)
 
 	// Write the file.
-	if err := os.WriteFile(absPath, []byte(newContent), 0o644); err != nil {
+	if err := os.WriteFile(absPath, newContentBytes, 0o644); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("could not write file: %v", err)), nil
 	}
 	sess := s.sessionFor(ctx)
@@ -2035,6 +2046,7 @@ func (s *Server) handleEditSymbol(ctx context.Context, req mcp.CallToolRequest) 
 		"lines_after":  newLines,
 		"start_line":   node.StartLine,
 		"status":       "applied",
+		"new_sha":      gitBlobSHA(newContentBytes),
 	})
 }
 

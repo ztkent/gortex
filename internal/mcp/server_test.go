@@ -99,6 +99,7 @@ func findAndCallHandler(srv *Server, name string, ctx context.Context, req mcpli
 		"get_untested_symbols":  srv.handleGetUntestedSymbols,
 		"winnow_symbols":        srv.handleWinnowSymbols,
 		"edit_file":             srv.handleEditFile,
+		"edit_symbol":           srv.handleEditSymbol,
 		"write_file":            srv.handleWriteFile,
 		"read_file":             srv.handleReadFile,
 		"flow_between":          srv.handleFlowBetween,

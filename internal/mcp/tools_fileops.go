@@ -395,6 +395,7 @@ func (s *Server) handleEditFile(ctx context.Context, req mcp.CallToolRequest) (*
 	}
 	replaceAll := req.GetBool("replace_all", false)
 	dryRun := req.GetBool("dry_run", false)
+	baseSHA := normalizeExpectedSHA(req.GetString("base_sha", ""))
 
 	absPath, relPath, resolveErr := s.resolveFilePath(rawPath)
 	if resolveErr != nil {
@@ -404,6 +405,12 @@ func (s *Server) handleEditFile(ctx context.Context, req mcp.CallToolRequest) (*
 	content, err := os.ReadFile(absPath)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("could not read file: %v", err)), nil
+	}
+	// Drift guard: when the caller observed the file at base_sha,
+	// refuse to apply on top of a divergent on-disk SHA. Match the
+	// overlay-push error shape so callers can re-read and retry.
+	if baseSHA != "" && gitBlobSHA(content) != baseSHA {
+		return mcp.NewToolResultError(errBaseSHADrift), nil
 	}
 	fileStr := string(content)
 
@@ -428,6 +435,9 @@ func (s *Server) handleEditFile(ctx context.Context, req mcp.CallToolRequest) (*
 		replacements = 1
 	}
 
+	newContentBytes := []byte(newContent)
+	newSHA := gitBlobSHA(newContentBytes)
+
 	if dryRun {
 		// Dry-run: validate everything but skip the write + reindex.
 		// Returns the same shape so callers can branch on dry_run for a
@@ -437,8 +447,9 @@ func (s *Server) handleEditFile(ctx context.Context, req mcp.CallToolRequest) (*
 			"status":        "would_apply",
 			"dry_run":       true,
 			"replacements":  replacements,
-			"bytes_written": len(newContent),
+			"bytes_written": len(newContentBytes),
 			"reindexed":     false,
+			"new_sha":       newSHA,
 		})
 	}
 
@@ -446,7 +457,7 @@ func (s *Server) handleEditFile(ctx context.Context, req mcp.CallToolRequest) (*
 	if info, err := os.Stat(absPath); err == nil {
 		perm = info.Mode().Perm()
 	}
-	if err := agents.AtomicWriteFile(absPath, []byte(newContent), perm); err != nil {
+	if err := agents.AtomicWriteFile(absPath, newContentBytes, perm); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("could not write file: %v", err)), nil
 	}
 
@@ -459,8 +470,9 @@ func (s *Server) handleEditFile(ctx context.Context, req mcp.CallToolRequest) (*
 		"path":          relPath,
 		"status":        "applied",
 		"replacements":  replacements,
-		"bytes_written": len(newContent),
+		"bytes_written": len(newContentBytes),
 		"reindexed":     reindexed,
+		"new_sha":       newSHA,
 	})
 }
 
@@ -474,6 +486,7 @@ func (s *Server) handleWriteFile(ctx context.Context, req mcp.CallToolRequest) (
 		return mcp.NewToolResultError("content is required"), nil
 	}
 	dryRun := req.GetBool("dry_run", false)
+	baseSHA := normalizeExpectedSHA(req.GetString("base_sha", ""))
 
 	absPath, relPath, resolveErr := s.resolveFilePath(rawPath)
 	if resolveErr != nil {
@@ -482,13 +495,35 @@ func (s *Server) handleWriteFile(ctx context.Context, req mcp.CallToolRequest) (
 
 	status := "created"
 	perm := os.FileMode(0o644)
+	fileExists := false
 	if info, err := os.Stat(absPath); err == nil {
 		if info.IsDir() {
 			return mcp.NewToolResultError(fmt.Sprintf("path %q is a directory", rawPath)), nil
 		}
 		status = "overwritten"
 		perm = info.Mode().Perm()
+		fileExists = true
 	}
+
+	// Drift guard: when the caller observed the file at base_sha,
+	// refuse to overwrite a divergent on-disk file. If the caller
+	// passed base_sha for a file that no longer exists, that is
+	// also drift (the file they read is gone).
+	if baseSHA != "" {
+		if !fileExists {
+			return mcp.NewToolResultError(errBaseSHADrift), nil
+		}
+		existing, readErr := os.ReadFile(absPath)
+		if readErr != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("could not read file for drift check: %v", readErr)), nil
+		}
+		if gitBlobSHA(existing) != baseSHA {
+			return mcp.NewToolResultError(errBaseSHADrift), nil
+		}
+	}
+
+	contentBytes := []byte(content)
+	newSHA := gitBlobSHA(contentBytes)
 
 	if dryRun {
 		// Dry-run: skip the write + reindex but report what would happen.
@@ -500,12 +535,13 @@ func (s *Server) handleWriteFile(ctx context.Context, req mcp.CallToolRequest) (
 			"path":          relPath,
 			"status":        dryStatus,
 			"dry_run":       true,
-			"bytes_written": len(content),
+			"bytes_written": len(contentBytes),
 			"reindexed":     false,
+			"new_sha":       newSHA,
 		})
 	}
 
-	if err := agents.AtomicWriteFile(absPath, []byte(content), perm); err != nil {
+	if err := agents.AtomicWriteFile(absPath, contentBytes, perm); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("could not write file: %v", err)), nil
 	}
 
@@ -517,8 +553,9 @@ func (s *Server) handleWriteFile(ctx context.Context, req mcp.CallToolRequest) (
 	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"path":          relPath,
 		"status":        status,
-		"bytes_written": len(content),
+		"bytes_written": len(contentBytes),
 		"reindexed":     reindexed,
+		"new_sha":       newSHA,
 	})
 }
 
