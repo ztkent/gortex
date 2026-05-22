@@ -3,6 +3,7 @@ package trigram
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"testing"
 )
 
@@ -129,5 +130,72 @@ func TestSearcher_GrepVerifiesTrigramCandidate(t *testing.T) {
 	s := Build(root, []string{"f.go"})
 	if hits := s.Grep("abcabc", 0); len(hits) != 0 {
 		t.Errorf("trigram false positive leaked past the literal scan: %+v", hits)
+	}
+}
+
+func TestSearcher_GrepRegexp(t *testing.T) {
+	root := t.TempDir()
+	mk(t, root, "a.go", "package a\n\nfunc Alpha() {}\nfunc alphabet() {}\n")
+	mk(t, root, "sub/b.go", "package sub\n\nfunc Beta() {}\n")
+	mk(t, root, "c.go", "package c\n\nvar Counter = 1\n")
+	s := Build(root, []string{"a.go", "sub/b.go", "c.go"})
+
+	re := regexp.MustCompile(`func [A-Z]\w+\(\)`)
+	hits := s.GrepRegexp(re, []string{"func "}, "", 0)
+	// Matches: Alpha (a.go) and Beta (sub/b.go); alphabet starts lowercase.
+	if len(hits) != 2 {
+		t.Fatalf("GrepRegexp = %d hits, want 2: %+v", len(hits), hits)
+	}
+	if hits[0].Path != "a.go" || hits[0].Line != 3 {
+		t.Errorf("hit[0] = %+v, want a.go:3", hits[0])
+	}
+	if hits[1].Path != "sub/b.go" {
+		t.Errorf("hit[1] = %+v, want sub/b.go", hits[1])
+	}
+}
+
+func TestSearcher_GrepRegexp_PathPrefix(t *testing.T) {
+	root := t.TempDir()
+	mk(t, root, "a.go", "func Alpha() {}\n")
+	mk(t, root, "sub/b.go", "func AlphaSub() {}\n")
+	s := Build(root, []string{"a.go", "sub/b.go"})
+
+	re := regexp.MustCompile(`func Alpha`)
+	hits := s.GrepRegexp(re, []string{"func Alpha"}, "sub/", 0)
+	if len(hits) != 1 || hits[0].Path != "sub/b.go" {
+		t.Fatalf("path-prefixed GrepRegexp = %+v, want only sub/b.go", hits)
+	}
+}
+
+func TestSearcher_GrepRegexp_NoLiterals(t *testing.T) {
+	root := t.TempDir()
+	mk(t, root, "a.go", "abc\ndef\n")
+	s := Build(root, []string{"a.go"})
+
+	// No usable literals — every file is scanned, regex still verifies.
+	re := regexp.MustCompile(`^a.c$`)
+	hits := s.GrepRegexp(re, nil, "", 0)
+	if len(hits) != 1 || hits[0].Text != "abc" {
+		t.Fatalf("GrepRegexp with no literals = %+v, want [abc]", hits)
+	}
+}
+
+func TestSearcher_GrepRegexp_Limit(t *testing.T) {
+	root := t.TempDir()
+	mk(t, root, "x.go", "match1\nmatch2\nmatch3\n")
+	s := Build(root, []string{"x.go"})
+
+	re := regexp.MustCompile(`match\d`)
+	if hits := s.GrepRegexp(re, []string{"match"}, "", 2); len(hits) != 2 {
+		t.Fatalf("limited GrepRegexp = %d hits, want 2", len(hits))
+	}
+}
+
+func TestSearcher_GrepRegexp_Nil(t *testing.T) {
+	root := t.TempDir()
+	mk(t, root, "x.go", "anything\n")
+	s := Build(root, []string{"x.go"})
+	if hits := s.GrepRegexp(nil, nil, "", 0); hits != nil {
+		t.Fatalf("GrepRegexp(nil) = %+v, want nil", hits)
 	}
 }

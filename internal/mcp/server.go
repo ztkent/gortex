@@ -804,6 +804,7 @@ func NewServer(engine *query.Engine, g *graph.Graph, idx *indexer.Indexer, watch
 	s.registerWalkGraphTool()
 	s.registerGraphQueryTool()
 	s.registerNavTool()
+	s.registerFindDeclarationTool()
 	s.registerResources()
 	s.registerPrompts()
 
