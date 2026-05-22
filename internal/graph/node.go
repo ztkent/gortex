@@ -198,6 +198,12 @@ type Node struct {
 	// (workspace_id, project_id); cross-project contracts become orphans.
 	// Defaults to the repo name when no projects[] mapping matches.
 	ProjectID string `json:"project_id,omitempty"`
+	// AbsoluteFilePath is the on-disk absolute path corresponding to
+	// FilePath. It is empty on the canonical graph node and is populated
+	// only on the per-response copies the MCP layer hands to result
+	// encoders, so an editor or agent can open a result directly without
+	// reconstructing the path from repo_prefix + file_path.
+	AbsoluteFilePath string `json:"absolute_file_path,omitempty"`
 }
 
 // Brief returns a compact representation with only the fields needed for listing.
@@ -248,6 +254,11 @@ func (n *Node) Brief() map[string]any {
 	}
 	if v, ok := n.Meta["is_test_file"].(bool); ok && v {
 		b["is_test_file"] = true
+	}
+	// AbsoluteFilePath is populated only on the per-response copies the
+	// MCP layer builds (see Server.withAbsPaths); empty on canonical nodes.
+	if n.AbsoluteFilePath != "" {
+		b["absolute_file_path"] = n.AbsoluteFilePath
 	}
 	return b
 }

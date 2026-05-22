@@ -37,7 +37,7 @@ func TestEncodeSearchSymbols_HeaderAndRows(t *testing.T) {
 	h, err := dec.Header()
 	require.NoError(t, err)
 	require.Equal(t, "search_symbols", h.Tool)
-	require.Equal(t, []string{"id", "kind", "name", "path", "line", "sig", "is_test", "test_role", "test_runner"}, h.Fields)
+	require.Equal(t, []string{"id", "kind", "name", "path", "path_abs", "line", "sig", "is_test", "test_role", "test_runner"}, h.Fields)
 	require.Equal(t, "2", h.Meta["total"])
 	require.Equal(t, "false", h.Meta["truncated"])
 
@@ -49,6 +49,7 @@ func TestEncodeSearchSymbols_HeaderAndRows(t *testing.T) {
 	require.Equal(t, "Foo", rows[0]["name"])
 	require.Equal(t, "10", rows[0]["line"])
 	require.Equal(t, "func Foo()", rows[0]["sig"])
+	require.Equal(t, "", rows[0]["path_abs"], "path_abs column present, empty when the node carries no resolved absolute path")
 	require.Equal(t, "false", rows[0]["is_test"])
 	require.Equal(t, "", rows[0]["test_role"])
 }

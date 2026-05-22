@@ -189,6 +189,35 @@ func (s *Server) resolveNodePath(node *graph.Node) (string, error) {
 	return "", fmt.Errorf("%w: node=%q file=%q", errPathUnresolved, node.ID, node.FilePath)
 }
 
+// withAbsPath returns a shallow copy of n with AbsoluteFilePath populated
+// from the indexer roots. The canonical graph node is never mutated, so
+// this is safe to call from concurrent request handlers; AbsoluteFilePath
+// is left empty when the path cannot be resolved (callers still carry the
+// repo-relative file_path).
+func (s *Server) withAbsPath(n *graph.Node) *graph.Node {
+	if n == nil {
+		return nil
+	}
+	cp := *n
+	if abs, err := s.resolveNodePath(n); err == nil {
+		cp.AbsoluteFilePath = abs
+	}
+	return &cp
+}
+
+// withAbsPaths maps withAbsPath over a slice, returning a fresh slice of
+// copies. The input slice and its nodes are left untouched.
+func (s *Server) withAbsPaths(nodes []*graph.Node) []*graph.Node {
+	if nodes == nil {
+		return nil
+	}
+	out := make([]*graph.Node, len(nodes))
+	for i, n := range nodes {
+		out[i] = s.withAbsPath(n)
+	}
+	return out
+}
+
 // resolveGraphPath returns the absolute filesystem path for a repo-prefixed
 // graph path (e.g. "gortex/internal/foo.go"). Mirrors resolveNodePath but
 // works on raw path strings — used for edges, search results, and other

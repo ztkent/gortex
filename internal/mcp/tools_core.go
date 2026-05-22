@@ -160,6 +160,10 @@ func callerNotesToTOONRows(notes map[string]*graph.ConcurrencyAnnotation) []toon
 // Method on Server so the format negotiation can consult per-session
 // client identity (claude-code → gcx, etc.).
 func (s *Server) returnSubGraph(ctx context.Context, req mcp.CallToolRequest, sg *query.SubGraph) (*mcp.CallToolResult, error) {
+	// Decorate nodes with absolute paths once, up front, so every output
+	// format below surfaces an openable path. The canonical graph nodes
+	// are copied, never mutated.
+	sg.Nodes = s.withAbsPaths(sg.Nodes)
 	if isCompact(req) {
 		return mcp.NewToolResultText(compactSubGraph(sg)), nil
 	}
@@ -892,14 +896,14 @@ func (s *Server) handleGetSymbol(ctx context.Context, req mcp.CallToolRequest) (
 
 	detail := req.GetString("detail", "brief")
 	if detail == "brief" {
-		return s.respondJSONOrTOON(ctx, req, node.Brief())
+		return s.respondJSONOrTOON(ctx, req, s.withAbsPath(node).Brief())
 	}
 
 	// Full: include node + direct edges.
 	out := s.engineFor(ctx).GetOutEdges(node.ID)
 	in := s.engineFor(ctx).GetInEdges(node.ID)
 	return s.respondJSONOrTOON(ctx, req, map[string]any{
-		"node":      node,
+		"node":      s.withAbsPath(node),
 		"out_edges": out,
 		"in_edges":  in,
 	})
@@ -1065,6 +1069,9 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 		offset = total
 	}
 	page := nodes[offset:end]
+	// Decorate the page with absolute file paths so every output format
+	// below surfaces an openable path alongside the repo-relative one.
+	page = s.withAbsPaths(page)
 	nextCursor := ""
 	if end < total {
 		nextCursor = encodeCursor(end)
@@ -1394,6 +1401,7 @@ func (s *Server) handleFindOverrides(ctx context.Context, req mcp.CallToolReques
 	// methods don't take QueryOptions, so the boundary is enforced
 	// here.
 	nodes = s.scopedNodeSlice(ctx, nodes)
+	nodes = s.withAbsPaths(nodes)
 
 	if s.isGCX(ctx, req) {
 		sg := &query.SubGraph{Nodes: nodes, TotalNodes: len(nodes)}
@@ -1432,6 +1440,7 @@ func (s *Server) handleFindImplementations(ctx context.Context, req mcp.CallTool
 	// Confine results to the session's workspace — FindImplementations
 	// doesn't take QueryOptions, so the boundary is enforced here.
 	impls = s.scopedNodeSlice(ctx, impls)
+	impls = s.withAbsPaths(impls)
 
 	if s.isGCX(ctx, req) {
 		sg := &query.SubGraph{Nodes: impls, TotalNodes: len(impls)}

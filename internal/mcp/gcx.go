@@ -238,7 +238,7 @@ func encodeSearchSymbols(nodes []*graph.Node, total, limit int) ([]byte, error) 
 	}
 	var buf bytes.Buffer
 	enc := newGCX(&buf, "search_symbols",
-		[]string{"id", "kind", "name", "path", "line", "sig", "is_test", "test_role", "test_runner"},
+		[]string{"id", "kind", "name", "path", "path_abs", "line", "sig", "is_test", "test_role", "test_runner"},
 		"total", fmt.Sprintf("%d", total),
 		"truncated", boolString(truncated),
 	)
@@ -254,6 +254,7 @@ func encodeSearchSymbols(nodes []*graph.Node, total, limit int) ([]byte, error) 
 			string(n.Kind),
 			nodeShort(n),
 			n.FilePath,
+			n.AbsoluteFilePath,
 			n.StartLine,
 			nodeSig(n),
 			nodeIsTest(n),
@@ -385,12 +386,12 @@ func encodeSubGraph(tool string, sg *query.SubGraph) ([]byte, error) {
 		nodes = append(nodes, n)
 	}
 	nodeEnc := newGCX(&buf, tool+".nodes",
-		[]string{"id", "kind", "name", "path", "line", "is_test", "test_role", "test_runner"},
+		[]string{"id", "kind", "name", "path", "path_abs", "line", "is_test", "test_role", "test_runner"},
 		"total", fmt.Sprintf("%d", sg.TotalNodes),
 		"truncated", boolString(sg.Truncated),
 	)
 	for _, n := range nodes {
-		if err := nodeEnc.WriteRow(n.ID, string(n.Kind), nodeShort(n), n.FilePath, n.StartLine, nodeIsTest(n), nodeTestRole(n), nodeTestRunner(n)); err != nil {
+		if err := nodeEnc.WriteRow(n.ID, string(n.Kind), nodeShort(n), n.FilePath, n.AbsoluteFilePath, n.StartLine, nodeIsTest(n), nodeTestRole(n), nodeTestRunner(n)); err != nil {
 			return nil, err
 		}
 	}
