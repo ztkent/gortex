@@ -8,8 +8,9 @@ import (
 
 type fakeRepoPrefixLookup struct{ prefixes []string }
 
-func (f fakeRepoPrefixLookup) RepoPrefixes() []string           { return f.prefixes }
-func (f fakeRepoPrefixLookup) RepoRoot(p string) (string, bool) { return "/" + p, true }
+func (f fakeRepoPrefixLookup) RepoPrefixes() []string              { return f.prefixes }
+func (f fakeRepoPrefixLookup) RepoRoot(p string) (string, bool)    { return "/" + p, true }
+func (f fakeRepoPrefixLookup) LinkedWorktreeRoots(string) []string { return nil }
 
 // TestMatchedRepoPrefix_LongestMatchWins pins the path→repo inference: a
 // nested repo must win over its parent for a path under the child, and

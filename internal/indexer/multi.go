@@ -31,6 +31,13 @@ type RepoMetadata struct {
 	EdgeCount     int
 	ParseErrors   []IndexError
 	FileMtimes    map[string]int64
+	// IsWorktree records whether RootPath was a linked git worktree
+	// (as opposed to a main checkout) at the time the repo was
+	// tracked. Captured here because once the worktree directory is
+	// removed from disk it can no longer be classified — the janitor
+	// needs this remembered flag to know a vanished root was a
+	// worktree and may be garbage-collected.
+	IsWorktree bool
 }
 
 // MultiIndexer orchestrates indexing across multiple repositories.
@@ -506,6 +513,7 @@ func (mi *MultiIndexer) indexSingleRepo(entry config.RepoEntry) (map[string]*Ind
 		EdgeCount:     result.EdgeCount,
 		ParseErrors:   result.Errors,
 		FileMtimes:    idx.FileMtimes(),
+		IsWorktree:    ResolveWorktree(absPath).IsWorktree,
 	}
 	mi.indexers[prefix] = idx
 	mi.mu.Unlock()
@@ -599,6 +607,7 @@ func (mi *MultiIndexer) indexMultiRepo(repos []config.RepoEntry) (map[string]*In
 				EdgeCount:     result.EdgeCount,
 				ParseErrors:   result.Errors,
 				FileMtimes:    idx.FileMtimes(),
+				IsWorktree:    ResolveWorktree(absPath).IsWorktree,
 			}
 
 			resultCh <- repoResult{prefix: prefix, result: result, idx: idx, meta: meta}
@@ -869,6 +878,7 @@ func (mi *MultiIndexer) TrackRepoCtx(ctx context.Context, entry config.RepoEntry
 		EdgeCount:     result.EdgeCount,
 		ParseErrors:   result.Errors,
 		FileMtimes:    idx.FileMtimes(),
+		IsWorktree:    ResolveWorktree(absPath).IsWorktree,
 	}
 	mi.indexers[prefix] = idx
 	mi.mu.Unlock()
@@ -982,6 +992,7 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 		EdgeCount:     result.EdgeCount,
 		ParseErrors:   result.Errors,
 		FileMtimes:    idx.FileMtimes(),
+		IsWorktree:    ResolveWorktree(absPath).IsWorktree,
 	}
 	mi.indexers[prefix] = idx
 	mi.mu.Unlock()
@@ -1098,6 +1109,73 @@ func (mi *MultiIndexer) UntrackRepo(repoPrefix string) (int, int) {
 	return nodesRemoved, edgesRemoved
 }
 
+// WorktreeGC is the per-repo outcome of GCVanishedWorktrees.
+type WorktreeGC struct {
+	RepoPrefix   string
+	RootPath     string
+	NodesRemoved int
+	EdgesRemoved int
+}
+
+// GCVanishedWorktrees garbage-collects the index of any tracked linked
+// git worktree whose root directory has disappeared from disk — the
+// `git worktree remove` (or manual deletion) case. Each vanished
+// worktree's branch-keyed snapshot slot and graph nodes would otherwise
+// leak forever: a removed worktree never fires a per-file fsnotify
+// delete for its whole tree, and the janitor's IncrementalReindex just
+// errors out on the missing root without evicting anything.
+//
+// Only repos recorded as worktrees (RepoMetadata.IsWorktree) are
+// eligible — a vanished *main* checkout is left alone, since that is
+// far more likely a transient mount problem than an intentional
+// removal, and untracking it would also orphan every linked worktree
+// that shares its .git. The directory-existence test uses the same
+// not-exist-only rule as the per-file deletion detector, so a flaky
+// filesystem cannot trigger a destructive eviction.
+//
+// Returns one WorktreeGC record per repo evicted; an empty slice when
+// every tracked worktree is still present.
+func (mi *MultiIndexer) GCVanishedWorktrees() []WorktreeGC {
+	// Snapshot the candidate set under the read lock, then evict
+	// outside it — UntrackRepo takes the write lock itself.
+	type candidate struct {
+		prefix string
+		root   string
+	}
+	var candidates []candidate
+	mi.mu.RLock()
+	for prefix, meta := range mi.repos {
+		if meta == nil || !meta.IsWorktree || meta.RootPath == "" {
+			continue
+		}
+		if WorktreeRootGone(meta.RootPath) {
+			candidates = append(candidates, candidate{prefix: prefix, root: meta.RootPath})
+		}
+	}
+	mi.mu.RUnlock()
+
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	out := make([]WorktreeGC, 0, len(candidates))
+	for _, c := range candidates {
+		nodes, edges := mi.UntrackRepo(c.prefix)
+		mi.logger.Info("janitor: garbage-collected vanished worktree",
+			zap.String("prefix", c.prefix),
+			zap.String("root", c.root),
+			zap.Int("nodes_removed", nodes),
+			zap.Int("edges_removed", edges))
+		out = append(out, WorktreeGC{
+			RepoPrefix:   c.prefix,
+			RootPath:     c.root,
+			NodesRemoved: nodes,
+			EdgesRemoved: edges,
+		})
+	}
+	return out
+}
+
 // GetMetadata returns the metadata for a specific repo, or nil if not found.
 func (mi *MultiIndexer) GetMetadata(repoPrefix string) *RepoMetadata {
 	mi.mu.RLock()
@@ -1212,6 +1290,52 @@ func (mi *MultiIndexer) RepoRoot(repoPrefix string) (string, bool) {
 		return "", false
 	}
 	return meta.RootPath, true
+}
+
+// LinkedWorktreeRoots returns the on-disk roots of every tracked linked
+// git worktree that shares its .git common directory with the checkout
+// at mainRepoPath — i.e. the worktree siblings of that main repo. The
+// query is keyed on the resolved MainRepoPath so it matches whether the
+// caller passes a main checkout or one of its worktrees.
+//
+// Used by the edit-tool file resolver: because all worktrees of one
+// repo reuse a single index identity, a repo-relative path can resolve
+// against a sibling checkout. When the resolved file belongs to a
+// linked worktree, the resolver re-roots the write there so an edit
+// lands in the worktree's copy rather than the main checkout's.
+func (mi *MultiIndexer) LinkedWorktreeRoots(mainRepoPath string) []string {
+	if mainRepoPath == "" {
+		return nil
+	}
+	wantMain := resolvedMainRepo(mainRepoPath)
+
+	mi.mu.RLock()
+	defer mi.mu.RUnlock()
+	var out []string
+	for _, meta := range mi.repos {
+		if meta == nil || meta.RootPath == "" || !meta.IsWorktree {
+			continue
+		}
+		if resolvedMainRepo(meta.RootPath) == wantMain {
+			out = append(out, meta.RootPath)
+		}
+	}
+	return out
+}
+
+// resolvedMainRepo resolves a checkout path to its repo's main worktree
+// root with symlinks evaluated. ResolveWorktree derives the main path
+// two different ways — filepath.Abs for a main checkout vs git's
+// canonicalized `commondir` for a linked worktree — and on platforms
+// where the temp / home tree is a symlink (macOS /var -> /private/var)
+// those two forms differ for the same repo. Evaluating symlinks on the
+// result gives one stable identity that both inputs agree on.
+func resolvedMainRepo(path string) string {
+	main := ResolveWorktree(path).MainRepoPath
+	if resolved, err := filepath.EvalSymlinks(main); err == nil {
+		return resolved
+	}
+	return main
 }
 
 // MergedContractRegistry combines contract registries from all per-repo

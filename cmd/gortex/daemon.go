@@ -387,9 +387,18 @@ func reconcileInterval() time.Duration {
 	return d
 }
 
-// startReconcileJanitor launches a background goroutine that calls
-// MultiIndexer.ReconcileAll on every interval tick. interval=0 is a
-// no-op; the returned stop function can be called unconditionally.
+// startReconcileJanitor launches a background goroutine that, on every
+// interval tick, garbage-collects the index of any linked git worktree
+// whose root directory has vanished from disk and then calls
+// MultiIndexer.ReconcileAll. interval=0 is a no-op; the returned stop
+// function can be called unconditionally.
+//
+// The worktree GC runs *before* ReconcileAll on purpose: a removed
+// worktree's root no longer exists, so ReconcileAll's IncrementalReindex
+// would only error on the missing path without evicting anything.
+// Pruning the vanished worktrees first keeps the reconcile sweep
+// working on live repos and stops a deleted worktree's snapshot slot
+// and graph nodes from leaking forever.
 func startReconcileJanitor(mi *indexer.MultiIndexer, interval time.Duration, logger *zap.Logger) func() {
 	if mi == nil || interval <= 0 {
 		logger.Info("daemon: reconcile janitor disabled")
@@ -403,6 +412,10 @@ func startReconcileJanitor(mi *indexer.MultiIndexer, interval time.Duration, log
 		for {
 			select {
 			case <-t.C:
+				if gced := mi.GCVanishedWorktrees(); len(gced) > 0 {
+					logger.Info("janitor: pruned vanished worktrees",
+						zap.Int("count", len(gced)))
+				}
 				mi.ReconcileAll()
 			case <-stop:
 				return

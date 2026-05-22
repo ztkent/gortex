@@ -13,6 +13,7 @@ import (
 	"github.com/zzet/gortex/internal/agents"
 	"github.com/zzet/gortex/internal/elide"
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/indexer"
 )
 
 // errPathUnresolved is returned when a relative path cannot be anchored to any
@@ -76,6 +77,12 @@ func (s *Server) resolveFilePath(rawPath string) (absPath, relPath string, err e
 		if !pathContainedIn(abs, root) {
 			return "", "", fmt.Errorf("%w: %q resolves to %q, outside repo root %q", errPathEscape, rawPath, abs, root)
 		}
+		// Re-root the write into the linked worktree the file belongs
+		// to when the resolved root is a main checkout that shares its
+		// index identity with one. relPath stays the repo-prefixed form
+		// for session bookkeeping — the prefix names the same repo
+		// regardless of which worktree the bytes land in.
+		abs = worktreeRootedPath(abs, root, s.multiIndexer)
 		return abs, rawPath, nil
 	}
 
@@ -120,6 +127,66 @@ func matchedRepoPrefix(mi multiRepoLookup, rawPath string) string {
 type multiRepoLookup interface {
 	RepoPrefixes() []string
 	RepoRoot(prefix string) (string, bool)
+	// LinkedWorktreeRoots returns the on-disk roots of every tracked
+	// linked git worktree that shares a .git common directory with the
+	// checkout at the given path.
+	LinkedWorktreeRoots(mainRepoPath string) []string
+}
+
+// worktreeRootedPath re-roots an edit target into the linked git
+// worktree the file actually belongs to. All worktrees of one repo
+// reuse a single index identity, so a repo-relative path resolved
+// against one checkout's root (root → abs) can name a file that
+// physically lives in a sibling worktree. When the resolved root is a
+// main checkout, abs does not exist there, and exactly one tracked
+// linked worktree of that repo *does* contain the same repo-relative
+// file, the write is re-rooted into that worktree — so editing a file
+// in a linked worktree modifies the worktree's copy, not the main
+// repo's.
+//
+// The function is deliberately conservative:
+//   - It never moves a path that already exists at abs — the resolved
+//     root genuinely owns the file.
+//   - It never moves a path when the resolved root is itself a linked
+//     worktree — abs is already inside the right checkout.
+//   - It never moves a brand-new file (one that exists in no checkout):
+//     a fresh write_file lands under the prefix the caller named.
+//   - It re-roots only when the match is unambiguous (exactly one
+//     worktree contains the file); two candidates leave abs untouched.
+func worktreeRootedPath(abs, root string, mi multiRepoLookup) string {
+	if abs == "" || root == "" || mi == nil {
+		return abs
+	}
+	// Already inside a linked worktree — nothing to re-root.
+	if indexer.ResolveWorktree(root).IsWorktree {
+		return abs
+	}
+	// The file is physically present where it resolved — the resolved
+	// root owns it.
+	if _, err := os.Stat(abs); err == nil {
+		return abs
+	}
+	rel, err := filepath.Rel(root, abs)
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		return abs
+	}
+	match := ""
+	for _, wt := range mi.LinkedWorktreeRoots(root) {
+		candidate := filepath.Clean(filepath.Join(wt, rel))
+		if _, err := os.Stat(candidate); err != nil {
+			continue
+		}
+		if match != "" && match != candidate {
+			// Ambiguous — more than one worktree carries this file.
+			// Leave the path at its originally-resolved location.
+			return abs
+		}
+		match = candidate
+	}
+	if match != "" {
+		return match
+	}
+	return abs
 }
 
 // pathContainedIn reports whether abs sits at or beneath root, after
@@ -181,7 +248,12 @@ func (s *Server) resolveNodePath(node *graph.Node) (string, error) {
 			if node.RepoPrefix != "" {
 				rel = strings.TrimPrefix(rel, node.RepoPrefix+"/")
 			}
-			return filepath.Clean(filepath.Join(root, rel)), nil
+			abs := filepath.Clean(filepath.Join(root, rel))
+			// Re-root onto the linked worktree the file belongs to —
+			// same reasoning as resolveFilePath: worktrees of one repo
+			// share an index identity, so a node's resolved path can
+			// land on a sibling checkout.
+			return worktreeRootedPath(abs, root, s.multiIndexer), nil
 		}
 		return "", fmt.Errorf("could not resolve repo root for node %q (repo_prefix=%q)", node.ID, node.RepoPrefix)
 	}
@@ -236,7 +308,16 @@ func (s *Server) resolveGraphPath(graphPath string) (string, error) {
 	}
 	if s.multiIndexer != nil {
 		if abs := s.multiIndexer.ResolveFilePath(graphPath); abs != "" {
-			return filepath.Clean(abs), nil
+			abs = filepath.Clean(abs)
+			// Re-root onto the linked worktree the file belongs to.
+			// ResolveFilePath joins against the matched prefix's root;
+			// recover that root so worktreeRootedPath can decide.
+			if prefix := matchedRepoPrefix(s.multiIndexer, graphPath); prefix != "" {
+				if root, ok := s.multiIndexer.RepoRoot(prefix); ok {
+					abs = worktreeRootedPath(abs, root, s.multiIndexer)
+				}
+			}
+			return abs, nil
 		}
 		return "", fmt.Errorf("could not resolve repo root for path %q", graphPath)
 	}
