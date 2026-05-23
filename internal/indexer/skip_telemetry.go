@@ -22,6 +22,16 @@ type skippedFile struct {
 	size    int64
 }
 
+// walkedFile records a file that survived the walk-time filters,
+// together with its walk-time ModTime so the worker and the
+// post-parse fileMtimes loop don't need to re-stat. The walk does
+// exactly one os.Stat per surviving file via d.Info(); everything
+// downstream reads from this struct.
+type walkedFile struct {
+	path      string
+	mtimeNano int64
+}
+
 // extractWithTimeout runs ext.Extract under the per-file extraction
 // budget. With no budget configured it calls Extract directly. On
 // timeout it returns errExtractTimeout; the slow extraction runs on to

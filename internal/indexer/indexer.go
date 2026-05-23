@@ -1520,8 +1520,14 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 	// that dominates parse time without contributing useful signal.
 	// A single summary warning reports how many were skipped so the
 	// user knows when the cap is biting.
+	//
+	// Each surviving file is captured with its walk-time ModTime so
+	// the worker (contract-cache mtime stamp) and the post-parse
+	// fileMtimes loop don't have to os.Stat again. d.Info() is one
+	// syscall per file regardless; trading one walk-time stat for two
+	// later stats is the net win.
 	maxSize := idx.config.MaxFileSize
-	var files []string
+	var files []walkedFile
 	var skippedLarge int
 	var skippedBytes int64
 	var skippedBySize []skippedFile
@@ -1542,18 +1548,25 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 		if idx.shouldExclude(path, absRoot, false) {
 			return nil
 		}
-		if maxSize > 0 {
-			if info, statErr := d.Info(); statErr == nil && info.Size() > maxSize {
-				skippedLarge++
-				skippedBytes += info.Size()
-				rel, _ := filepath.Rel(absRoot, path)
-				skippedBySize = append(skippedBySize, skippedFile{
-					relPath: filepath.ToSlash(rel), lang: lang, size: info.Size(),
-				})
-				return nil
-			}
+		info, statErr := d.Info()
+		if statErr != nil {
+			// Couldn't read FileInfo (race with deletion, broken
+			// symlink, …). Skip — the worker would fail too.
+			return nil
 		}
-		files = append(files, path)
+		if maxSize > 0 && info.Size() > maxSize {
+			skippedLarge++
+			skippedBytes += info.Size()
+			rel, _ := filepath.Rel(absRoot, path)
+			skippedBySize = append(skippedBySize, skippedFile{
+				relPath: filepath.ToSlash(rel), lang: lang, size: info.Size(),
+			})
+			return nil
+		}
+		files = append(files, walkedFile{
+			path:      path,
+			mtimeNano: info.ModTime().UnixNano(),
+		})
 		return nil
 	})
 	if err != nil {
@@ -1606,7 +1619,7 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 	contractReg := contracts.NewRegistry()
 	var contractMu sync.Mutex
 
-	fileCh := make(chan string, workers*4)
+	fileCh := make(chan walkedFile, workers*4)
 	var errMu sync.Mutex
 	var errors []IndexError
 	var processed int64
@@ -1620,7 +1633,8 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 		go func() {
 			defer wg.Done()
 			var localContracts []contracts.Contract
-			for path := range fileCh {
+			for wf := range fileCh {
+				path := wf.path
 				p := atomic.AddInt64(&processed, 1)
 				if p == 1 || p%parseReportEvery == 0 {
 					reporter.Report("parsing", int(p), totalFiles)
@@ -1713,11 +1727,12 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 
 						// Populate the per-file contract cache so a
 						// later IncrementalReindex can skip this file
-						// on a cache hit.
-						if info, statErr := os.Stat(path); statErr == nil {
+						// on a cache hit. Mtime comes from the walk-
+						// time d.Info() — no extra stat here.
+						if wf.mtimeNano > 0 {
 							idx.contractCacheMu.Lock()
 							idx.contractCache[fileGraphPath] = &contractCacheEntry{
-								mtimeNano: info.ModTime().UnixNano(),
+								mtimeNano: wf.mtimeNano,
 								contracts: c,
 							}
 							idx.contractCacheMu.Unlock()
@@ -1759,12 +1774,13 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 	// Populate fileMtimes for all detected files. Keyed through
 	// relKey so the mtime map agrees with the graph's file-node keys
 	// (and with the incremental / git-watcher paths) on the NFC form
-	// of every non-ASCII filename.
+	// of every non-ASCII filename. Mtimes are the walk-time values
+	// captured via d.Info(); no per-file os.Stat round-trip here.
 	idx.mtimeMu.Lock()
 	idx.fileMtimes = make(map[string]int64, len(files))
 	for _, f := range files {
-		if info, err := os.Stat(f); err == nil {
-			idx.fileMtimes[idx.relKey(f)] = info.ModTime().UnixNano()
+		if f.mtimeNano > 0 {
+			idx.fileMtimes[idx.relKey(f.path)] = f.mtimeNano
 		}
 	}
 	idx.mtimeMu.Unlock()
@@ -1944,7 +1960,11 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 	// Persist the Merkle baseline so the next incremental pass diffs
 	// against content hashes rather than re-indexing the whole repo.
 	if idx.merkleEnabled() {
-		idx.saveMerkleBaseline(absRoot, files)
+		paths := make([]string, len(files))
+		for i, wf := range files {
+			paths[i] = wf.path
+		}
+		idx.saveMerkleBaseline(absRoot, paths)
 	}
 	idx.indexGen.Add(1) // invalidate the trigram search cache
 
