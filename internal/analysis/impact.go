@@ -62,6 +62,28 @@ func AnalyzeImpact(g *graph.Graph, symbolIDs []string, communities *CommunityRes
 		fillImpactLive(g, result, symbolIDs)
 	}
 
+	// Trim noise from the transitive tiers: a resolution edge with
+	// confidence == 0 AND ConfidenceLabel == "INFERRED" means the
+	// resolver produced the link without type info — essentially a
+	// name-text match. At d=2 and d=3 these multiply the blast radius
+	// through shared upstream helpers (e.g. every analyze_* handler
+	// sharing respondJSONOrTOON), turning a leaf change into hundreds
+	// of "transitively affected" rows the user can't act on. d=1 is
+	// preserved untouched because direct dependents are always
+	// informative even at low confidence.
+	for depth := 2; depth <= 3; depth++ {
+		result.ByDepth[depth] = filterHeuristicEntries(result.ByDepth[depth])
+	}
+	// Hard fan-out cap per tier so a pathological hub doesn't blow up
+	// the response. Sorted ID order is already deterministic from the
+	// reach index, so the cap is stable.
+	const maxPerTier = 50
+	for depth := 1; depth <= 3; depth++ {
+		if len(result.ByDepth[depth]) > maxPerTier {
+			result.ByDepth[depth] = result.ByDepth[depth][:maxPerTier]
+		}
+	}
+
 	// Deduplicate test files
 	result.TestFiles = dedup(result.TestFiles)
 
@@ -308,6 +330,21 @@ func fillImpactFromReach(g *graph.Graph, result *ImpactResult, symbolIDs []strin
 		}
 	}
 	return true
+}
+
+// filterHeuristicEntries strips ImpactEntries whose representative
+// edge was a heuristic / text-matched resolution (Confidence == 0 +
+// label == "INFERRED"). Returns the kept prefix to avoid an extra
+// allocation. The input slice is mutated.
+func filterHeuristicEntries(entries []ImpactEntry) []ImpactEntry {
+	kept := entries[:0]
+	for _, e := range entries {
+		if e.EdgeConfidence == 0 && e.ConfidenceLabel == "INFERRED" {
+			continue
+		}
+		kept = append(kept, e)
+	}
+	return kept
 }
 
 func assessRisk(directDeps, transitiveDeps, testFiles int) RiskLevel {

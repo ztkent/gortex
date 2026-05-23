@@ -109,6 +109,42 @@ func TestAnalyzeImpact(t *testing.T) {
 	assert.Greater(t, result.TotalAffected, 0)
 }
 
+// TestAnalyzeImpact_DropsHeuristicNoiseAtTransitiveDepths pins the
+// regression: a leaf symbol used to surface as "90 transitively
+// affected" because a heuristic / text-matched edge at d=1 fanned
+// out through high-confidence d=2 edges into hundreds of unrelated
+// downstream methods. Now d=2 and d=3 drop entries whose
+// representative edge has confidence == 0 + label "INFERRED"
+// (resolution edges without type info — the noise class). d=1
+// stays untouched.
+func TestAnalyzeImpact_DropsHeuristicNoiseAtTransitiveDepths(t *testing.T) {
+	g := graph.New()
+	target := &graph.Node{ID: "p/target.go::Target", Name: "Target", Kind: graph.KindFunction, FilePath: "p/target.go"}
+	caller := &graph.Node{ID: "p/caller.go::Caller", Name: "Caller", Kind: graph.KindFunction, FilePath: "p/caller.go"}
+	intermediate := &graph.Node{ID: "p/middle.go::Middle", Name: "Middle", Kind: graph.KindFunction, FilePath: "p/middle.go"}
+	heuristic := &graph.Node{ID: "p/noise.go::Noise", Name: "Noise", Kind: graph.KindFunction, FilePath: "p/noise.go"}
+	g.AddNode(target)
+	g.AddNode(caller)
+	g.AddNode(intermediate)
+	g.AddNode(heuristic)
+	// Direct caller: real call, high-conf.
+	g.AddEdge(&graph.Edge{From: caller.ID, To: target.ID, Kind: graph.EdgeCalls, Confidence: 0.95})
+	// d=2 caller arriving via a CONFIDENT edge.
+	g.AddEdge(&graph.Edge{From: intermediate.ID, To: caller.ID, Kind: graph.EdgeCalls, Confidence: 0.95})
+	// d=2 NOISE entry: heuristic edge with no type info — exactly
+	// the shape the user reported as flooding the response.
+	g.AddEdge(&graph.Edge{From: heuristic.ID, To: caller.ID, Kind: graph.EdgeCalls, Confidence: 0})
+
+	result := AnalyzeImpact(g, []string{target.ID}, nil, nil)
+	require.NotNil(t, result)
+	require.GreaterOrEqual(t, len(result.ByDepth[1]), 1, "direct caller must survive")
+	for _, e := range result.ByDepth[2] {
+		require.False(t, e.EdgeConfidence == 0 && e.ConfidenceLabel == "INFERRED",
+			"d=2 must not include heuristic / text-matched edges (got %s via confidence=%v label=%s)",
+			e.ID, e.EdgeConfidence, e.ConfidenceLabel)
+	}
+}
+
 func TestAnalyzeImpact_RiskLevels(t *testing.T) {
 	assert.Equal(t, RiskLow, assessRisk(0, 0, 0))
 	assert.Equal(t, RiskLow, assessRisk(1, 1, 0))
