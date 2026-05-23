@@ -73,6 +73,13 @@ func (s *Server) registerOverlayTools() {
 	// session's overlay view and returns the delta — the core
 	// payoff of the shadow-graph design.
 	s.registerOverlayDiffTool()
+
+	// Branching surface: fork / branches / switch / merge / drop_branch
+	// / compare_branches. Layers on top of the single-stream overlay
+	// model — every existing tool continues to operate against the
+	// session's active branch, so callers that never touch the
+	// branching tools see the legacy behaviour unchanged.
+	s.registerOverlayBranchTools()
 }
 
 // overlaySessionID returns the calling MCP session ID, or a structured
