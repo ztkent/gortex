@@ -498,8 +498,10 @@ func TestInlineWrappers_TuckShape(t *testing.T) {
 }
 
 // setupGoTopicPublisherRepo writes a minimal Go package that calls
-// kafka.Produce("user.created", ...) from inside a function — the
-// common publisher shape.
+// p.Produce("user.created", ...) — Kafka producer idiom — from
+// inside a named function. Pairs with setupGoTopicSubscriberRepo on
+// the same broker (Kafka) so the matcher's broker-aware bucket
+// keys see them as the same topic identity.
 func setupGoTopicPublisherRepo(t *testing.T, name, topic string) string {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), name)
@@ -514,7 +516,9 @@ func setupGoTopicPublisherRepo(t *testing.T, name, topic string) string {
 }
 
 // setupGoTopicSubscriberRepo mirrors the publisher: a Go function
-// calling kafka.Subscribe("user.created", ...) from a Go function.
+// calling c.SubscribeTopics([]string{"user.created"}) — the
+// confluent-kafka-go Consumer idiom — so the broker tag aligns
+// with the publisher's Kafka contract.
 func setupGoTopicSubscriberRepo(t *testing.T, name, topic string) string {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), name)
@@ -523,7 +527,7 @@ func setupGoTopicSubscriberRepo(t *testing.T, name, topic string) string {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"),
 		[]byte("module example.com/"+name+"\n\ngo 1.21\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "sub.go"), []byte(
-		"package main\n\nfunc consumeEvent(c Consumer) {\n\tc.Subscribe(\""+topic+"\", nil)\n}\n\ntype Consumer interface{ Subscribe(topic string, h any) error }\n",
+		"package main\n\nfunc consumeEvent(c Consumer) {\n\tc.SubscribeTopics([]string{\""+topic+"\"}, nil)\n}\n\ntype Consumer interface{ SubscribeTopics(topics []string, rb any) error }\n",
 	), 0o644))
 	return dir
 }

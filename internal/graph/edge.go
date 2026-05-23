@@ -252,6 +252,29 @@ const (
 	// migrations, DI tokens, …). Origin tier mirrors the underlying
 	// extractor; defaults to ast_resolved (structural by construction).
 	EdgeHandlesRoute EdgeKind = "handles_route"
+	// EdgeProducesTopic links a producer function/method to the
+	// KindTopic node it publishes onto — the framework-layer message-
+	// broker analogue of EdgeHandlesRoute for HTTP. Emitted by the
+	// contracts pairing pass whenever a topic contract (Kafka /
+	// RabbitMQ / NATS / Redis pub-sub) matches at least one consumer
+	// across the same workspace; unpaired producers remain as
+	// orphan ContractTopic records. The narrower edge kind lets
+	// `analyze kind=event_emitters` and architecture queries walk
+	// the producer→topic surface without pulling in the broader
+	// EdgeProvides graph. The target KindTopic node carries
+	// Meta["broker"] and Meta["name"] so traversals don't need to
+	// re-parse the synthetic node ID. Origin: ast_resolved —
+	// structural by construction once the matcher has paired the
+	// underlying topic contract.
+	EdgeProducesTopic EdgeKind = "produces_topic"
+	// EdgeConsumesTopic is the read side of EdgeProducesTopic —
+	// links a consumer function/method to the KindTopic node it
+	// subscribes to. Same broker families, same pairing pass, same
+	// ast_resolved tier. Multi-consumer fanout falls out naturally:
+	// one producer paired with N consumers on the same (broker,
+	// topic) bucket yields N EdgeConsumesTopic edges plus one
+	// EdgeProducesTopic edge, all sharing the same topic node.
+	EdgeConsumesTopic EdgeKind = "consumes_topic"
 	// EdgeModelsTable links an ORM model type/class to the KindTable
 	// node it persists. Per language:
 	//
@@ -595,7 +618,8 @@ func DefaultOriginFor(kind EdgeKind, confidence float64, semanticSource string) 
 		// that already proved the relationship (handler → route via
 		// the contracts pipeline, model → table via the ORM detector,
 		// parent → child via JSX walking) so they ride at ast_resolved.
-		EdgeHandlesRoute, EdgeModelsTable, EdgeRendersChild,
+		EdgeHandlesRoute, EdgeProducesTopic, EdgeConsumesTopic,
+		EdgeModelsTable, EdgeRendersChild,
 		// Dataflow edges. EdgeValueFlow is intra-procedural and
 		// fully resolved at extraction. EdgeArgOf / EdgeReturnsTo
 		// inherit ast_resolved once the post-resolution pass has
@@ -642,7 +666,8 @@ func ConfidenceLabelFor(kind EdgeKind, confidence float64) string {
 		// that already proved the relationship (handler → route via
 		// the contracts pipeline, model → table via the ORM detector,
 		// parent → child via JSX walking) so they ride at ast_resolved.
-		EdgeHandlesRoute, EdgeModelsTable, EdgeRendersChild,
+		EdgeHandlesRoute, EdgeProducesTopic, EdgeConsumesTopic,
+		EdgeModelsTable, EdgeRendersChild,
 		EdgeValueFlow, EdgeArgOf, EdgeReturnsTo,
 		// Infrastructure-graph edges (K8s / Kustomize / Dockerfile).
 		EdgeConfigures, EdgeMounts, EdgeExposes, EdgeDependsOn, EdgeUsesEnv,

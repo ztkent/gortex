@@ -166,6 +166,22 @@ const (
 	// edited file keeps stable section identity. The owning file
 	// links to it via EdgeDefines.
 	KindDoc NodeKind = "doc"
+	// KindTopic represents a message-broker topic / subject / channel /
+	// exchange — the contract-layer pairing artefact for Kafka,
+	// RabbitMQ, NATS, and Redis pub-sub. ID convention:
+	// `topic::<broker>::<name>` where broker ∈ kafka|rabbitmq|nats|
+	// redis. Meta carries broker (the family) and name (the raw topic
+	// / subject / channel / exchange string). Producer symbols link
+	// in via EdgeProducesTopic, consumers via EdgeConsumesTopic, so a
+	// cross-service event flow is a two-hop path
+	// producer --produces_topic--> topic <--consumes_topic-- consumer.
+	// KindTopic is distinct from KindEvent (which the observability /
+	// pubsub extractor uses for the same calls): KindEvent rides at
+	// the call-site evidence tier (heuristic / inferred) and is for
+	// broad "what publishes here" queries, while KindTopic is the
+	// pairing artefact produced by the contracts matcher and rides at
+	// the structural ast_resolved tier.
+	KindTopic NodeKind = "topic"
 )
 
 var validNodeKinds = map[NodeKind]bool{
@@ -181,7 +197,7 @@ var validNodeKinds = map[NodeKind]bool{
 	KindFixture: true, KindTodo: true, KindTeam: true,
 	KindRelease: true, KindLicense: true, KindString: true,
 	KindResource: true, KindKustomization: true, KindImage: true,
-	KindArtifact: true, KindDoc: true,
+	KindArtifact: true, KindDoc: true, KindTopic: true,
 }
 
 type Node struct {

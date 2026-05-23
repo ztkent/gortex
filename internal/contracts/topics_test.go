@@ -16,8 +16,10 @@ func publish(p *kafka.Producer) {
 	if len(contracts) != 2 {
 		t.Fatalf("expected 2 provider contracts, got %d", len(contracts))
 	}
-	assertContract(t, contracts[0], "topic::user.created", ContractTopic, RoleProvider)
-	assertContract(t, contracts[1], "topic::order.shipped", ContractTopic, RoleProvider)
+	// Kafka Produce + NATS Publish — broker tag rides on the
+	// Contract.ID so cross-broker pairing stays isolated.
+	assertContract(t, contracts[0], "topic::kafka::user.created", ContractTopic, RoleProvider)
+	assertContract(t, contracts[1], "topic::nats::order.shipped", ContractTopic, RoleProvider)
 }
 
 func TestTopicExtractor_GoSubscriber(t *testing.T) {
@@ -31,7 +33,11 @@ func consume(c *kafka.Consumer) {
 	if len(contracts) != 1 {
 		t.Fatalf("expected 1 consumer contract, got %d", len(contracts))
 	}
-	assertContract(t, contracts[0], "topic::user.created", ContractTopic, RoleConsumer)
+	// `.Subscribe("subject", ...)` shape is the NATS idiom; the
+	// Kafka equivalent is SubscribeTopics([]string{...}). With no
+	// disambiguating import context inside the contract extractor,
+	// the patterns route to NATS by default.
+	assertContract(t, contracts[0], "topic::nats::user.created", ContractTopic, RoleConsumer)
 }
 
 // TestTopicExtractor_SymbolID verifies that publish/subscribe sites get
@@ -96,5 +102,6 @@ await producer.send({ topic: "notifications", messages: [msg] });
 	if len(contracts) != 1 {
 		t.Fatalf("expected 1 provider contract, got %d", len(contracts))
 	}
-	assertContract(t, contracts[0], "topic::notifications", ContractTopic, RoleProvider)
+	// kafkajs producer.send({ topic: "..." }) — Kafka tag.
+	assertContract(t, contracts[0], "topic::kafka::notifications", ContractTopic, RoleProvider)
 }

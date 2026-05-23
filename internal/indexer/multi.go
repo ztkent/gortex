@@ -1712,13 +1712,30 @@ func (mi *MultiIndexer) ReconcileContractEdges() int {
 	// out-edge lists we'd be iterating otherwise.
 	type edgeKey struct{ from, to string }
 	var stale []edgeKey
+	var staleTopicProduces, staleTopicConsumes []edgeKey
 	for _, e := range g.AllEdges() {
-		if e.Kind == graph.EdgeMatches {
+		switch e.Kind {
+		case graph.EdgeMatches:
 			stale = append(stale, edgeKey{e.From, e.To})
+		case graph.EdgeProducesTopic:
+			staleTopicProduces = append(staleTopicProduces, edgeKey{e.From, e.To})
+		case graph.EdgeConsumesTopic:
+			staleTopicConsumes = append(staleTopicConsumes, edgeKey{e.From, e.To})
 		}
 	}
 	for _, k := range stale {
 		g.RemoveEdge(k.from, k.to, graph.EdgeMatches)
+	}
+	// Evict prior topic edges so a renamed topic or removed callsite
+	// doesn't keep its edges alive. The KindTopic node itself is
+	// addressable by ID; when no consumer or producer remains for a
+	// given topic node we orphan-collect it after the new edges are
+	// emitted (see end of this function).
+	for _, k := range staleTopicProduces {
+		g.RemoveEdge(k.from, k.to, graph.EdgeProducesTopic)
+	}
+	for _, k := range staleTopicConsumes {
+		g.RemoveEdge(k.from, k.to, graph.EdgeConsumesTopic)
 	}
 
 	merged := mi.MergedContractRegistry()
@@ -1848,6 +1865,11 @@ func (mi *MultiIndexer) ReconcileContractEdges() int {
 
 	result := contracts.Match(merged)
 	added := 0
+	// Track which topic nodes we've already materialised so the loop
+	// emits one node per (broker, topic) bucket even when a topic has
+	// fan-out across many consumers. The dedupe key is the topic
+	// node's ID — its repo-prefix is already encoded in Contract.ID.
+	topicNodes := make(map[string]struct{})
 	for _, m := range result.Matched {
 		// Connect the consumer's enclosing symbol directly to the
 		// provider's enclosing symbol. Contract nodes in the graph are
@@ -1874,8 +1896,132 @@ func (mi *MultiIndexer) ReconcileContractEdges() int {
 			CrossRepo:       m.CrossRepo,
 		})
 		added++
+
+		// Materialise the broker topic node + producer/consumer
+		// edges. Only fires for ContractTopic matches; HTTP / gRPC /
+		// WS / GraphQL / env contracts fall through with just the
+		// EdgeMatches edge above.
+		if m.Provider.Type == contracts.ContractTopic {
+			emitTopicEdges(g, m, topicNodes)
+		}
 	}
+
+	// Topic nodes whose producer and consumer edges all evaporated
+	// since the previous reconcile remain in the graph as leaf
+	// nodes — Graph has no public RemoveNode and the next reconcile
+	// upserts them anyway. A topic that lost every callsite is an
+	// invisible-but-harmless cost (a single KindTopic node with no
+	// neighbors). Worth revisiting if topic churn ever bloats the
+	// graph; in the meantime we lean on EvictRepo / EvictFile to
+	// reclaim memory when a whole repo's topic vocabulary changes.
 	return added
+}
+
+// emitTopicEdges materialises the KindTopic node and the
+// EdgeProducesTopic / EdgeConsumesTopic edges that pair a matched
+// producer/consumer pair across the workspace. The topic ID is
+// reconstructed from the Contract.ID (already `topic::<broker>::
+// <name>`) so the node ID matches the contract ID 1:1 — agents that
+// have the contract ID can also look up the topic node directly.
+// Meta on the node carries the broker family and the raw topic name
+// for filterless queries.
+func emitTopicEdges(g *graph.Graph, m contracts.CrossLink, topicNodes map[string]struct{}) {
+	// Trust the matcher to bucket only same-broker contracts together
+	// because Contract.ID already includes the broker token; if the
+	// broker isn't on the provider Meta, fall through to the contract
+	// ID's middle segment so the node carries something useful.
+	broker, _ := m.Provider.Meta["broker"].(string)
+	topicName, _ := m.Provider.Meta["topic"].(string)
+	if broker == "" || topicName == "" {
+		// Defensive fallback — extract from the Contract.ID shape
+		// `topic::<broker>::<name>`. If the ID isn't structured we
+		// skip rather than emit a node with an unidentifiable broker
+		// (such an edge would be misleading in cross-broker queries).
+		broker2, name2, ok := parseTopicContractID(m.Provider.ID)
+		if !ok {
+			return
+		}
+		if broker == "" {
+			broker = broker2
+		}
+		if topicName == "" {
+			topicName = name2
+		}
+	}
+
+	topicID := m.Provider.ID // canonical: topic::<broker>::<name>
+	if _, ok := topicNodes[topicID]; !ok {
+		topicNodes[topicID] = struct{}{}
+		// Preserve any existing node (a prior reconcile may have
+		// created it) but always refresh Meta so a broker rename
+		// isn't sticky across reconciles. AddNode in this codebase
+		// is upsert-style — see graph.Graph.AddNode.
+		g.AddNode(&graph.Node{
+			ID:          topicID,
+			Kind:        graph.KindTopic,
+			Name:        topicName,
+			FilePath:    m.Provider.FilePath,
+			Language:    "contract",
+			RepoPrefix:  m.Provider.RepoPrefix,
+			WorkspaceID: m.Provider.EffectiveWorkspace(),
+			ProjectID:   m.Provider.EffectiveProject(),
+			Meta: map[string]any{
+				"broker": broker,
+				"name":   topicName,
+			},
+		})
+	}
+
+	g.AddEdge(&graph.Edge{
+		From:            m.Provider.SymbolID,
+		To:              topicID,
+		Kind:            graph.EdgeProducesTopic,
+		FilePath:        m.Provider.FilePath,
+		Line:            m.Provider.Line,
+		Confidence:      1.0,
+		ConfidenceLabel: "EXTRACTED",
+		Origin:          graph.OriginASTResolved,
+		CrossRepo:       false,
+		Meta: map[string]any{
+			"broker": broker,
+		},
+	})
+	g.AddEdge(&graph.Edge{
+		From:            m.Consumer.SymbolID,
+		To:              topicID,
+		Kind:            graph.EdgeConsumesTopic,
+		FilePath:        m.Consumer.FilePath,
+		Line:            m.Consumer.Line,
+		Confidence:      1.0,
+		ConfidenceLabel: "EXTRACTED",
+		Origin:          graph.OriginASTResolved,
+		CrossRepo:       m.CrossRepo,
+		Meta: map[string]any{
+			"broker": broker,
+		},
+	})
+}
+
+// parseTopicContractID splits a Contract.ID of the form
+// `topic::<broker>::<name>` (or its repo-prefixed counterpart
+// `<repo>/topic::<broker>::<name>`) into broker + name. Returns
+// ok==false for any other shape so callers can skip ill-formed
+// topic contracts rather than fabricate a broker label.
+func parseTopicContractID(id string) (broker, name string, ok bool) {
+	// Strip any leading repo-prefix segment ("repo/topic::..."). The
+	// applyRepoPrefix step prepends `<repo>/` to synthetic IDs of
+	// the form `topic::...`, so we look for the inner `topic::`
+	// marker rather than splitting on the leading slash.
+	idx := strings.Index(id, "topic::")
+	if idx < 0 {
+		return "", "", false
+	}
+	rest := id[idx+len("topic::"):]
+	sep := strings.Index(rest, "::")
+	if sep <= 0 || sep == len(rest)-2 {
+		return "", "", false
+	}
+	return rest[:sep], rest[sep+2:], true
 }
 
 // Graph returns the underlying shared graph.
