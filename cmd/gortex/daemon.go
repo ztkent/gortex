@@ -571,7 +571,7 @@ func newDaemonSpawnSpinner(w io.Writer) *progress.Spinner {
 // detach flow. Only fires on a TTY — non-TTY callers stay quiet so script
 // stderr remains parseable.
 func emitDaemonStartBanner(w io.Writer) {
-	if !progress.IsTTY(w) || noProgress {
+	if !progress.IsTTY(w) || noProgress || daemonRestartActive {
 		return
 	}
 	banner := tui.Banner{
@@ -678,12 +678,14 @@ func emitDaemonStopSummary(w io.Writer, socket string, uptime time.Duration) {
 		_, _ = fmt.Fprintln(w, "[gortex daemon] stopped")
 		return
 	}
-	banner := tui.Banner{
-		Title:    "gortex daemon stop",
-		Subtitle: "Daemon shut down cleanly.",
-	}.Render()
-	_, _ = fmt.Fprintln(w)
-	_, _ = fmt.Fprintln(w, banner)
+	if !daemonRestartActive {
+		banner := tui.Banner{
+			Title:    "gortex daemon stop",
+			Subtitle: "Daemon shut down cleanly.",
+		}.Render()
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, banner)
+	}
 	stats := []string{progress.Stat("clean shutdown", "", progress.StatGood)}
 	if uptime > 0 {
 		stats = append(stats, progress.Stat(uptime.Truncate(time.Second).String(), "uptime", progress.StatNeutral))
@@ -696,7 +698,17 @@ func emitDaemonStopSummary(w io.Writer, socket string, uptime time.Duration) {
 	_, _ = fmt.Fprintln(w)
 }
 
+// daemonRestartActive flips on for the duration of runDaemonRestart so the
+// inner stop / start emit functions skip their own banners — restart shows the
+// logo once at the top and then lists the stop + start cards underneath.
+var daemonRestartActive bool
+
 func runDaemonRestart(cmd *cobra.Command, args []string) error {
+	daemonRestartActive = true
+	defer func() { daemonRestartActive = false }()
+
+	emitDaemonRestartBanner(cmd.ErrOrStderr())
+
 	// Stop is idempotent when not running.
 	if err := runDaemonStop(cmd, args); err != nil {
 		return err
@@ -708,6 +720,21 @@ func runDaemonRestart(cmd *cobra.Command, args []string) error {
 	}
 	daemonDetach = true
 	return runDaemonStart(cmd, args)
+}
+
+// emitDaemonRestartBanner prints the unified header for `gortex daemon
+// restart` so the user sees the mesh logo once instead of twice.
+func emitDaemonRestartBanner(w io.Writer) {
+	if !progress.IsTTY(w) || noProgress {
+		return
+	}
+	banner := tui.Banner{
+		Title:    "gortex daemon restart",
+		Subtitle: "Cycling daemon: stop then start.",
+	}.Render()
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, banner)
+	_, _ = fmt.Fprintln(w)
 }
 
 func runDaemonReload(_ *cobra.Command, _ []string) error {
