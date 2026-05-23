@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"fmt"
 	"testing"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
@@ -42,6 +43,43 @@ func TestToolsSearch_NoMatchAdvisesExactNameRetry(t *testing.T) {
 	require.False(t, result.IsError)
 	text := result.Content[0].(mcplib.TextContent).Text
 	require.Contains(t, text, "select:", "a no-match result must still point at the select: escape hatch")
+}
+
+// TestToolsSearch_SelectBytesBudgetTruncates pins the wire-budget
+// floor: when a select:<many-tools> query would push the rendered
+// response past defaultMaxBytes the handler trims the tail and
+// reports OmittedCount, instead of returning a 50KB+ blob the stdio
+// bridge spills to disk.
+func TestToolsSearch_SelectBytesBudgetTruncates(t *testing.T) {
+	t.Setenv("GORTEX_LAZY_TOOLS", "1")
+	// Trim helper directly so the test doesn't depend on a specific
+	// tool family's catalogue size. Build a payload that would exceed
+	// the budget without trimming.
+	bulkySchema := []byte(`{"type":"object","properties":{`)
+	for i := 0; i < 200; i++ {
+		bulkySchema = append(bulkySchema, []byte(`"prop`)...)
+		bulkySchema = append(bulkySchema, byte('A'+(i%26)))
+		bulkySchema = append(bulkySchema, []byte(`":{"type":"string","description":"padding padding padding padding padding padding padding"},`)...)
+	}
+	bulkySchema = append(bulkySchema, []byte(`}}`)...)
+	entries := make([]toolsSearchEntry, 0, 50)
+	for i := 0; i < 50; i++ {
+		entries = append(entries, toolsSearchEntry{
+			Name:        fmt.Sprintf("entry_%d", i),
+			Description: "padding padding padding padding padding padding padding padding padding padding",
+			InputSchema: bulkySchema,
+		})
+	}
+	kept, omitted := trimToolsSearchEntries(entries, defaultMaxBytes)
+	require.Greater(t, omitted, 0, "with a 50-entry list and bulky schemas, the budget must drop something")
+	require.Less(t, len(kept), len(entries))
+	// Worst case ceiling: the kept-bytes sum stays under the budget
+	// plus one over-budget entry (the floor case).
+	totalKeptBytes := 0
+	for _, e := range kept {
+		totalKeptBytes += len(e.Name) + len(e.Description) + len(e.InputSchema)
+	}
+	require.LessOrEqual(t, totalKeptBytes, defaultMaxBytes+len(kept[0].InputSchema))
 }
 
 // TestToolsSearch_WholeQueryNameMatchRanksFirst pins the ranking audit:

@@ -113,6 +113,18 @@ func (s *Server) handleToolsSearch(ctx context.Context, req mcp.CallToolRequest)
 		names = append(names, dt.tool.Name)
 	}
 
+	// Hold the response under the harness's ~50KB wire-size threshold:
+	// a select:<many-tools> query asking for 15+ tool schemas easily
+	// pushes past 40KB raw, which the stdio bridge then re-escapes and
+	// spills to disk. Cap by accumulated byte count so the response is
+	// always inline. Dropped entries are reported via OmittedCount;
+	// promotion only fires for entries that actually shipped.
+	bytesOmitted := 0
+	entries, bytesOmitted = trimToolsSearchEntries(entries, defaultMaxBytes)
+	if bytesOmitted > 0 {
+		names = names[:len(entries)]
+	}
+
 	var promotedNames []string
 	if promote && len(names) > 0 {
 		promotedNames = s.lazy.Promote(names...)
@@ -125,11 +137,37 @@ func (s *Server) handleToolsSearch(ctx context.Context, req mcp.CallToolRequest)
 		Tools:    entries,
 	}
 	// total counts matches before the max cap; a positive remainder
-	// means the agent should narrow the query or use select:<name>.
+	// (either from max_results or the byte budget) means the agent
+	// should narrow the query or use select:<name>.
 	if omitted := total - len(entries); omitted > 0 {
 		payload.OmittedCount = omitted
 	}
 	return renderToolsSearchResult(payload)
+}
+
+// trimToolsSearchEntries shrinks the entry list so the rendered
+// response stays under the transport-safe budget. Estimates per-entry
+// bytes from name + description + schema length plus a small
+// per-entry overhead for JSON framing. Returns the kept prefix and
+// the count of entries dropped from the tail.
+func trimToolsSearchEntries(entries []toolsSearchEntry, budget int) ([]toolsSearchEntry, int) {
+	if budget <= 0 || len(entries) == 0 {
+		return entries, 0
+	}
+	// Per-entry JSON framing overhead: {"name":"","description":"","input_schema":...}
+	// is ~50 bytes of wrappers, key names, and quote/colon punctuation.
+	const perEntryOverhead = 60
+	bytesUsed := 0
+	for i, e := range entries {
+		entryBytes := len(e.Name) + len(e.Description) + len(e.InputSchema) + perEntryOverhead
+		// Keep at least one entry even if a single schema is enormous —
+		// truncating to zero would hide which tool overflowed.
+		if i > 0 && bytesUsed+entryBytes > budget {
+			return entries[:i], len(entries) - i
+		}
+		bytesUsed += entryBytes
+	}
+	return entries, 0
 }
 
 // renderToolsSearchResult returns the discovery tool result with both
