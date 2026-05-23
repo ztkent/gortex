@@ -1758,7 +1758,12 @@ func (s *Server) handleSmartContext(ctx context.Context, req mcp.CallToolRequest
 }
 
 // extractKeywords splits a task description into searchable keywords.
-// Filters out common stop words and short words.
+// Filters out common stop words and short words, then reorders so
+// identifier-shape keywords (camelCase, snake_case, anything with an
+// uppercase letter after a lowercase one) come first. The BM25 budget
+// downstream then fills with the most-likely-to-be-the-actual-target
+// candidates before generic English verbs ("find", "caller", …)
+// flood it with unrelated hits.
 func extractKeywords(task string) []string {
 	stopWords := map[string]bool{
 		"a": true, "an": true, "the": true, "is": true, "are": true,
@@ -1774,6 +1779,20 @@ func extractKeywords(task string) []string {
 		"add": true, "new": true, "create": true, "make": true, "called": true,
 		"like": true, "use": true, "using": true, "how": true, "what": true,
 		"want": true, "need": true, "all": true, "each": true, "which": true,
+		// Common task verbs / nouns that aren't symbol candidates —
+		// a task like "find every caller of FooBar" used to surface
+		// `findLocked` / `findDeclaration` first because "find" hit
+		// the BM25 budget before the real identifier. Stop them.
+		"find": true, "finds": true, "found": true, "finding": true,
+		"get": true, "gets": true, "got": true, "getting": true,
+		"set": true, "sets": true, "setting": true, "list": true, "lists": true,
+		"show": true, "shows": true, "showing": true, "tell": true, "tells": true,
+		"every": true, "any": true, "some": true, "most": true,
+		"caller": true, "callers": true, "callee": true, "callees": true,
+		"user": true, "users": true, "users'": true,
+		"function": true, "functions": true, "method": true, "methods": true,
+		"file": true, "files": true, "symbol": true, "symbols": true,
+		"code": true, "source": true,
 	}
 
 	// Split on whitespace and punctuation.
@@ -1791,16 +1810,43 @@ func extractKeywords(task string) []string {
 	})
 
 	seen := make(map[string]bool)
-	var keywords []string
+	var identifiers, plain []string
 	for _, w := range words {
 		lower := strings.ToLower(w)
 		if len(lower) < 3 || stopWords[lower] || seen[lower] {
 			continue
 		}
 		seen[lower] = true
-		keywords = append(keywords, w) // keep original case for search
+		if hasIdentifierShape(w) {
+			identifiers = append(identifiers, w)
+		} else {
+			plain = append(plain, w)
+		}
 	}
-	return keywords
+	return append(identifiers, plain...)
+}
+
+// hasIdentifierShape reports whether w looks like a code identifier
+// the user explicitly typed (camelCase, snake_case, has digits) and
+// therefore deserves to drive the candidate search before generic
+// English verbs.
+func hasIdentifierShape(w string) bool {
+	hasUnderscore := false
+	hasDigit := false
+	hasInternalUpper := false
+	for i, r := range w {
+		switch {
+		case r == '_':
+			hasUnderscore = true
+		case r >= '0' && r <= '9':
+			hasDigit = true
+		case r >= 'A' && r <= 'Z':
+			if i > 0 {
+				hasInternalUpper = true
+			}
+		}
+	}
+	return hasUnderscore || hasDigit || hasInternalUpper
 }
 
 func (s *Server) handleRenameSymbol(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

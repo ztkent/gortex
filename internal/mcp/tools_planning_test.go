@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	mcplib "github.com/mark3labs/mcp-go/mcp"
@@ -113,6 +114,37 @@ func TestPlanTurn_NoCandidates_StillEmitsFallbacks(t *testing.T) {
 		}
 	}
 	assert.True(t, sawSearch, "expected search_symbols fallback when no BM25 candidates")
+}
+
+// TestExtractKeywords_PrioritisesIdentifierShape pins the regression
+// where `find every caller of renderToolsSearchResult` produced
+// recommendations centred on unrelated `findLocked` / `findDeclaration`
+// methods because the BM25 budget filled on "find" before the actual
+// identifier got a chance. After the fix, identifier-shape tokens
+// surface first and English verbs ("find", "caller") are stopped.
+func TestExtractKeywords_PrioritisesIdentifierShape(t *testing.T) {
+	got := extractKeywords("find every caller of renderToolsSearchResult")
+	require.NotEmpty(t, got)
+	// Identifier-shape token must be first so the BM25 budget anchors
+	// on what the user actually typed.
+	require.Equal(t, "renderToolsSearchResult", got[0],
+		"identifier-shape keyword must lead, got %v", got)
+	// Verb-shape "find" / "every" / "caller" must be stop-listed.
+	for _, kw := range got {
+		require.NotEqual(t, "find", strings.ToLower(kw))
+		require.NotEqual(t, "every", strings.ToLower(kw))
+		require.NotEqual(t, "caller", strings.ToLower(kw))
+	}
+}
+
+// TestExtractKeywords_PlainWordsStillSurfaceWhenNoIdentifier covers
+// the fallback: when the task has no identifier-shape token, plain
+// english keywords still come through (e.g. "trace error logger").
+func TestExtractKeywords_PlainWordsStillSurfaceWhenNoIdentifier(t *testing.T) {
+	got := extractKeywords("trace the error logger")
+	require.Contains(t, got, "trace")
+	require.Contains(t, got, "error")
+	require.Contains(t, got, "logger")
 }
 
 func TestIsCallableKind(t *testing.T) {
