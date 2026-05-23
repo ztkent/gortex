@@ -102,6 +102,38 @@ func TestCheckReferences_SameNameElsewhere(t *testing.T) {
 	assert.Equal(t, "other/util.go::Handle", row["id"])
 }
 
+// TestCheckReferences_EvidencePrefersCallSiteLine pins the bug where
+// two distinct calls from the same caller collapsed into evidence
+// rows pinned to the caller's start line. The fix prefers Edge.Line
+// / Edge.FilePath when populated.
+func TestCheckReferences_EvidencePrefersCallSiteLine(t *testing.T) {
+	g := graph.New()
+	g.AddNode(&graph.Node{ID: "p/target.go::Target", Name: "Target", Kind: graph.KindFunction, FilePath: "p/target.go", StartLine: 5})
+	g.AddNode(&graph.Node{ID: "p/caller.go::Caller", Name: "Caller", Kind: graph.KindFunction, FilePath: "p/caller.go", StartLine: 10})
+	// Two distinct call sites from Caller, each carrying its own Line.
+	g.AddEdge(&graph.Edge{From: "p/caller.go::Caller", To: "p/target.go::Target", Kind: graph.EdgeCalls, FilePath: "p/caller.go", Line: 27})
+	g.AddEdge(&graph.Edge{From: "p/caller.go::Caller", To: "p/target.go::Target", Kind: graph.EdgeCalls, FilePath: "p/caller.go", Line: 42})
+
+	s := &Server{
+		graph:      g,
+		session:    newSessionState(),
+		tokenStats: &tokenStats{},
+		symHistory: &symbolHistory{entries: make(map[string][]SymbolModification)},
+		sessions:   newSessionMap(),
+		toolScopes: newScopeRegistry(),
+	}
+
+	out := callCheckRefs(t, s, map[string]any{"symbol_id": "p/target.go::Target"})
+	ev, _ := out["evidence"].([]any)
+	require.Len(t, ev, 2, "two distinct call sites must produce two evidence rows")
+	row0 := ev[0].(map[string]any)
+	row1 := ev[1].(map[string]any)
+	// Lines must reflect the edges, not the caller's StartLine (10).
+	got := []float64{row0["line"].(float64), row1["line"].(float64)}
+	require.ElementsMatch(t, []float64{27, 42}, got,
+		"evidence line must surface the call-site, got %v", got)
+}
+
 func TestCheckReferences_ImportingFilesFound(t *testing.T) {
 	s := newCheckRefsTestServer(t)
 	out := callCheckRefs(t, s, map[string]any{"symbol_id": "p/handler.go::Handle"})

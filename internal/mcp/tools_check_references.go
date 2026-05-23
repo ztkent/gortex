@@ -104,6 +104,18 @@ func (s *Server) handleCheckReferences(ctx context.Context, req mcp.CallToolRequ
 					ev.FilePath = from.FilePath
 					ev.Line = from.StartLine
 				}
+				// Prefer the edge's own call-site line / file when
+				// they're populated. Two distinct calls from the
+				// same caller used to collapse onto the caller's
+				// start line — same shape as the find_usages bug
+				// fixed earlier; the evidence builder owns its own
+				// copy of that pattern.
+				if e.Line > 0 {
+					ev.Line = e.Line
+				}
+				if e.FilePath != "" {
+					ev.FilePath = e.FilePath
+				}
 				evidence = append(evidence, ev)
 			}
 		}
