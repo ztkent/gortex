@@ -462,6 +462,34 @@ func (s *Server) handleGetEditingContext(ctx context.Context, req mcp.CallToolRe
 	return s.respondJSONOrTOON(ctx, req, result)
 }
 
+// findImportLanguageByExt maps the target file's extension to the
+// language label graph nodes carry. Covers the languages that have a
+// real import system (the rest fall through to an empty string,
+// which disables language filtering rather than blocking the lookup).
+var findImportLanguageByExt = map[string]string{
+	".go":   "go",
+	".ts":   "typescript",
+	".tsx":  "typescript",
+	".mts":  "typescript",
+	".cts":  "typescript",
+	".js":   "javascript",
+	".jsx":  "javascript",
+	".mjs":  "javascript",
+	".cjs":  "javascript",
+	".py":   "python",
+	".rb":   "ruby",
+	".rs":   "rust",
+	".java": "java",
+	".kt":   "kotlin",
+	".kts":  "kotlin",
+	".php":  "php",
+	".cs":   "csharp",
+}
+
+func languageForExtension(path string) string {
+	return findImportLanguageByExt[strings.ToLower(filepath.Ext(path))]
+}
+
 func (s *Server) handleFindImportPath(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	symbolName, err := req.RequireString("name")
 	if err != nil {
@@ -472,12 +500,43 @@ func (s *Server) handleFindImportPath(ctx context.Context, req mcp.CallToolReque
 		return mcp.NewToolResultError("path is required"), nil
 	}
 
-	candidates := s.scopedNodeSlice(ctx, s.engineFor(ctx).FindSymbols(symbolName))
+	// Accept qualified Go names ("graph.Node", "pkg.Sym") by splitting
+	// on the final dot. The first segment carries the package
+	// qualifier the lookup should bias toward; the second is the
+	// actual identifier the graph stores. Falls through unchanged for
+	// bare names.
+	packageHint, bareName := "", symbolName
+	if dot := strings.LastIndex(symbolName, "."); dot > 0 && dot < len(symbolName)-1 {
+		packageHint = symbolName[:dot]
+		bareName = symbolName[dot+1:]
+	}
+
+	candidates := s.scopedNodeSlice(ctx, s.engineFor(ctx).FindSymbols(bareName))
 	if len(candidates) == 0 {
 		return mcp.NewToolResultError("symbol not found: " + symbolName), nil
 	}
 
-	// Find the best match (prefer different directory from target).
+	// Filter by the target file's language so a Go import lookup
+	// never resolves to a TypeScript declaration that just happens to
+	// share the identifier. Falls back to the unfiltered candidate
+	// set when we can't infer a language for the target — better an
+	// approximate hit than no hit at all.
+	targetLang := languageForExtension(targetFile)
+	if targetLang != "" {
+		filtered := candidates[:0:len(candidates)]
+		for _, c := range candidates {
+			if c.Language == "" || c.Language == targetLang {
+				filtered = append(filtered, c)
+			}
+		}
+		if len(filtered) > 0 {
+			candidates = filtered
+		}
+	}
+
+	// Find the best match (prefer different directory from target;
+	// when a package qualifier was supplied, bias toward candidates
+	// whose home directory's leaf matches it).
 	targetDir := filepath.Dir(targetFile)
 	var best *graph.Node
 	for _, c := range candidates {
@@ -487,10 +546,18 @@ func (s *Server) handleFindImportPath(ctx context.Context, req mcp.CallToolReque
 		if best == nil {
 			best = c
 		}
-		// Prefer symbols NOT in the same directory (actual imports).
-		if filepath.Dir(c.FilePath) != targetDir {
+		candDir := filepath.Dir(c.FilePath)
+		// Package-qualifier bias: when the caller wrote `graph.Node`,
+		// prefer a candidate whose directory leaf is `graph`. Matches
+		// the Go convention that the import alias defaults to the
+		// last path segment.
+		if packageHint != "" && filepath.Base(candDir) == packageHint && candDir != targetDir {
 			best = c
 			break
+		}
+		// Prefer symbols NOT in the same directory (actual imports).
+		if candDir != targetDir {
+			best = c
 		}
 	}
 
