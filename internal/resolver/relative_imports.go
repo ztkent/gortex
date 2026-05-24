@@ -23,6 +23,49 @@ import (
 func (r *Resolver) resolveRelativeImports() {
 	fileLang := r.collectFileLanguages()
 	var reindexBatch []graph.EdgeReindex
+
+	// Pre-build a map of every KindFile node's ID. The relative-
+	// import resolvers below check 1-2 candidate IDs per edge to
+	// decide whether a target file exists; doing that as a per-edge
+	// GetNode (a SQL query each on a disk backend) is what made this
+	// pass dominate sqlite resolve time. One NodesByKind scan
+	// materialises the set once at indexed cost; lookups become
+	// O(1) map hits.
+	fileIDs := make(map[string]struct{}, 1024)
+	for n := range r.graph.NodesByKind(graph.KindFile) {
+		if n != nil && n.ID != "" {
+			fileIDs[n.ID] = struct{}{}
+		}
+	}
+	resolvePython := func(stem string) string {
+		if !strings.Contains(stem, "/") {
+			return ""
+		}
+		for _, cand := range []string{stem + ".py", stem + "/__init__.py"} {
+			if _, ok := fileIDs[cand]; ok {
+				return cand
+			}
+		}
+		return ""
+	}
+	resolveDart := func(importingFile, uri string) string {
+		if uri == "" || strings.HasPrefix(uri, "dart:") || strings.HasPrefix(uri, "package:") {
+			return ""
+		}
+		dir := ""
+		if i := strings.LastIndex(importingFile, "/"); i >= 0 {
+			dir = importingFile[:i]
+		}
+		target := joinRelativePath(dir, uri)
+		if target == "" {
+			return ""
+		}
+		if _, ok := fileIDs[target]; ok {
+			return target
+		}
+		return ""
+	}
+
 	// EdgesByKind pushes the "kind = imports" filter into the store;
 	// disk backends only enumerate import edges instead of every
 	// edge in the graph.
@@ -39,7 +82,7 @@ func (r *Resolver) resolveRelativeImports() {
 			// Always resolvable via internal-file lookup.
 			path = strings.TrimPrefix(e.To, "unresolved::pyrel::")
 			if lang == "python" {
-				resolved = resolvePythonRelativeImport(r.graph, path)
+				resolved = resolvePython(path)
 			}
 		case strings.HasPrefix(e.To, "external::"):
 			// Fallthrough path for Dart relative URIs the main
@@ -49,9 +92,9 @@ func (r *Resolver) resolveRelativeImports() {
 			path = strings.TrimPrefix(e.To, "external::")
 			switch lang {
 			case "python":
-				resolved = resolvePythonRelativeImport(r.graph, path)
+				resolved = resolvePython(path)
 			case "dart":
-				resolved = resolveDartRelativeImport(r.graph, e.From, path)
+				resolved = resolveDart(e.From, path)
 			}
 		default:
 			continue

@@ -69,12 +69,36 @@ func (r *Resolver) attributeNonGoModuleImports() {
 	}
 
 	// Materialise module nodes first; later loops assume the
-	// node exists when we add EdgeDependsOnModule.
+	// node exists when we add EdgeDependsOnModule. Batch the
+	// presence check via GetNodesByIDs so disk backends do one
+	// indexed SELECT IN (...) instead of one per-seed GetNode.
+	seedIDs := make([]string, 0, len(moduleSeeds))
+	for id := range moduleSeeds {
+		seedIDs = append(seedIDs, id)
+	}
+	existing := r.graph.GetNodesByIDs(seedIDs)
 	for _, seed := range moduleSeeds {
-		if r.graph.GetNode(seed.id) != nil {
+		if _, ok := existing[seed.id]; ok {
 			continue
 		}
 		r.graph.AddNode(buildNonGoModuleNode(seed))
+	}
+
+	// Pre-build a set of every (fileID, moduleID) pair the graph
+	// already has an EdgeDependsOnModule edge for. The old code
+	// called hasDependsOnModule per rewrite, which on a disk backend
+	// fans out to N per-file GetOutEdges SELECTs (50k+ on a sqlite-
+	// backed gortex pass). One EdgesByKind scan is an indexed range
+	// read on every backend, plus a Go-side map build that turns
+	// the per-rewrite check into a constant-time lookup.
+	existingDepends := make(map[string]map[string]struct{})
+	for e := range r.graph.EdgesByKind(graph.EdgeDependsOnModule) {
+		set := existingDepends[e.From]
+		if set == nil {
+			set = make(map[string]struct{})
+			existingDepends[e.From] = set
+		}
+		set[e.To] = struct{}{}
 	}
 
 	// Rewrite each EdgeImports target and collect the re-bucket
@@ -97,9 +121,12 @@ func (r *Resolver) attributeNonGoModuleImports() {
 		set[p.moduleID] = struct{}{}
 		// Avoid emitting a duplicate EdgeDependsOnModule when an
 		// earlier pass already wired one (e.g. cold + warm
-		// indexing of the same file).
-		if r.hasDependsOnModule(p.edge.From, p.moduleID) {
-			continue
+		// indexing of the same file). Constant-time map lookup
+		// against the pre-built existingDepends index.
+		if existing, ok := existingDepends[p.edge.From]; ok {
+			if _, dup := existing[p.moduleID]; dup {
+				continue
+			}
 		}
 		r.graph.AddEdge(&graph.Edge{
 			From:            p.edge.From,
