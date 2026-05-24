@@ -187,15 +187,11 @@ func (cr *CrossRepoResolver) ResolveAll() *CrossRepoStats {
 
 	stats := &CrossRepoStats{ByRepo: make(map[string]int)}
 
-	edges := cr.graph.AllEdges()
-	// Accumulate every re-bind across the pass and flush in one
-	// batched call so disk backends commit in chunks instead of one
-	// transaction per resolved edge.
+	// Predicate-shaped read: disk backends only enumerate the
+	// "unresolved::*" slice (the only one this pass mutates). Batch
+	// mutations to commit in chunks at the end.
 	var reindexBatch []graph.EdgeReindex
-	for _, e := range edges {
-		if !strings.HasPrefix(e.To, unresolvedPrefix) {
-			continue
-		}
+	for e := range cr.graph.EdgesWithUnresolvedTarget() {
 		cr.resolveEdge(e, stats, &reindexBatch)
 	}
 	if len(reindexBatch) > 0 {
@@ -257,13 +253,9 @@ func (cr *CrossRepoResolver) ResolveForRepo(repoPrefix string) *CrossRepoStats {
 // These maps are torn down via clearDirIndexes when the pass completes
 // so we don't keep ~N pointers alive between resolves.
 func (cr *CrossRepoResolver) buildDirIndexes() {
-	nodes := cr.graph.AllNodes()
-	cr.dirIndex = make(map[string][]*graph.Node, len(nodes)/4)
-	cr.lastDirIndex = make(map[string][]*graph.Node, len(nodes)/4)
-	for _, n := range nodes {
-		if n.Kind != graph.KindFile {
-			continue
-		}
+	cr.dirIndex = make(map[string][]*graph.Node, 128)
+	cr.lastDirIndex = make(map[string][]*graph.Node, 128)
+	for n := range cr.graph.NodesByKind(graph.KindFile) {
 		dir := filepath.Dir(n.FilePath)
 		cr.dirIndex[dir] = append(cr.dirIndex[dir], n)
 		last := lastPathComponent(dir)
@@ -278,12 +270,8 @@ func (cr *CrossRepoResolver) buildDirIndexes() {
 // by callerRepo, so the same dep node reachable here is the one in the
 // importing file's own go.mod.
 func (cr *CrossRepoResolver) buildDepModuleIndex() {
-	nodes := cr.graph.AllNodes()
 	by := make(map[string][]depModuleEntry)
-	for _, n := range nodes {
-		if n.Kind != graph.KindContract {
-			continue
-		}
+	for n := range cr.graph.NodesByKind(graph.KindContract) {
 		if !strings.HasPrefix(n.ID, "dep::") {
 			continue
 		}
@@ -335,10 +323,7 @@ func (cr *CrossRepoResolver) clearDirIndexes() {
 // graph is settled enough to be trustworthy evidence.
 func (cr *CrossRepoResolver) buildReachableReposIndex() {
 	idx := make(map[string]map[string]struct{})
-	for _, e := range cr.graph.AllEdges() {
-		if e.Kind != graph.EdgeImports {
-			continue
-		}
+	for e := range cr.graph.EdgesByKind(graph.EdgeImports) {
 		// Only resolved imports carry evidence — an unresolved import
 		// target tells us nothing about which repo the caller reaches.
 		to := cr.graph.GetNode(e.To)
@@ -580,10 +565,7 @@ func (cr *CrossRepoResolver) resolveImport(e *graph.Edge, importPath string, sta
 			}
 		}
 	} else {
-		for _, n := range cr.graph.AllNodes() {
-			if n.Kind != graph.KindFile {
-				continue
-			}
+		for n := range cr.graph.NodesByKind(graph.KindFile) {
 			dir := filepath.Dir(n.FilePath)
 			if strings.HasSuffix(dir, lastPathComponent(importPath)) || dir == importPath {
 				consider(n)

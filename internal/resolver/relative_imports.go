@@ -23,10 +23,10 @@ import (
 func (r *Resolver) resolveRelativeImports() {
 	fileLang := r.collectFileLanguages()
 	var reindexBatch []graph.EdgeReindex
-	for _, e := range r.graph.AllEdges() {
-		if e.Kind != graph.EdgeImports {
-			continue
-		}
+	// EdgesByKind pushes the "kind = imports" filter into the store;
+	// disk backends only enumerate import edges instead of every
+	// edge in the graph.
+	for e := range r.graph.EdgesByKind(graph.EdgeImports) {
 		lang, ok := fileLang[e.From]
 		if !ok {
 			continue

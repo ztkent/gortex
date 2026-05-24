@@ -58,8 +58,12 @@ func ResolveGRPCStubCalls(g graph.Store) int {
 	idx := buildGRPCHandlerIndex(g)
 	resolved := 0
 	var reindexBatch []graph.EdgeReindex
-	for _, e := range g.AllEdges() {
-		if e == nil || e.Kind != graph.EdgeCalls || e.Meta == nil {
+	// Push the kind filter into the store; iterate only EdgeCalls.
+	// The Meta["via"]=="grpc.stub" check still runs in Go because
+	// Meta is gob-encoded blob on disk backends — but the row count
+	// flowing through is already constrained to the call-edge slice.
+	for e := range g.EdgesByKind(graph.EdgeCalls) {
+		if e == nil || e.Meta == nil {
 			continue
 		}
 		if v, _ := e.Meta["via"].(string); v != "grpc.stub" {

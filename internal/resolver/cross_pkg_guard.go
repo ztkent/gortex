@@ -191,15 +191,12 @@ func (r *Resolver) buildImportClosure() map[string]map[string]struct{} {
 		}
 		set[dir] = struct{}{}
 	}
-	for _, n := range r.graph.AllNodes() {
-		if n.Kind == graph.KindFile && n.FilePath != "" {
+	for n := range r.graph.NodesByKind(graph.KindFile) {
+		if n.FilePath != "" {
 			add(n.FilePath, filepath.Dir(n.FilePath))
 		}
 	}
-	for _, e := range r.graph.AllEdges() {
-		if e.Kind != graph.EdgeImports {
-			continue
-		}
+	for e := range r.graph.EdgesByKind(graph.EdgeImports) {
 		// Skip imports still pointing at an unresolved placeholder or an
 		// out-of-repo stub — neither names an in-repo directory that a
 		// name-only call candidate could legitimately live in.

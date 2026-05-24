@@ -159,15 +159,15 @@ func (r *Resolver) ResolveAll() *ResolveStats {
 	defer r.clearReachabilityIndex()
 	defer r.clearLSPIndex()
 
-	edges := r.graph.AllEdges()
-	// Pre-filter to the unresolved subset so workers don't burn time
-	// re-walking the whole edge slice — ~95% of edges in a settled
-	// graph are already resolved.
-	pending := edges[:0:0]
-	for _, e := range edges {
-		if strings.HasPrefix(e.To, unresolvedPrefix) {
-			pending = append(pending, e)
-		}
+	// Use the predicate-shaped Store method so disk backends scan
+	// only the contiguous "unresolved::*" slice (via a sparse
+	// idx_edge_unres bucket on bolt, a to_id range scan on sqlite)
+	// instead of pulling the whole edges table back to the client and
+	// filtering in Go. In-memory keeps the same cost as the old
+	// AllEdges()+prefix-check loop.
+	var pending []*graph.Edge
+	for e := range r.graph.EdgesWithUnresolvedTarget() {
+		pending = append(pending, e)
 	}
 	if len(pending) == 0 {
 		return &ResolveStats{}
@@ -314,13 +314,11 @@ func (r *Resolver) ResolveAll() *ResolveStats {
 //   - lastDirIndex keys on the last path component of that directory
 //     so an import of "logger" matches any file under .../logger/.
 func (r *Resolver) buildDirIndexes() {
-	nodes := r.graph.AllNodes()
-	r.dirIndex = make(map[string][]*graph.Node, len(nodes)/4)
-	r.lastDirIndex = make(map[string][]*graph.Node, len(nodes)/4)
-	for _, n := range nodes {
-		if n.Kind != graph.KindFile {
-			continue
-		}
+	r.dirIndex = make(map[string][]*graph.Node, 128)
+	r.lastDirIndex = make(map[string][]*graph.Node, 128)
+	// NodesByKind pushes the file-kind filter into the store; disk
+	// backends iterate just the file nodes instead of every node.
+	for n := range r.graph.NodesByKind(graph.KindFile) {
 		dir := filepath.Dir(n.FilePath)
 		r.dirIndex[dir] = append(r.dirIndex[dir], n)
 		last := lastPathComponent(dir)
@@ -348,12 +346,8 @@ func (r *Resolver) clearDirIndexes() {
 // repo — those resolve through the cross-repo file graph instead and
 // have no module path embedded in the ID.
 func (r *Resolver) buildDepModuleIndex() {
-	nodes := r.graph.AllNodes()
 	by := make(map[string][]depModuleEntry)
-	for _, n := range nodes {
-		if n.Kind != graph.KindContract {
-			continue
-		}
+	for n := range r.graph.NodesByKind(graph.KindContract) {
 		if !strings.HasPrefix(n.ID, "dep::") {
 			continue
 		}
@@ -825,10 +819,7 @@ func (r *Resolver) resolveImport(e *graph.Edge, importPath string, stats *Resolv
 			}
 		}
 	} else {
-		for _, n := range r.graph.AllNodes() {
-			if n.Kind != graph.KindFile {
-				continue
-			}
+		for n := range r.graph.NodesByKind(graph.KindFile) {
 			dir := filepath.Dir(n.FilePath)
 			if strings.HasSuffix(dir, lastPathComponent(importPath)) || dir == importPath {
 				consider(n)
@@ -1392,8 +1383,8 @@ func (r *Resolver) resolveTokenRef(e *graph.Edge, name string, stats *ResolveSta
 // comparisons that found nothing (vscode has zero NestJS modules).
 func (r *Resolver) buildProvidesForIndex() {
 	idx := make(map[string]map[string]struct{})
-	for _, ed := range r.graph.AllEdges() {
-		if ed.Kind != graph.EdgeProvides || ed.Meta == nil {
+	for ed := range r.graph.EdgesByKind(graph.EdgeProvides) {
+		if ed.Meta == nil {
 			continue
 		}
 		pf, _ := ed.Meta["provides_for"].(string)
@@ -1450,17 +1441,11 @@ func (r *Resolver) buildReachabilityIndex() {
 	}
 
 	// Seed with each indexed file's own directory.
-	for _, n := range r.graph.AllNodes() {
-		if n.Kind != graph.KindFile {
-			continue
-		}
+	for n := range r.graph.NodesByKind(graph.KindFile) {
 		addDir(n.ID, filepath.Dir(n.FilePath))
 	}
 
-	for _, e := range r.graph.AllEdges() {
-		if e.Kind != graph.EdgeImports {
-			continue
-		}
+	for e := range r.graph.EdgesByKind(graph.EdgeImports) {
 		var importedDir string
 		switch {
 		case strings.HasPrefix(e.To, "unresolved::import::"):
@@ -1563,11 +1548,7 @@ func (r *Resolver) InferImplements() int {
 	}
 	var ifaces []ifaceInfo
 
-	allNodes := r.graph.AllNodes()
-	for _, n := range allNodes {
-		if n.Kind != graph.KindInterface {
-			continue
-		}
+	for n := range r.graph.NodesByKind(graph.KindInterface) {
 		if n.Meta == nil {
 			continue
 		}
@@ -1601,11 +1582,7 @@ func (r *Resolver) InferImplements() int {
 
 	// Step 2: Build map of type ID -> set of method names via EdgeMemberOf edges.
 	typeMethods := make(map[string]map[string]bool)
-	allEdges := r.graph.AllEdges()
-	for _, e := range allEdges {
-		if e.Kind != graph.EdgeMemberOf {
-			continue
-		}
+	for e := range r.graph.EdgesByKind(graph.EdgeMemberOf) {
 		// EdgeMemberOf: From=method, To=type
 		methodNode := r.graph.GetNode(e.From)
 		if methodNode == nil || methodNode.Kind != graph.KindMethod {
@@ -1744,10 +1721,7 @@ func (r *Resolver) InferOverrides() int {
 
 	// Step 1: index methods by their owning type via EdgeMemberOf.
 	typeMembers := make(map[string]map[string]*graph.Node) // typeID → name → method node
-	for _, e := range r.graph.AllEdges() {
-		if e.Kind != graph.EdgeMemberOf {
-			continue
-		}
+	for e := range r.graph.EdgesByKind(graph.EdgeMemberOf) {
 		method := r.graph.GetNode(e.From)
 		if method == nil || method.Kind != graph.KindMethod {
 			continue

@@ -39,10 +39,7 @@ func (r *Resolver) attributeNonGoModuleImports() {
 	moduleSeeds := map[string]moduleSeed{}
 	dependsSeen := map[string]map[string]struct{}{} // fileID → set of moduleIDs
 
-	for _, e := range r.graph.AllEdges() {
-		if e.Kind != graph.EdgeImports {
-			continue
-		}
+	for e := range r.graph.EdgesByKind(graph.EdgeImports) {
 		if !strings.HasPrefix(e.To, "external::") {
 			continue
 		}
@@ -124,10 +121,8 @@ func (r *Resolver) attributeNonGoModuleImports() {
 // (file ID → language) for the per-edge dispatch above.
 func (r *Resolver) collectFileLanguages() map[string]string {
 	out := map[string]string{}
-	for _, n := range r.graph.AllNodes() {
-		if n.Kind == graph.KindFile {
-			out[n.ID] = n.Language
-		}
+	for n := range r.graph.NodesByKind(graph.KindFile) {
+		out[n.ID] = n.Language
 	}
 	return out
 }

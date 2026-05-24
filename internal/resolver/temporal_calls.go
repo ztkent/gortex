@@ -88,8 +88,8 @@ func ResolveTemporalCalls(g graph.Store) int {
 	idx := buildTemporalIndex(g)
 	resolved := 0
 	var reindexBatch []graph.EdgeReindex
-	for _, e := range g.AllEdges() {
-		if e == nil || e.Kind != graph.EdgeCalls || e.Meta == nil {
+	for e := range g.EdgesByKind(graph.EdgeCalls) {
+		if e == nil || e.Meta == nil {
 			continue
 		}
 		if v, _ := e.Meta["via"].(string); v != "temporal.stub" {
@@ -185,8 +185,9 @@ func buildTemporalIndex(g graph.Store) *temporalIndex {
 	idx := &temporalIndex{byKindName: map[string][]*graph.Node{}}
 
 	// Phase 1 — Go side. Walk `temporal.register` edges and stamp the
-	// registered function's node.
-	for _, e := range g.AllEdges() {
+	// registered function's node. The "via" tag lives on EdgeCalls
+	// edges, so narrow with EdgesByKind before the Meta filter.
+	for e := range g.EdgesByKind(graph.EdgeCalls) {
 		if e == nil || e.Meta == nil {
 			continue
 		}
@@ -217,8 +218,8 @@ func buildTemporalIndex(g graph.Store) *temporalIndex {
 		role    string // "activity_interface" / "workflow_interface"
 	}
 	var javaIfaces []javaIfaceTag
-	for _, e := range g.AllEdges() {
-		if e == nil || e.Kind != graph.EdgeAnnotated {
+	for e := range g.EdgesByKind(graph.EdgeAnnotated) {
+		if e == nil {
 			continue
 		}
 		role, methodRole := temporalRoleForJavaAnnotation(e.To)
