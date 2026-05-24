@@ -1635,6 +1635,22 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 	var skippedByTimeout int64
 	var skippedByMinified int64
 
+	// Bulk-load fast path: when the backing Store implements
+	// graph.BulkLoader AND the store is empty (true on every cold
+	// IndexCtx — the bench / daemon both open a fresh backend), the
+	// per-file AddBatch calls below buffer into the backend instead of
+	// round-tripping through its query parser per call. FlushBulk after
+	// wg.Wait() commits everything through the backend's native bulk
+	// primitive (Kuzu COPY FROM, DuckDB long-lived Appender, Cayley
+	// batched ApplyDeltas with deferred mirror rebuild). Backends that
+	// don't implement BulkLoader (in-memory, bbolt, sqlite) skip the
+	// bracket entirely and serve AddBatch inline as today.
+	var bulkLoader graph.BulkLoader
+	if bl, ok := idx.graph.(graph.BulkLoader); ok && idx.graph.NodeCount() == 0 && idx.graph.EdgeCount() == 0 {
+		bulkLoader = bl
+		bulkLoader.BeginBulkLoad()
+	}
+
 	var wg sync.WaitGroup
 	for range workers {
 		wg.Add(1)
@@ -1785,6 +1801,17 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 	}
 	close(fileCh)
 	wg.Wait()
+
+	// Commit the per-file AddBatch buffer through the backend's native
+	// bulk-load primitive. Reported as its own stage so the bench can
+	// see where the parse-phase write cost lands on disk backends.
+	if bulkLoader != nil {
+		reporter.Report("flushing bulk load", 0, 0)
+		if err := bulkLoader.FlushBulk(); err != nil {
+			return nil, fmt.Errorf("indexer: bulk-load flush: %w", err)
+		}
+		reporter.Report("flushing bulk load", 1, 1)
+	}
 
 	if processed > 0 {
 		reporter.Report("parsing", int(processed), totalFiles)

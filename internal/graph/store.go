@@ -188,3 +188,45 @@ type Store interface {
 // fails fast here instead of at runtime when a different Store
 // implementation gets swapped in.
 var _ Store = (*Graph)(nil)
+
+// BulkLoader is an optional interface backends MAY implement to expose
+// a high-throughput cold-load fast path that bypasses per-call query
+// overhead. The cold-start indexer fires ~2000 small AddBatch calls
+// during its parse phase; on backends where every AddBatch round-trips
+// through a query parser (Kuzu / DuckDB / Cayley) that per-call cost
+// dominates wall time. BulkLoader lets the indexer bracket the parse
+// loop with BeginBulkLoad / FlushBulk: AddBatch calls inside the
+// bracket buffer rows in memory, and FlushBulk commits them through
+// the backend's native bulk primitive (Kuzu's COPY FROM, DuckDB's
+// long-lived Appender, Cayley's batched ApplyDeltas with deferred
+// mirror rebuild).
+//
+// Contract:
+//
+//   - BeginBulkLoad must be called on an empty store (NodeCount == 0,
+//     EdgeCount == 0). Calling it on a non-empty store is a programmer
+//     error; backends are free to refuse or no-op.
+//
+//   - Between BeginBulkLoad and FlushBulk, AddBatch is the only mutator
+//     the caller may invoke. Reads (GetNode, AllEdges, EdgesByKind, …)
+//     return whatever the backend can see — typically nothing buffered.
+//     The resolver MUST NOT run until after FlushBulk.
+//
+//   - FlushBulk commits everything buffered since BeginBulkLoad and
+//     returns the backend to normal per-call write mode. An error
+//     leaves the store in an implementation-defined state.
+//
+//   - Calling BeginBulkLoad twice without an intervening FlushBulk,
+//     or calling FlushBulk without a prior BeginBulkLoad, is a
+//     programmer error; backends are free to panic.
+//
+// The in-memory *Graph deliberately does NOT implement BulkLoader —
+// it's already optimal at the per-call path. bbolt and SQLite likewise
+// skip it: their per-call overhead is already amortised by their own
+// internal batching (chunked transactions, prepared statements). The
+// interface is intentionally opt-in so the indexer can probe with a
+// type assertion and fall through to today's per-batch path uniformly.
+type BulkLoader interface {
+	BeginBulkLoad()
+	FlushBulk() error
+}
