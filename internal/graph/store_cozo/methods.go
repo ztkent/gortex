@@ -1,3 +1,6 @@
+//go:build cozo
+
+
 package store_cozo
 
 import (

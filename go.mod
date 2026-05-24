@@ -3,6 +3,7 @@ module github.com/zzet/gortex
 go 1.26.2
 
 require (
+	github.com/LadybugDB/go-ladybug v0.13.1
 	github.com/alexaandru/go-sitter-forest/ada v1.9.0
 	github.com/alexaandru/go-sitter-forest/agda v1.9.0
 	github.com/alexaandru/go-sitter-forest/aiken v1.9.0
@@ -217,12 +218,11 @@ require (
 	github.com/alexaandru/go-sitter-forest/ziggy_schema v1.9.1
 	github.com/blevesearch/bleve/v2 v2.6.0
 	github.com/blevesearch/go-porterstemmer v1.0.3
-	github.com/cayleygraph/cayley v0.7.7
-	github.com/cayleygraph/quad v1.1.0
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/coder/hnsw v0.6.1
+	github.com/cozodb/cozo-lib-go v0.7.5
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/fwcd/tree-sitter-kotlin v0.0.0-20260411204054-55622a49bd59
 	github.com/gofrs/flock v0.13.0
@@ -273,7 +273,6 @@ require (
 	github.com/tree-sitter/tree-sitter-typescript v0.23.2
 	github.com/yalue/onnxruntime_go v1.30.1
 	github.com/zeebo/blake3 v0.2.4
-	go.etcd.io/bbolt v1.4.3
 	go.uber.org/zap v1.28.0
 	golang.org/x/sys v0.45.0
 	golang.org/x/term v0.43.0
@@ -285,12 +284,10 @@ require (
 )
 
 require (
-	github.com/LadybugDB/go-ladybug v0.13.1 // indirect
 	github.com/RoaringBitmap/roaring/v2 v2.18.0 // indirect
 	github.com/apache/arrow-go/v18 v18.4.1 // indirect
 	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
-	github.com/beorn7/perks v1.0.0 // indirect
 	github.com/bits-and-blooms/bitset v1.24.4 // indirect
 	github.com/blevesearch/bleve_index_api v1.3.11 // indirect
 	github.com/blevesearch/geo v0.2.5 // indirect
@@ -309,7 +306,6 @@ require (
 	github.com/blevesearch/zapx/v15 v15.4.3 // indirect
 	github.com/blevesearch/zapx/v16 v16.3.4 // indirect
 	github.com/blevesearch/zapx/v17 v17.1.3 // indirect
-	github.com/boltdb/bolt v1.3.1 // indirect
 	github.com/charmbracelet/colorprofile v0.4.3 // indirect
 	github.com/charmbracelet/x/ansi v0.11.7 // indirect
 	github.com/charmbracelet/x/cellbuf v0.0.15 // indirect
@@ -317,10 +313,8 @@ require (
 	github.com/chewxy/math32 v1.11.2 // indirect
 	github.com/clipperhouse/displaywidth v0.11.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
-	github.com/cozodb/cozo-lib-go v0.7.5 // indirect
 	github.com/daulet/tokenizers v1.27.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
-	github.com/dennwc/base v1.0.0 // indirect
 	github.com/dlclark/regexp2 v1.12.0 // indirect
 	github.com/duckdb/duckdb-go-bindings v0.1.21 // indirect
 	github.com/duckdb/duckdb-go-bindings/darwin-amd64 v0.1.21 // indirect
@@ -334,8 +328,6 @@ require (
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/goccy/go-json v0.10.5 // indirect
-	github.com/gogo/protobuf v1.3.0 // indirect
-	github.com/golang/protobuf v1.5.0 // indirect
 	github.com/golang/snappy v1.0.0 // indirect
 	github.com/gomlx/exceptions v0.0.3 // indirect
 	github.com/gomlx/go-huggingface v0.3.5 // indirect
@@ -345,13 +337,11 @@ require (
 	github.com/google/flatbuffers v25.2.10+incompatible // indirect
 	github.com/google/jsonschema-go v0.4.3 // indirect
 	github.com/google/renameio v1.0.1 // indirect
-	github.com/hidal-go/hidalgo v0.0.0-20190814174001-42e03f3b5eaa // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/klauspost/compress v1.18.5 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	github.com/knights-analytics/ortgenai v0.3.1 // indirect
-	github.com/lora-db/lora/crates/bindings/lora-go v0.0.0-00010101000000-000000000000 // indirect
 	github.com/lucasb-eyer/go-colorful v1.4.0 // indirect
 	github.com/marcboeker/go-duckdb/arrowmapping v0.0.21 // indirect
 	github.com/marcboeker/go-duckdb/mapping v0.0.21 // indirect
@@ -359,7 +349,6 @@ require (
 	github.com/mattn/go-localereader v0.0.1 // indirect
 	github.com/mattn/go-pointer v0.0.1 // indirect
 	github.com/mattn/go-runewidth v0.0.23 // indirect
-	github.com/matttproud/golang_protobuf_extensions v1.0.1 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/mschoch/smat v0.2.0 // indirect
@@ -370,10 +359,6 @@ require (
 	github.com/pierrec/lz4/v4 v4.1.26 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
-	github.com/prometheus/client_golang v0.9.3 // indirect
-	github.com/prometheus/client_model v0.0.0-20190129233127-fd36f4220a90 // indirect
-	github.com/prometheus/common v0.4.0 // indirect
-	github.com/prometheus/procfs v0.0.0-20190507164030-5867b95ac084 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/sagikazarmark/locafero v0.12.0 // indirect
@@ -385,7 +370,6 @@ require (
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/stretchr/objx v0.5.2 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
-	github.com/tylertreat/BoomFilters v0.0.0-20181028192813-611b3dbe80e8 // indirect
 	github.com/viant/afs v1.30.0 // indirect
 	github.com/viterin/partial v1.1.0 // indirect
 	github.com/viterin/vek v0.4.3 // indirect
@@ -393,6 +377,7 @@ require (
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	github.com/zeebo/xxh3 v1.0.2 // indirect
+	go.etcd.io/bbolt v1.4.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/crypto v0.52.0 // indirect
@@ -423,5 +408,3 @@ replace github.com/mattn/go-pointer => ./internal/thirdparty/go-pointer
 // blocked the Windows build because github.com/coder/hnsw imports it
 // unconditionally. See internal/thirdparty/renameio.
 replace github.com/google/renameio => ./internal/thirdparty/renameio
-
-replace github.com/lora-db/lora/crates/bindings/lora-go => /tmp/lora-build/crates/bindings/lora-go

@@ -1,3 +1,6 @@
+//go:build cozo
+
+
 // Package store_cozo is the CozoDB-backed implementation of
 // graph.Store. CozoDB is an embedded transactional relational +
 // graph + vector database with a Datalog query language. The Go

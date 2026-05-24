@@ -35,8 +35,6 @@ import (
 
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/graph/store_bolt"
-	"github.com/zzet/gortex/internal/graph/store_cayley"
 	"github.com/zzet/gortex/internal/graph/store_duckdb"
 	"github.com/zzet/gortex/internal/graph/store_kuzu"
 	"github.com/zzet/gortex/internal/graph/store_ladybug"
@@ -93,15 +91,12 @@ func main() {
 	workers := flag.Int("workers", runtime.NumCPU(), "indexer parallelism")
 	querySize := flag.Int("queries", 1000, "query workload size per backend")
 	skipMemory := flag.Bool("skip-memory", false, "skip the in-memory baseline")
-	skipBolt := flag.Bool("skip-bolt", false, "skip the bbolt backend")
 	skipSQLite := flag.Bool("skip-sqlite", false, "skip the sqlite backend")
 	skipKuzu := flag.Bool("skip-kuzu", false, "skip the kuzu (Cypher) backend")
-	skipCayley := flag.Bool("skip-cayley", false, "skip the cayley (pure-Go quad store) backend")
 	skipDuckDB := flag.Bool("skip-duckdb", false, "skip the duckdb (columnar SQL) backend")
 	skipLadybug := flag.Bool("skip-ladybug", false, "skip the ladybug (Kuzu fork, Cypher) backend")
 	skipCozo := flag.Bool("skip-cozo", false, "skip the cozo (Datalog) backend")
-	skipLora := flag.Bool("skip-lora", false, "skip the lora (Rust Cypher) backend")
-	only := flag.String("only", "", "comma-separated subset to run (memory,bolt,sqlite,kuzu,cayley,duckdb,ladybug,cozo,lora); overrides skip-* flags")
+	only := flag.String("only", "", "comma-separated subset to run (memory,sqlite,kuzu,duckdb,ladybug,cozo); overrides skip-* flags")
 	flag.Parse()
 	if *root == "" {
 		die("usage: store-bench -root <path>")
@@ -113,24 +108,20 @@ func main() {
 
 	// Resolve which backends to run. -only overrides every -skip flag.
 	wantMem := !*skipMemory
-	wantBolt := !*skipBolt
 	wantSQLite := !*skipSQLite
 	wantKuzu := !*skipKuzu
-	wantCayley := !*skipCayley
 	wantDuckDB := !*skipDuckDB
 	wantLadybug := !*skipLadybug
 	wantCozo := !*skipCozo
-	wantLora := !*skipLora
 	if *only != "" {
 		set := map[string]bool{}
 		for _, s := range strings.Split(*only, ",") {
 			set[strings.TrimSpace(s)] = true
 		}
-		wantMem, wantBolt, wantSQLite = set["memory"], set["bolt"], set["sqlite"]
-		wantKuzu, wantCayley, wantDuckDB = set["kuzu"], set["cayley"], set["duckdb"]
+		wantMem, wantSQLite = set["memory"], set["sqlite"]
+		wantKuzu, wantDuckDB = set["kuzu"], set["duckdb"]
 		wantLadybug = set["ladybug"]
 		wantCozo = set["cozo"]
-		wantLora = set["lora"]
 	}
 
 	var results []benchResult
@@ -139,27 +130,6 @@ func main() {
 		results = append(results, runBackend("memory", absRoot, *workers, *querySize,
 			func() (graph.Store, func() int64, error) {
 				return graph.New(), func() int64 { return 0 }, nil
-			}))
-	}
-	if wantBolt {
-		fmt.Fprintln(os.Stderr, "[bbolt] indexing through bbolt on-disk Store...")
-		results = append(results, runBackend("bbolt", absRoot, *workers, *querySize,
-			func() (graph.Store, func() int64, error) {
-				dir, err := os.MkdirTemp("", "store-bench-bolt-*")
-				if err != nil {
-					return nil, nil, err
-				}
-				path := filepath.Join(dir, "store.db")
-				s, err := store_bolt.Open(path)
-				if err != nil {
-					os.RemoveAll(dir)
-					return nil, nil, err
-				}
-				diskFn := func() int64 {
-					_ = s.Close()
-					return fileSize(path)
-				}
-				return s, diskFn, nil
 			}))
 	}
 	if wantSQLite {
@@ -204,26 +174,6 @@ func main() {
 				return s, diskFn, nil
 			}))
 	}
-	if wantCayley {
-		fmt.Fprintln(os.Stderr, "[cayley] indexing through Cayley (pure-Go quads) Store...")
-		results = append(results, runBackend("cayley", absRoot, *workers, *querySize,
-			func() (graph.Store, func() int64, error) {
-				dir, err := os.MkdirTemp("", "store-bench-cayley-*")
-				if err != nil {
-					return nil, nil, err
-				}
-				s, err := store_cayley.Open(dir)
-				if err != nil {
-					os.RemoveAll(dir)
-					return nil, nil, err
-				}
-				diskFn := func() int64 {
-					_ = s.Close()
-					return dirSize(dir)
-				}
-				return s, diskFn, nil
-			}))
-	}
 	if wantDuckDB {
 		fmt.Fprintln(os.Stderr, "[duckdb] indexing through DuckDB (columnar SQL) Store...")
 		results = append(results, runBackend("duckdb", absRoot, *workers, *querySize,
@@ -248,10 +198,6 @@ func main() {
 	if wantCozo && cozoFactory != nil {
 		fmt.Fprintln(os.Stderr, "[cozo] indexing through CozoDB (Datalog) Store...")
 		results = append(results, runBackend("cozo", absRoot, *workers, *querySize, cozoFactory))
-	}
-	if wantLora && loraFactory != nil {
-		fmt.Fprintln(os.Stderr, "[lora] indexing through LoraDB (Rust Cypher) Store...")
-		results = append(results, runBackend("lora", absRoot, *workers, *querySize, loraFactory))
 	}
 	if wantLadybug {
 		fmt.Fprintln(os.Stderr, "[ladybug] indexing through LadybugDB (Kuzu-fork, Cypher) Store...")
