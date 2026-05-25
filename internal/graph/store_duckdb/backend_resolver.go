@@ -133,7 +133,54 @@ WHERE edges.edge_id = c.edge_id`
 	return total, nil
 }
 func (s *Store) ResolveCrossRepo() (int, error)             { return 0, nil }
-func (s *Store) ResolveExternalCallStubs() (int, error)     { return 0, nil }
+// ResolveExternalCallStubs creates a Node row for every external::*
+// edge target that doesn't yet have one, sets kind='external' and
+// derives name from the id, then promotes the edge origin to
+// ast_resolved.
+//
+// Unlike Kuzu, DuckDB's AddBatch does not auto-stub endpoints, so
+// the node insertion is required (not just kind upgrade). Uses
+// INSERT ... ON CONFLICT DO NOTHING to keep the operation
+// idempotent.
+func (s *Store) ResolveExternalCallStubs() (int, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	// Step 1: insert missing external::* node rows. The schema
+	// has id as PRIMARY KEY so the conflict clause silently skips
+	// rows already present.
+	const insertStubs = `
+INSERT INTO nodes (id, kind, name, qual_name, file_path, start_line,
+                   end_line, language, repo_prefix, workspace_id,
+                   project_id, absolute_file_path, meta)
+SELECT DISTINCT e.to_id, 'external', substring(e.to_id, 11), '', '',
+                0, 0, '', '', '', '', '', NULL
+FROM edges e
+LEFT JOIN nodes n ON n.id = e.to_id
+WHERE e.to_id LIKE 'external::%' AND n.id IS NULL
+ON CONFLICT DO NOTHING`
+	if _, err := s.db.Exec(insertStubs); err != nil {
+		return 0, fmt.Errorf("backend-resolver ResolveExternalCallStubs insert: %w", err)
+	}
+
+	// Also upgrade any pre-existing rows with empty kind (e.g.
+	// dummy stubs from prior workloads).
+	const upgradeStubs = `
+UPDATE nodes
+SET kind = 'external', name = substring(id, 11)
+WHERE id LIKE 'external::%' AND (kind = '' OR kind <> 'external')`
+	if _, err := s.db.Exec(upgradeStubs); err != nil {
+		return 0, fmt.Errorf("backend-resolver ResolveExternalCallStubs upgrade: %w", err)
+	}
+
+	// Step 2: promote edge origin for external::* edges.
+	const promote = `
+UPDATE edges
+SET origin = 'ast_resolved', tier = 'ast_resolved'
+WHERE to_id LIKE 'external::%'
+  AND (origin = '' OR origin IS NULL)`
+	return s.runResolverUpdateLocked(promote, "ResolveExternalCallStubs promote")
+}
 
 // runResolverUpdateLocked is shared boilerplate for a backend-
 // resolver UPDATE that returns RowsAffected. Bumps the identity-

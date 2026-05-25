@@ -187,7 +187,38 @@ RETURN count(newE) AS resolved`
 	return total, nil
 }
 func (s *Store) ResolveCrossRepo() (int, error)             { return 0, nil }
-func (s *Store) ResolveExternalCallStubs() (int, error)     { return 0, nil }
+// ResolveExternalCallStubs ensures every external::* edge target
+// has a corresponding Node row with kind='external' and promotes
+// the edge's origin to ast_resolved. Kuzu's AddEdge already
+// auto-stubs the endpoint node via mergeStubNodeLocked, so the
+// only work here is the kind/name update + edge origin promotion.
+func (s *Store) ResolveExternalCallStubs() (int, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	// Step 1: stamp kind='external' + name on stub rows the
+	// auto-stub created with empty kind.
+	const upgradeNodes = `
+MATCH (stub:Node)
+WHERE stub.id STARTS WITH 'external::'
+  AND (stub.kind = '' OR stub.kind IS NULL)
+SET stub.kind = 'external',
+    stub.name = substring(stub.id, 11, size(stub.id) - 10)
+RETURN count(stub) AS upgraded`
+	if _, err := s.runResolverQueryLocked(upgradeNodes, "ResolveExternalCallStubs upgrade"); err != nil {
+		return 0, err
+	}
+
+	// Step 2: promote edge origin for any external::* edge that
+	// still has no origin set.
+	const promoteEdges = `
+MATCH ()-[e:Edge]->(target:Node)
+WHERE target.id STARTS WITH 'external::'
+  AND (e.origin = '' OR e.origin IS NULL)
+SET e.origin = 'ast_resolved', e.tier = 'ast_resolved'
+RETURN count(e) AS resolved`
+	return s.runResolverQueryLocked(promoteEdges, "ResolveExternalCallStubs promote")
+}
 
 // runResolverQueryLocked is the shared boilerplate for a backend-
 // resolver Cypher query that returns a single COUNT column. Bumps
