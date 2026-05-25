@@ -24,6 +24,7 @@ import (
 	"encoding/binary"
 	"flag"
 	"fmt"
+	mrand "math/rand"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -42,6 +43,7 @@ import (
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/parser/languages"
 	"github.com/zzet/gortex/internal/progress"
+	"github.com/zzet/gortex/internal/search"
 )
 
 // stageReporter prints per-stage timings to stderr so a long-running
@@ -105,6 +107,10 @@ func main() {
 	skipDuckDB := flag.Bool("skip-duckdb", false, "skip the duckdb (columnar SQL) backend")
 	skipLadybug := flag.Bool("skip-ladybug", false, "skip the ladybug (embedded Cypher property-graph) backend")
 	only := flag.String("only", "", "comma-separated subset to run (memory,sqlite,duckdb,ladybug); overrides skip-* flags")
+	vectorCorpus := flag.Int("vectors", 0, "vector corpus size for HNSW bench (0 disables); needs a backend with graph.VectorSearcher")
+	vectorDim := flag.Int("vector-dim", 384, "embedding dimensionality (MiniLM-L6-v2 default)")
+	vectorQueries := flag.Int("vector-queries", 200, "number of SimilarTo / Search queries to time per backend")
+	vectorSeed := flag.Int64("vector-seed", 1, "PRNG seed for deterministic vector generation across backends")
 	flag.Parse()
 	if *root == "" {
 		die("usage: store-bench -root <path>")
@@ -129,17 +135,26 @@ func main() {
 		wantLadybug = set["ladybug"]
 	}
 
+	// vectorBench is non-nil only when -vectors > 0. Generated once
+	// so every backend benches against the exact same corpus + the
+	// exact same query vectors — apples-to-apples between Ladybug's
+	// engine-native HNSW and the in-process baseline.
+	var vecBench *vectorWorkload
+	if *vectorCorpus > 0 {
+		vecBench = newVectorWorkload(*vectorCorpus, *vectorDim, *vectorQueries, *vectorSeed)
+	}
+
 	var results []benchResult
 	if wantMem {
 		fmt.Fprintln(os.Stderr, "[memory] indexing through in-memory Store...")
-		results = append(results, runBackend("memory", absRoot, *workers, *querySize,
+		results = append(results, runBackend("memory", absRoot, *workers, *querySize, vecBench,
 			func() (graph.Store, func() int64, error) {
 				return graph.New(), func() int64 { return 0 }, nil
 			}))
 	}
 	if wantSQLite {
 		fmt.Fprintln(os.Stderr, "[sqlite] indexing through sqlite on-disk Store...")
-		results = append(results, runBackend("sqlite", absRoot, *workers, *querySize,
+		results = append(results, runBackend("sqlite", absRoot, *workers, *querySize, vecBench,
 			func() (graph.Store, func() int64, error) {
 				dir, err := os.MkdirTemp("", "store-bench-sqlite-*")
 				if err != nil {
@@ -160,7 +175,7 @@ func main() {
 	}
 	if wantDuckDB {
 		fmt.Fprintln(os.Stderr, "[duckdb] indexing through DuckDB (columnar SQL) Store...")
-		results = append(results, runBackend("duckdb", absRoot, *workers, *querySize,
+		results = append(results, runBackend("duckdb", absRoot, *workers, *querySize, vecBench,
 			func() (graph.Store, func() int64, error) {
 				dir, err := os.MkdirTemp("", "store-bench-duckdb-*")
 				if err != nil {
@@ -181,7 +196,7 @@ func main() {
 	}
 	if wantLadybug {
 		fmt.Fprintln(os.Stderr, "[ladybug] indexing through Ladybug (embedded Cypher property-graph) Store...")
-		results = append(results, runBackend("ladybug", absRoot, *workers, *querySize,
+		results = append(results, runBackend("ladybug", absRoot, *workers, *querySize, vecBench,
 			func() (graph.Store, func() int64, error) {
 				dir, err := os.MkdirTemp("", "store-bench-ladybug-*")
 				if err != nil {
@@ -199,6 +214,16 @@ func main() {
 				}
 				return s, diskFn, nil
 			}))
+	}
+
+	// In-process HNSW baseline. Reported as a synthetic backend row
+	// so the per-tool table can show vector_search side-by-side with
+	// every store's engine-native number. The row's index/heap/disk
+	// columns are intentionally zeroed — it's a search-only baseline,
+	// not a full pipeline run.
+	if vecBench != nil {
+		fmt.Fprintln(os.Stderr, "[in-process HNSW] running search.VectorBackend baseline...")
+		results = append(results, runInProcVectorBaseline(vecBench))
 	}
 
 	printTable(os.Stdout, results)
@@ -230,6 +255,7 @@ func runBackend(
 	absRoot string,
 	workers int,
 	querySize int,
+	vec *vectorWorkload,
 	factory func() (graph.Store, func() int64, error),
 ) benchResult {
 	r := benchResult{Backend: name}
@@ -323,6 +349,34 @@ func runBackend(
 		getFile = append(getFile, time.Since(t))
 	}
 	r.PerTool["get_file_summary"] = toolStatsFrom(getFile)
+
+	// vector_search — engine-native HNSW via graph.VectorSearcher.
+	// The vector workload is generated once (deterministic seed) so
+	// every backend sees identical inputs; the in-process baseline at
+	// the bottom of the table uses the same workload for comparison.
+	// Skipped when -vectors=0 or the backend doesn't implement the
+	// capability — leaving the cell blank keeps the column honest.
+	if vec != nil && vec.corpus > 0 {
+		if vs, ok := store.(graph.VectorSearcher); ok && len(wl.nodeIDs) > 0 {
+			items := vec.itemsForIDs(wl.nodeIDs)
+			if len(items) > 0 {
+				if err := vs.BulkUpsertEmbeddings(items); err != nil {
+					fmt.Fprintf(os.Stderr, "    [vector_search] %s BulkUpsertEmbeddings: %v\n", name, err)
+				} else if err := vs.BuildVectorIndex(vec.dim); err != nil {
+					fmt.Fprintf(os.Stderr, "    [vector_search] %s BuildVectorIndex: %v\n", name, err)
+				} else {
+					vecSearch := make([]time.Duration, 0, vec.queries)
+					for i := 0; i < vec.queries; i++ {
+						q := vec.queryVecs[i%len(vec.queryVecs)]
+						t := time.Now()
+						_, _ = vs.SimilarTo(q, 20)
+						vecSearch = append(vecSearch, time.Since(t))
+					}
+					r.PerTool["vector_search"] = toolStatsFrom(vecSearch)
+				}
+			}
+		}
+	}
 
 	// fts_search — backend-native full-text search via the
 	// graph.SymbolSearcher capability. Bypasses BM25/Bleve entirely
@@ -434,6 +488,135 @@ func pickQueriesFromStore(s graph.Store, n int) queryWorkload {
 	return wl
 }
 
+// vectorWorkload is the shared corpus + query set fed to every
+// VectorSearcher-implementing backend AND to the in-process HNSW
+// baseline. Generating it once (deterministic seed) guarantees the
+// Ladybug-vs-in-process comparison is apples-to-apples: same vector
+// distribution, same query vectors, same k.
+type vectorWorkload struct {
+	corpus    int
+	dim       int
+	queries   int
+	corpusVec [][]float32 // length corpus
+	queryVecs [][]float32 // length queries
+}
+
+// newVectorWorkload generates the shared vector corpus + query set.
+// Each vector is L2-normalised — HNSW under cosine distance behaves
+// best on unit-norm inputs, matching the embedder's output. The
+// seed is the user-supplied -vector-seed so re-runs are reproducible.
+func newVectorWorkload(corpus, dim, queries int, seed int64) *vectorWorkload {
+	if corpus <= 0 || dim <= 0 || queries <= 0 {
+		return nil
+	}
+	rng := mrand.New(mrand.NewSource(seed))
+	wl := &vectorWorkload{
+		corpus:    corpus,
+		dim:       dim,
+		queries:   queries,
+		corpusVec: make([][]float32, corpus),
+		queryVecs: make([][]float32, queries),
+	}
+	for i := 0; i < corpus; i++ {
+		wl.corpusVec[i] = randomUnitVec(rng, dim)
+	}
+	for i := 0; i < queries; i++ {
+		wl.queryVecs[i] = randomUnitVec(rng, dim)
+	}
+	return wl
+}
+
+// itemsForIDs pairs node IDs with vectors from the corpus. The
+// corpus may be shorter or longer than the IDs slice — we use
+// modular indexing so every ID gets a stable vector regardless of
+// the populated store size.
+func (w *vectorWorkload) itemsForIDs(ids []string) []graph.VectorItem {
+	out := make([]graph.VectorItem, 0, len(ids))
+	if w == nil || len(w.corpusVec) == 0 {
+		return out
+	}
+	seen := make(map[string]bool, len(ids))
+	for i, id := range ids {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, graph.VectorItem{
+			NodeID: id,
+			Vec:    w.corpusVec[i%len(w.corpusVec)],
+		})
+	}
+	return out
+}
+
+func randomUnitVec(rng *mrand.Rand, dim int) []float32 {
+	v := make([]float32, dim)
+	var sum float64
+	for i := 0; i < dim; i++ {
+		// Box-Muller-ish normal-ish without the heavy machinery; uniform
+		// in [-1,1] is plenty for an HNSW microbenchmark.
+		x := rng.Float32()*2 - 1
+		v[i] = x
+		sum += float64(x * x)
+	}
+	if sum == 0 {
+		v[0] = 1
+		return v
+	}
+	inv := float32(1.0 / sqrt(sum))
+	for i := 0; i < dim; i++ {
+		v[i] *= inv
+	}
+	return v
+}
+
+func sqrt(x float64) float64 {
+	// Local Newton-Raphson to dodge math import noise; cheap enough
+	// for setup-time work.
+	if x <= 0 {
+		return 0
+	}
+	z := x
+	for i := 0; i < 16; i++ {
+		z -= (z*z - x) / (2 * z)
+	}
+	return z
+}
+
+// runInProcVectorBaseline times the same Add/Search workload through
+// search.VectorBackend (in-process HNSW). Returned as a benchResult
+// with only PerTool["vector_search"] populated — the other columns
+// are deliberately zeroed so the caller knows this row is search-
+// only, not a full pipeline run.
+func runInProcVectorBaseline(vec *vectorWorkload) benchResult {
+	r := benchResult{Backend: "(in-process HNSW)", PerTool: map[string]toolStats{}}
+	if vec == nil || vec.corpus == 0 {
+		return r
+	}
+	v := search.NewVector(vec.dim)
+	for i := 0; i < vec.corpus; i++ {
+		v.Add(fmt.Sprintf("n%07d", i), vec.corpusVec[i])
+	}
+	r.NodeCount = vec.corpus
+	samples := make([]time.Duration, 0, vec.queries)
+	for i := 0; i < vec.queries; i++ {
+		q := vec.queryVecs[i%len(vec.queryVecs)]
+		t := time.Now()
+		_ = v.Search(q, 20)
+		samples = append(samples, time.Since(t))
+	}
+	r.PerTool["vector_search"] = toolStatsFrom(samples)
+	// Heap snapshot reflects the in-process HNSW's footprint after
+	// the corpus has been loaded — the headline "what does the
+	// daemon save by delegating to Ladybug" number.
+	runtime.GC()
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	r.HeapAllocMB = float64(m.HeapAlloc) / 1e6
+	r.HeapInuseMB = float64(m.HeapInuse) / 1e6
+	return r
+}
+
 func toolStatsFrom(latencies []time.Duration) toolStats {
 	return toolStats{
 		P50us: pctUs(latencies, 50),
@@ -482,7 +665,7 @@ func printTable(w *os.File, rows []benchResult) {
 	// Per-MCP-tool latency table. One row per backend, one column per
 	// tool. Each cell is "p50 / p95" of the Store-level call the tool
 	// runs at the persistence layer.
-	tools := []string{"get_symbol", "get_dependencies", "find_usages", "get_callers", "search_symbols", "get_file_summary", "fts_search"}
+	tools := []string{"get_symbol", "get_dependencies", "find_usages", "get_callers", "search_symbols", "get_file_summary", "fts_search", "vector_search"}
 	fmt.Fprintln(w, "# Per-MCP-tool latency (Store-level p50 / p95)")
 	fmt.Fprintln(w, "")
 	fmt.Fprint(w, "| backend |")
