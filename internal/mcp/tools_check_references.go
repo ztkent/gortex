@@ -81,14 +81,38 @@ func (s *Server) handleCheckReferences(ctx context.Context, req mcp.CallToolRequ
 	callers := map[string]bool{}
 	totalEdges := 0
 	if target != nil {
-		for _, e := range s.graph.GetInEdges(target.ID) {
+		// Pre-filter the in-edges and batch-fetch the surviving
+		// `From` nodes in one round-trip. On Ladybug the per-edge
+		// GetNode pattern was a cgo Cypher call per inbound edge —
+		// for heavily-referenced symbols (hundreds of callers) the
+		// cost was dominant. One GetNodesByIDs gives us the same
+		// data in a single bulk query.
+		inEdges := s.graph.GetInEdges(target.ID)
+		fromIDs := make([]string, 0, len(inEdges))
+		seenFrom := make(map[string]struct{}, len(inEdges))
+		for _, e := range inEdges {
 			if !isCheckRefEdge(e.Kind) {
 				continue
 			}
 			if minTier != "" && !atOrAboveTier(string(e.Origin), minTier) {
 				continue
 			}
-			from := s.graph.GetNode(e.From)
+			if _, dup := seenFrom[e.From]; dup {
+				continue
+			}
+			seenFrom[e.From] = struct{}{}
+			fromIDs = append(fromIDs, e.From)
+		}
+		fromByID := s.graph.GetNodesByIDs(fromIDs)
+
+		for _, e := range inEdges {
+			if !isCheckRefEdge(e.Kind) {
+				continue
+			}
+			if minTier != "" && !atOrAboveTier(string(e.Origin), minTier) {
+				continue
+			}
+			from := fromByID[e.From]
 			if from != nil && excludeTests && isTestPath(from.FilePath) {
 				continue
 			}

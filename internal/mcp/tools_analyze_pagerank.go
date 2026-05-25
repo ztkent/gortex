@@ -14,7 +14,7 @@
 //     engine-native parallel implementation (Ligra-based). Saves
 //     the per-call cost of a fresh Go-side power iteration.
 //
-//   - Otherwise (in-memory store, sqlite, duckdb), falls back to
+//   - Otherwise (in-memory store), falls back to
 //     analysis.ComputePageRank — the same pure-Go implementation
 //     the search rerank pipeline consumes via the cached
 //     Server.pageRank field.
@@ -72,11 +72,24 @@ func (s *Server) handleAnalyzePageRank(ctx context.Context, req mcp.CallToolRequ
 		Limit:         limit,
 	})
 
+	// Batch-materialise hit nodes in one backend round-trip instead
+	// of per-id GetNode. On Ladybug each GetNode is a cgo Cypher
+	// call; on the default limit (20) the per-id path issued 20
+	// cgo round-trips per pagerank invocation. Single GetNodesByIDs
+	// collapses that into one bulk query while preserving rank order
+	// (the local map lookup is keyed by NodeID).
+	ids := make([]string, 0, len(hits))
+	for _, h := range hits {
+		if h.NodeID != "" {
+			ids = append(ids, h.NodeID)
+		}
+	}
+	nodeByID := s.graph.GetNodesByIDs(ids)
+
 	rows := make([]pageRankRow, 0, len(hits))
 	for _, h := range hits {
-		n := s.graph.GetNode(h.NodeID)
 		row := pageRankRow{ID: h.NodeID, Rank: h.Rank}
-		if n != nil {
+		if n := nodeByID[h.NodeID]; n != nil {
 			row.Name = n.Name
 			row.Kind = string(n.Kind)
 			row.FilePath = n.FilePath
