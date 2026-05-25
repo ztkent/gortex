@@ -34,6 +34,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/zzet/gortex/internal/analysis"
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_duckdb"
@@ -378,6 +379,17 @@ func runBackend(
 		}
 	}
 
+	// Graph-algorithm timings: pagerank / louvain / wcc / scc / kcore.
+	// Each cell is a single wall-clock measurement of the algorithm
+	// running over the populated store. For backends that implement
+	// the capability interface (today only ladybug) we time the
+	// engine-native CALL; for the memory backend (which IS *graph.Graph)
+	// we time the in-process analysis.* fallback. sqlite / duckdb
+	// don't get a number — converting their state into *graph.Graph
+	// would add a one-time copy cost that would dominate the
+	// measurement and make the comparison meaningless.
+	measureAlgos(store, &r)
+
 	// fts_search — backend-native full-text search via the
 	// graph.SymbolSearcher capability. Bypasses BM25/Bleve entirely
 	// and measures the disk store's own FTS round-trip. Skipped on
@@ -486,6 +498,80 @@ func pickQueriesFromStore(s graph.Store, n int) queryWorkload {
 		wl.filePaths = wl.filePaths[:n/4]
 	}
 	return wl
+}
+
+// measureAlgos times the five graph algorithms (pagerank, louvain,
+// wcc, scc, kcore) over the populated store. Each cell is one
+// wall-clock measurement of the algorithm running once.
+//
+// Routing per backend:
+//   - implements the capability interface → time the engine-native
+//     CALL.
+//   - is *graph.Graph (the memory backend) → time the in-process
+//     analysis.* fallback over the same graph the indexer wrote
+//     into.
+//   - anything else → skip (zeroing the cell for sqlite/duckdb
+//     would imply "instant" which is false).
+//
+// Each cell holds a single-sample p50 / p95 — both are the same
+// value, the per-tool table column shape just expects the
+// toolStats triple.
+func measureAlgos(store graph.Store, r *benchResult) {
+	g, _ := store.(*graph.Graph)
+
+	if pr, ok := store.(graph.PageRanker); ok {
+		t := time.Now()
+		_, _ = pr.PageRank(graph.PageRankOpts{Limit: 20})
+		r.PerTool["pagerank"] = singleSample(time.Since(t))
+	} else if g != nil {
+		t := time.Now()
+		_ = analysis.ComputePageRank(g)
+		r.PerTool["pagerank"] = singleSample(time.Since(t))
+	}
+
+	if cd, ok := store.(graph.CommunityDetector); ok {
+		t := time.Now()
+		_, _ = cd.Louvain(graph.CommunityOpts{})
+		r.PerTool["louvain"] = singleSample(time.Since(t))
+	} else if g != nil {
+		t := time.Now()
+		_ = analysis.DetectCommunitiesLouvain(g)
+		r.PerTool["louvain"] = singleSample(time.Since(t))
+	}
+
+	if cf, ok := store.(graph.ComponentFinder); ok {
+		t := time.Now()
+		_, _ = cf.WeaklyConnectedComponents(graph.ComponentOpts{})
+		r.PerTool["wcc"] = singleSample(time.Since(t))
+		t = time.Now()
+		_, _ = cf.StronglyConnectedComponents(graph.ComponentOpts{})
+		r.PerTool["scc"] = singleSample(time.Since(t))
+	} else if g != nil {
+		t := time.Now()
+		_ = analysis.ComputeWCC(g, analysis.ComponentOptions{})
+		r.PerTool["wcc"] = singleSample(time.Since(t))
+		t = time.Now()
+		_ = analysis.ComputeSCC(g, analysis.ComponentOptions{})
+		r.PerTool["scc"] = singleSample(time.Since(t))
+	}
+
+	if kc, ok := store.(graph.KCorer); ok {
+		t := time.Now()
+		_, _ = kc.KCoreDecomposition(graph.KCoreOpts{})
+		r.PerTool["kcore"] = singleSample(time.Since(t))
+	} else if g != nil {
+		t := time.Now()
+		_ = analysis.ComputeKCore(g, analysis.KCoreOptions{})
+		r.PerTool["kcore"] = singleSample(time.Since(t))
+	}
+}
+
+// singleSample turns a one-shot measurement into the toolStats
+// triple the per-tool table prints. Both p50 and p95 land on
+// the same value; N is 1.
+func singleSample(d time.Duration) toolStats {
+	us := float64(d.Microseconds())
+	return toolStats{P50us: us, P95us: us, N: 1}
 }
 
 // vectorWorkload is the shared corpus + query set fed to every
@@ -665,7 +751,12 @@ func printTable(w *os.File, rows []benchResult) {
 	// Per-MCP-tool latency table. One row per backend, one column per
 	// tool. Each cell is "p50 / p95" of the Store-level call the tool
 	// runs at the persistence layer.
-	tools := []string{"get_symbol", "get_dependencies", "find_usages", "get_callers", "search_symbols", "get_file_summary", "fts_search", "vector_search"}
+	tools := []string{
+		"get_symbol", "get_dependencies", "find_usages", "get_callers",
+		"search_symbols", "get_file_summary",
+		"fts_search", "vector_search",
+		"pagerank", "louvain", "wcc", "scc", "kcore",
+	}
 	fmt.Fprintln(w, "# Per-MCP-tool latency (Store-level p50 / p95)")
 	fmt.Fprintln(w, "")
 	fmt.Fprint(w, "| backend |")
