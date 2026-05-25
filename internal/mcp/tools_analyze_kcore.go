@@ -72,11 +72,21 @@ func (s *Server) handleAnalyzeKCore(ctx context.Context, req mcp.CallToolRequest
 		hits = hits[:limit]
 	}
 
+	// Batch-materialise hit nodes in one backend round-trip — same
+	// rationale as analyze(pagerank). Preserves the descending
+	// k-degree order from runKCore.
+	ids := make([]string, 0, len(hits))
+	for _, h := range hits {
+		if h.NodeID != "" {
+			ids = append(ids, h.NodeID)
+		}
+	}
+	nodeByID := s.graph.GetNodesByIDs(ids)
+
 	rows := make([]kcoreRow, 0, len(hits))
 	for _, h := range hits {
-		n := s.graph.GetNode(h.NodeID)
 		row := kcoreRow{ID: h.NodeID, KDegree: int(h.KDegree)}
-		if n != nil {
+		if n := nodeByID[h.NodeID]; n != nil {
 			row.Name = n.Name
 			row.Kind = string(n.Kind)
 			row.FilePath = n.FilePath
