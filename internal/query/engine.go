@@ -452,6 +452,13 @@ func (e *Engine) SearchSymbolsScoped(query string, limit int, opts QueryOptions)
 // substring / bigram-rescue matches. Each candidate carries its
 // 0-based TextRank and VectorRank (or -1 when the channel didn't
 // return it) so the rerank pipeline can score per channel.
+//
+// The BM25 / vector / bigram tiers all return raw node IDs; the
+// implementation materialises them through a single batched
+// GetNodesByIDs call instead of per-id GetNode. On disk backends
+// (Ladybug) that collapses 60+ cgo Cypher round-trips per query
+// into one — the dominant cost on the search hot path before this
+// changed.
 func (e *Engine) gatherBackendCandidates(query string, limit int) []*rerank.Candidate {
 	backend := e.getSearch()
 
@@ -468,6 +475,23 @@ func (e *Engine) gatherBackendCandidates(query string, limit int) []*rerank.Cand
 		textResults = backend.Search(query, limit*2)
 	}
 
+	// Collect every ID surfaced by the backend tiers up front, then
+	// materialise them with one batched fetch. Empty IDs are tolerated
+	// — the batch lookup ignores them and the per-id insert short-
+	// circuits below.
+	idBatch := make([]string, 0, len(textResults)+len(vectorIDs))
+	for _, r := range textResults {
+		if r.ID != "" {
+			idBatch = append(idBatch, r.ID)
+		}
+	}
+	for _, id := range vectorIDs {
+		if id != "" {
+			idBatch = append(idBatch, id)
+		}
+	}
+	nodeByID := e.g.GetNodesByIDs(idBatch)
+
 	idx := make(map[string]int) // node ID → slice index for dedup
 	cands := make([]*rerank.Candidate, 0, len(textResults)+len(vectorIDs))
 
@@ -475,7 +499,7 @@ func (e *Engine) gatherBackendCandidates(query string, limit int) []*rerank.Cand
 		if id == "" {
 			return
 		}
-		node := e.g.GetNode(id)
+		node := nodeByID[id]
 		if node == nil || node.Kind == graph.KindFile || node.Kind == graph.KindImport {
 			return
 		}
@@ -553,7 +577,9 @@ func (e *Engine) gatherBackendCandidates(query string, limit int) []*rerank.Cand
 
 	// Bigram-overlap typo rescue. Same gates as the legacy path:
 	// nothing else surfaced, query is one indivisible 4+ char token,
-	// backend can provide candidates.
+	// backend can provide candidates. The bigram backend also returns
+	// raw IDs — batch-materialise them too rather than fall back to
+	// per-id GetNode.
 	if len(cands) == 0 && len(query) >= 4 && !strings.ContainsAny(query, " /.:_-") {
 		if bg, ok := backend.(bigramProvider); ok {
 			keys := len(query) - 1
@@ -561,18 +587,25 @@ func (e *Engine) gatherBackendCandidates(query string, limit int) []*rerank.Cand
 			if minOverlap < 3 {
 				minOverlap = 3
 			}
-			for _, id := range bg.BigramCandidates(query, minOverlap) {
-				if _, seen := idx[id]; seen {
-					continue
-				}
-				node := e.g.GetNode(id)
-				if node == nil || node.Kind == graph.KindFile || node.Kind == graph.KindImport {
-					continue
-				}
-				idx[id] = len(cands)
-				cands = append(cands, &rerank.Candidate{Node: node, TextRank: -1, VectorRank: -1})
-				if len(cands) >= limit {
-					break
+			bigramIDs := bg.BigramCandidates(query, minOverlap)
+			// Skip the batch fetch entirely when the bigram backend
+			// returned nothing — otherwise we'd issue an empty Cypher
+			// round-trip.
+			if len(bigramIDs) > 0 {
+				bigramNodes := e.g.GetNodesByIDs(bigramIDs)
+				for _, id := range bigramIDs {
+					if _, seen := idx[id]; seen {
+						continue
+					}
+					node := bigramNodes[id]
+					if node == nil || node.Kind == graph.KindFile || node.Kind == graph.KindImport {
+						continue
+					}
+					idx[id] = len(cands)
+					cands = append(cands, &rerank.Candidate{Node: node, TextRank: -1, VectorRank: -1})
+					if len(cands) >= limit {
+						break
+					}
 				}
 			}
 		}
