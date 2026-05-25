@@ -26,7 +26,7 @@ type Retriever interface {
 	// The caller passes the graph (so retrievers can do graph
 	// walks without owning a reference). ctx is honoured for
 	// cancellation — long-running retrievers must respect it.
-	Retrieve(ctx context.Context, g *graph.Graph, query string, limit int) ([]*Candidate, error)
+	Retrieve(ctx context.Context, g graph.Store, query string, limit int) ([]*Candidate, error)
 }
 
 // GraphCompletion is a Retriever that uses an upstream Retriever for
@@ -46,7 +46,7 @@ type Retriever interface {
 type GraphCompletion struct {
 	// Seeder produces the initial candidate set the 1-hop expansion
 	// will fan out from. Required.
-	Seeder func(ctx context.Context, g *graph.Graph, query string, limit int) ([]*Candidate, error)
+	Seeder func(ctx context.Context, g graph.Store, query string, limit int) ([]*Candidate, error)
 
 	// MaxSeedExpansion caps the number of new candidates produced
 	// per seed. Defaults to 8 — large enough to surface typical
@@ -69,7 +69,7 @@ func (gc *GraphCompletion) Name() string { return "graph_completion" }
 // merged: the seed copy wins and keeps its rank fields. New nodes
 // added by expansion have TextRank=-1 / VectorRank=-1 so the
 // downstream rerank knows they came from graph expansion.
-func (gc *GraphCompletion) Retrieve(ctx context.Context, g *graph.Graph, query string, limit int) ([]*Candidate, error) {
+func (gc *GraphCompletion) Retrieve(ctx context.Context, g graph.Store, query string, limit int) ([]*Candidate, error) {
 	if gc.Seeder == nil {
 		return nil, errNilSeeder
 	}

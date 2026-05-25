@@ -117,7 +117,7 @@ func (s *Server) handleGetUntestedSymbols(ctx context.Context, req mcp.CallToolR
 // Test files are detected via isTestFile so this works across languages
 // (Go _test.go, Python test_*.py, JS .spec.ts, etc.) without per-language
 // special-casing here.
-func reachableFromTests(g *graph.Graph) map[string]bool {
+func reachableFromTests(g graph.Store) map[string]bool {
 	covered := make(map[string]bool)
 
 	// Seed: every function/method defined in a test file.

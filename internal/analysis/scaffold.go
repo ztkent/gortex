@@ -20,7 +20,7 @@ import (
 //
 // This interface avoids a circular dependency with the indexer package.
 type SourceReader interface {
-	Graph() *graph.Graph
+	Graph() graph.Store
 	ResolveFilePath(graphPath string) string
 }
 
@@ -152,7 +152,7 @@ func filterCallerNodes(sg *query.SubGraph, exampleID string) []*graph.Node {
 
 // generateRegistrationCode creates a registration/wiring edit by analyzing how
 // the example symbol is called by its depth-1 callers.
-func generateRegistrationCode(g *graph.Graph, callers []*graph.Node, example *graph.Node, newName string) *ScaffoldEdit {
+func generateRegistrationCode(g graph.Store, callers []*graph.Node, example *graph.Node, newName string) *ScaffoldEdit {
 	if len(callers) == 0 {
 		return nil
 	}
@@ -190,7 +190,7 @@ func generateRegistrationCode(g *graph.Graph, callers []*graph.Node, example *gr
 
 // generateTestStub creates a test stub edit by finding the test file and test
 // functions associated with the example symbol.
-func generateTestStub(g *graph.Graph, reader SourceReader, example *graph.Node, newName string) *ScaffoldEdit {
+func generateTestStub(g graph.Store, reader SourceReader, example *graph.Node, newName string) *ScaffoldEdit {
 	testFilePath := deriveTestFilePath(example.FilePath)
 
 	// Check if the test file exists on disk. Resolve abs path through

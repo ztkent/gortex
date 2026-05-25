@@ -100,7 +100,7 @@ func (s *Server) handleGraphCompletionSearch(ctx context.Context, req mcp.CallTo
 // substring (case-insensitive). Replaceable by callers who plug in
 // vector search or another retrieval scheme via the public Retriever
 // interface.
-func (s *Server) nameMatchSeeder(ctx context.Context, g *graph.Graph, query string, limit int) ([]*rerank.Candidate, error) {
+func (s *Server) nameMatchSeeder(ctx context.Context, g graph.Store, query string, limit int) ([]*rerank.Candidate, error) {
 	q := strings.ToLower(query)
 	out := make([]*rerank.Candidate, 0, limit)
 	for _, n := range g.AllNodes() {

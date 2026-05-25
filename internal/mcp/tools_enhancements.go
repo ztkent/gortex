@@ -2124,7 +2124,7 @@ func (s *Server) handleFindHotspots(ctx context.Context, req mcp.CallToolRequest
 // multi-repo mode.
 type scaffoldReader struct{ s *Server }
 
-func (r scaffoldReader) Graph() *graph.Graph { return r.s.graph }
+func (r scaffoldReader) Graph() graph.Store { return r.s.graph }
 func (r scaffoldReader) ResolveFilePath(graphPath string) string {
 	abs, err := r.s.resolveGraphPath(graphPath)
 	if err != nil {

@@ -65,7 +65,7 @@ const hitsIterations = 40
 //
 // then L2-normalises both vectors so the scores stay bounded. A nil
 // or empty graph yields an empty, safe-to-query result.
-func ComputeHITS(g *graph.Graph) *HITSResult {
+func ComputeHITS(g graph.Store) *HITSResult {
 	if g == nil {
 		return &HITSResult{Authorities: map[string]float64{}, Hubs: map[string]float64{}}
 	}

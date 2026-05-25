@@ -175,7 +175,7 @@ func splitOwner(prefix string) (owner, name string) {
 	return "", prefix
 }
 
-func reposFromGraph(g *graph.Graph) []repoEntry {
+func reposFromGraph(g graph.Store) []repoEntry {
 	stats := g.RepoStats()
 	out := make([]repoEntry, 0, len(stats))
 	for prefix, s := range stats {
@@ -1326,7 +1326,7 @@ func (h *Handler) handleCaveats(w http.ResponseWriter, r *http.Request) {
 // graph. Entries with an unresolvable symbol (e.g. cycle placeholders
 // or stale IDs from a prior index) are left untouched so the caller can
 // detect the gap instead of rendering zeros that look like real data.
-func enrichCaveats(g *graph.Graph, caveats []caveatEntry) {
+func enrichCaveats(g graph.Store, caveats []caveatEntry) {
 	if g == nil {
 		return
 	}

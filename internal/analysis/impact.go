@@ -54,7 +54,7 @@ type ImpactResult struct {
 // edges, matching the live walk's behavior. Fall back to live BFS
 // when any seed lacks the index — the slow path is identical to the
 // pre-index implementation so consumer semantics never diverge.
-func AnalyzeImpact(g *graph.Graph, symbolIDs []string, communities *CommunityResult, processes *ProcessResult) *ImpactResult {
+func AnalyzeImpact(g graph.Store, symbolIDs []string, communities *CommunityResult, processes *ProcessResult) *ImpactResult {
 	result := &ImpactResult{
 		ByDepth: make(map[int][]ImpactEntry),
 	}
@@ -174,7 +174,7 @@ func AnalyzeImpact(g *graph.Graph, symbolIDs []string, communities *CommunityRes
 // per discovered node, attributing the in-edge that introduced it to
 // EdgeConfidence / ConfidenceLabel. Kept as the always-correct
 // fallback for fillImpactFromReach.
-func fillImpactLive(g *graph.Graph, result *ImpactResult, symbolIDs []string) {
+func fillImpactLive(g graph.Store, result *ImpactResult, symbolIDs []string) {
 	visited := make(map[string]bool)
 	for _, id := range symbolIDs {
 		visited[id] = true
@@ -228,7 +228,7 @@ func fillImpactLive(g *graph.Graph, result *ImpactResult, symbolIDs []string) {
 // deterministic-by-shard-iteration choice closely enough for tests
 // that compare ByDepth ID sets, which is the contract consumers rely
 // on. EdgeConfidence is set from that representative edge.
-func fillImpactFromReach(g *graph.Graph, result *ImpactResult, symbolIDs []string) bool {
+func fillImpactFromReach(g graph.Store, result *ImpactResult, symbolIDs []string) bool {
 	if len(symbolIDs) == 0 {
 		return true
 	}

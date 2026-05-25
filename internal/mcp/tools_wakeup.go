@@ -58,7 +58,7 @@ func DefaultWakeupOptions() WakeupOptions {
 // communities. Returns the markdown body and an approximate token
 // count (bytes / 4). Exposed so CLI and MCP paths share one
 // implementation.
-func BuildWakeup(g *graph.Graph, communities *analysis.CommunityResult, opts WakeupOptions) (markdown string, tokensEst int) {
+func BuildWakeup(g graph.Store, communities *analysis.CommunityResult, opts WakeupOptions) (markdown string, tokensEst int) {
 	if opts.MaxTokens <= 0 {
 		opts.MaxTokens = 500
 	}
@@ -168,7 +168,7 @@ func countFileNodes(nodes []*graph.Node) int {
 	return n
 }
 
-func wakeupEntryPoints(nodes []*graph.Node, g *graph.Graph, top int) []*graph.Node {
+func wakeupEntryPoints(nodes []*graph.Node, g graph.Store, top int) []*graph.Node {
 	candidates := make([]*graph.Node, 0)
 	for _, n := range nodes {
 		if n.Kind != graph.KindFunction && n.Kind != graph.KindMethod {

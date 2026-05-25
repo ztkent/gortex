@@ -72,7 +72,7 @@ const (
 //
 // Pivot sampling is seeded with a fixed seed, so results are
 // reproducible run to run.
-func ComputeBetweenness(g *graph.Graph) *BetweennessResult {
+func ComputeBetweenness(g graph.Store) *BetweennessResult {
 	if g == nil {
 		return &BetweennessResult{Scores: map[string]float64{}}
 	}

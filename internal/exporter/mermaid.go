@@ -44,7 +44,7 @@ func (o MermaidOpts) withDefaults() MermaidOpts {
 // WriteMermaid emits a single Mermaid diagram for the chosen scope.
 // Use this when the caller asks for one file. For multi-file output
 // the CLI calls WriteMermaid once per scope into separate files.
-func WriteMermaid(w io.Writer, g *graph.Graph, opts MermaidOpts) (Stats, error) {
+func WriteMermaid(w io.Writer, g graph.Store, opts MermaidOpts) (Stats, error) {
 	opts = opts.withDefaults()
 	cw := &countingWriter{w: w}
 
@@ -66,7 +66,7 @@ func WriteMermaid(w io.Writer, g *graph.Graph, opts MermaidOpts) (Stats, error) 
 // renderForScope dispatches the Scope to the right diagram builder and
 // returns the rendered Mermaid plus a (nodes, edges) count that the
 // caller surfaces in Stats.
-func renderForScope(g *graph.Graph, opts MermaidOpts) (body string, nodes, edges int, err error) {
+func renderForScope(g graph.Store, opts MermaidOpts) (body string, nodes, edges int, err error) {
 	switch strings.ToLower(opts.Scope) {
 	case "architecture":
 		body, nodes, edges = renderArchitecture(g, opts)
@@ -101,7 +101,7 @@ func renderForScope(g *graph.Graph, opts MermaidOpts) (body string, nodes, edges
 
 // renderArchitecture builds a top-level community map with hub
 // annotations. Mirrors the layout used by the wiki page.
-func renderArchitecture(g *graph.Graph, opts MermaidOpts) (string, int, int) {
+func renderArchitecture(g graph.Store, opts MermaidOpts) (string, int, int) {
 	comms := analysis.DetectCommunities(g)
 	var sb strings.Builder
 	sb.WriteString("graph TB\n")
@@ -147,7 +147,7 @@ func renderArchitecture(g *graph.Graph, opts MermaidOpts) (string, int, int) {
 
 // renderCommunities is identical to architecture today but exposes
 // `graph LR` for a wider canvas. Caller picks via Scope.
-func renderCommunities(g *graph.Graph, opts MermaidOpts) (string, int, int) {
+func renderCommunities(g graph.Store, opts MermaidOpts) (string, int, int) {
 	comms := analysis.DetectCommunities(g)
 	var sb strings.Builder
 	sb.WriteString("graph LR\n")
@@ -187,7 +187,7 @@ func renderCommunities(g *graph.Graph, opts MermaidOpts) (string, int, int) {
 
 // renderProcesses lists every process as a small flowchart of
 // caller→callee pairs, capped to keep the rendering responsive.
-func renderProcesses(g *graph.Graph, _ MermaidOpts) (string, int, int) {
+func renderProcesses(g graph.Store, _ MermaidOpts) (string, int, int) {
 	procs := analysis.DiscoverProcesses(g)
 	var sb strings.Builder
 	sb.WriteString("graph LR\n")
@@ -244,7 +244,7 @@ func renderProcesses(g *graph.Graph, _ MermaidOpts) (string, int, int) {
 
 // emitCrossCommEdges writes EdgeCalls between communities (filtered
 // to the kept set) and returns the edge count.
-func emitCrossCommEdges(sb *strings.Builder, g *graph.Graph, comms *analysis.CommunityResult, keep map[string]bool) int {
+func emitCrossCommEdges(sb *strings.Builder, g graph.Store, comms *analysis.CommunityResult, keep map[string]bool) int {
 	type edge struct {
 		from, to string
 		count    int

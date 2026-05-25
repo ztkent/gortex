@@ -602,7 +602,7 @@ func defaultAutoLinkOptions() autoLinkOptions {
 //
 // The function never panics — a nil graph or empty body just
 // returns no links. Results are deduplicated and capped.
-func autoLinkBody(body string, g *graph.Graph, workspaceID string, opts autoLinkOptions) []string {
+func autoLinkBody(body string, g graph.Store, workspaceID string, opts autoLinkOptions) []string {
 	if g == nil || body == "" {
 		return nil
 	}

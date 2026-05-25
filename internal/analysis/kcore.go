@@ -37,7 +37,7 @@ type KCoreOptions struct {
 //
 // Used as the fallback when the backing graph.Store does not
 // implement graph.KCorer.
-func ComputeKCore(g *graph.Graph, opts KCoreOptions) []KCoreHit {
+func ComputeKCore(g graph.Store, opts KCoreOptions) []KCoreHit {
 	if g == nil {
 		return nil
 	}

@@ -105,7 +105,7 @@ var buildCounter uint64
 // Safe to call repeatedly: existing reach_d* entries are overwritten
 // and the build counter advances each time so any consumer that read
 // an entry from a prior generation will fall back to a live walk.
-func BuildIndex(g *graph.Graph) *Stats {
+func BuildIndex(g graph.Store) *Stats {
 	return BuildIndexCtx(context.Background(), g)
 }
 
@@ -116,7 +116,7 @@ func BuildIndex(g *graph.Graph) *Stats {
 // longest stages on monorepo-scale graphs (~200 s on k8s with 150 k
 // impact seeds). Pure operator-visibility instrumentation: the per-
 // report call is cheap (no I/O when the reporter is the default no-op).
-func BuildIndexCtx(ctx context.Context, g *graph.Graph) *Stats {
+func BuildIndexCtx(ctx context.Context, g graph.Store) *Stats {
 	if g == nil {
 		return &Stats{}
 	}
@@ -221,7 +221,7 @@ func setOrDeleteFloats(m map[string]any, key string, value []float64) {
 // filtered with ReachableEdge so the result matches AnalyzeImpact;
 // file / import nodes are walked through for fan-out but excluded
 // from the tier slices.
-func compute(g *graph.Graph, seedID string) [3]tier {
+func compute(g graph.Store, seedID string) [3]tier {
 	var result [3]tier
 	visited := map[string]struct{}{seedID: {}}
 	current := []string{seedID}
@@ -287,7 +287,7 @@ func sortTierByID(t *tier) {
 // and bumps the build counter so any cached lookups dated to a prior
 // generation are invalidated. Use when the graph topology has shifted
 // so far that a full rebuild is cheaper than incremental invalidation.
-func ClearIndex(g *graph.Graph) {
+func ClearIndex(g graph.Store) {
 	if g == nil {
 		return
 	}
@@ -339,7 +339,7 @@ type Entry struct {
 // given seed, then caches forever. BuildIndex remains available for
 // `gortex enrich reach` (explicit prebuild) and for callers that
 // want to pay the cost up front under controlled conditions.
-func Lookup(g *graph.Graph, seedID string) (d1, d2, d3 []Entry, hit bool) {
+func Lookup(g graph.Store, seedID string) (d1, d2, d3 []Entry, hit bool) {
 	if g == nil {
 		return nil, nil, nil, false
 	}

@@ -103,7 +103,7 @@ func (s *Server) handleAnalyzeRole(ctx context.Context, req mcp.CallToolRequest)
 // the first matching label. Rules are deliberately conservative;
 // false-negatives (defaulting to "core") are preferable to noisy
 // false-positives on a label that pretends to be authoritative.
-func classifyRole(n *graph.Node, fanIn, fanOut int, g *graph.Graph, nodeToComm map[string]string) string {
+func classifyRole(n *graph.Node, fanIn, fanOut int, g graph.Store, nodeToComm map[string]string) string {
 	switch {
 	case fanIn == 0 && fanOut == 0:
 		return "dead"

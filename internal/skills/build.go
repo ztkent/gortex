@@ -19,7 +19,7 @@ type BuildOpts struct {
 // Returns (nil, "") when no community meets the MinSize threshold —
 // callers treat both outputs as opaque payloads and pass them through
 // to adapters via agents.Env.
-func Build(g *graph.Graph, opts BuildOpts) ([]GeneratedSkill, string) {
+func Build(g graph.Store, opts BuildOpts) ([]GeneratedSkill, string) {
 	if g == nil {
 		return nil, ""
 	}

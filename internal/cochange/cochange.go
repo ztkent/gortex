@@ -196,12 +196,12 @@ func orderedPair(a, b string) [2]string {
 //
 // Best-effort: returns (0, nil) when root is not a git repository.
 // Idempotent — graph.AddEdge dedupes, so repeated runs converge.
-func EnrichGraph(g *graph.Graph, root, repoPrefix string) (int, error) {
+func EnrichGraph(g graph.Store, root, repoPrefix string) (int, error) {
 	return EnrichGraphWith(g, root, repoPrefix, Options{})
 }
 
 // EnrichGraphWith is EnrichGraph with explicit scan tuning.
-func EnrichGraphWith(g *graph.Graph, root, repoPrefix string, opts Options) (int, error) {
+func EnrichGraphWith(g graph.Store, root, repoPrefix string, opts Options) (int, error) {
 	if g == nil || root == "" {
 		return 0, nil
 	}
@@ -217,7 +217,7 @@ func EnrichGraphWith(g *graph.Graph, root, repoPrefix string, opts Options) (int
 // carrying that RepoPrefix are matched, against the prefix-stripped
 // node path (the pairs hold git-relative paths). Pass "" for a
 // single-repo graph. Idempotent — graph.AddEdge dedupes.
-func AddEdges(g *graph.Graph, pairs []Pair, repoPrefix string) int {
+func AddEdges(g graph.Store, pairs []Pair, repoPrefix string) int {
 	if g == nil || len(pairs) == 0 {
 		return 0
 	}

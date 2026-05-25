@@ -33,7 +33,7 @@ const (
 //
 // The result has the same shape as DetectCommunities so analyze
 // kind=clusters can swap algorithms transparently.
-func SpectralClusters(g *graph.Graph) *CommunityResult {
+func SpectralClusters(g graph.Store) *CommunityResult {
 	nodes := g.AllNodes()
 	edges := g.AllEdges()
 

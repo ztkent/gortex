@@ -56,7 +56,7 @@ type Artifact struct {
 // repoPrefix scopes node IDs / paths in a multi-repo graph; pass ""
 // for a single-repo graph. Best-effort — missing or unreadable files
 // are skipped rather than failing the whole pass.
-func Materialize(g *graph.Graph, root string, entries []config.ArtifactEntry, repoPrefix string) []Artifact {
+func Materialize(g graph.Store, root string, entries []config.ArtifactEntry, repoPrefix string) []Artifact {
 	if g == nil || root == "" || len(entries) == 0 {
 		return nil
 	}
@@ -81,7 +81,7 @@ func Materialize(g *graph.Graph, root string, entries []config.ArtifactEntry, re
 }
 
 // materializeOne reads one artifact file and projects it onto the graph.
-func materializeOne(g *graph.Graph, root, rel string, entry config.ArtifactEntry, repoPrefix string, nameIndex map[string][]string) (Artifact, bool) {
+func materializeOne(g graph.Store, root, rel string, entry config.ArtifactEntry, repoPrefix string, nameIndex map[string][]string) (Artifact, bool) {
 	data, err := os.ReadFile(filepath.Join(root, rel))
 	if err != nil {
 		return Artifact{}, false
@@ -147,7 +147,7 @@ func materializeOne(g *graph.Graph, root, rel string, entry config.ArtifactEntry
 
 // buildSymbolIndex maps every sufficiently-long symbol name to the
 // node IDs that declare it, scoped to repoPrefix.
-func buildSymbolIndex(g *graph.Graph, repoPrefix string) map[string][]string {
+func buildSymbolIndex(g graph.Store, repoPrefix string) map[string][]string {
 	index := make(map[string][]string)
 	for _, n := range g.AllNodes() {
 		switch n.Kind {

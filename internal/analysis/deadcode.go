@@ -213,7 +213,7 @@ func isEntryPointNode(n *graph.Node) bool {
 // FindDeadCode returns all symbols with zero incoming calls or references,
 // excluding entry points, test functions, exported symbols, and user-excluded patterns.
 // By default, variables are excluded (see FindDeadCodeOptions for rationale).
-func FindDeadCode(g *graph.Graph, processes *ProcessResult, excludePatterns []string, opts ...FindDeadCodeOptions) []DeadCodeEntry {
+func FindDeadCode(g graph.Store, processes *ProcessResult, excludePatterns []string, opts ...FindDeadCodeOptions) []DeadCodeEntry {
 	var opt FindDeadCodeOptions
 	if len(opts) > 0 {
 		opt = opts[0]
@@ -418,7 +418,7 @@ func FindDeadCode(g *graph.Graph, processes *ProcessResult, excludePatterns []st
 //  1. Collecting all interfaces with their required method names (from Meta["methods"]).
 //  2. Collecting all EdgeImplements edges (type → interface).
 //  3. For each type that implements an interface, merging all required method names.
-func buildIfaceRequiredMethods(g *graph.Graph, nodes []*graph.Node, edges []*graph.Edge) map[string]map[string]bool {
+func buildIfaceRequiredMethods(g graph.Store, nodes []*graph.Node, edges []*graph.Edge) map[string]map[string]bool {
 	// Step 1: interface ID → required method names
 	ifaceMethods := make(map[string]map[string]bool)
 	for _, n := range nodes {
@@ -488,7 +488,7 @@ const hotspotBetweennessWeight = 0.4
 // centrality component — how often the symbol lies on a shortest path between
 // other symbols — that augments the fan-in/out signals rather than replacing them.
 // If threshold <= 0, the default threshold is mean + 2*stddev.
-func FindHotspots(g *graph.Graph, communities *CommunityResult, threshold float64) []HotspotEntry {
+func FindHotspots(g graph.Store, communities *CommunityResult, threshold float64) []HotspotEntry {
 	nodes := g.AllNodes()
 	edges := g.AllEdges()
 

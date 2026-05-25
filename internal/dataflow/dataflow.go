@@ -79,13 +79,13 @@ func (p Path) Length() int { return len(p.Edges) }
 
 // Engine is the dataflow query backend. It holds a reference to
 // the graph and exposes the two MCP-ready primitives. Concurrency-
-// safe by virtue of relying only on graph.Graph's read methods.
+// safe by virtue of relying only on graph.Store's read methods.
 type Engine struct {
-	g *graph.Graph
+	g graph.Store
 }
 
 // New returns an engine backed by the given graph.
-func New(g *graph.Graph) *Engine { return &Engine{g: g} }
+func New(g graph.Store) *Engine { return &Engine{g: g} }
 
 // IsDataflowKind returns true for the three edge kinds the BFS
 // traverses.

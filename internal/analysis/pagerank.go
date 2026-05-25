@@ -40,7 +40,7 @@ const (
 // Dangling nodes (no outgoing call/reference edge — leaf utilities)
 // redistribute their mass uniformly each iteration so the scores stay
 // a proper probability distribution.
-func ComputePageRank(g *graph.Graph) *PageRankResult {
+func ComputePageRank(g graph.Store) *PageRankResult {
 	if g == nil {
 		return &PageRankResult{Scores: map[string]float64{}}
 	}

@@ -37,7 +37,7 @@ type ProcessResult struct {
 }
 
 // DiscoverProcesses finds execution flows by identifying entry points and tracing forward.
-func DiscoverProcesses(g *graph.Graph) *ProcessResult {
+func DiscoverProcesses(g graph.Store) *ProcessResult {
 	nodes := g.AllNodes()
 	edges := g.AllEdges()
 

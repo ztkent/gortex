@@ -85,7 +85,7 @@ func (sh *symbolHistory) All() map[string][]SymbolModification {
 type Server struct {
 	mcpServer     *server.MCPServer
 	engine        *query.Engine
-	graph         *graph.Graph
+	graph         graph.Store
 	indexer       *indexer.Indexer
 	watcher       watcherHistory
 	multiIndexer  *indexer.MultiIndexer

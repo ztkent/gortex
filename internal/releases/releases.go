@@ -104,7 +104,7 @@ func ReleaseNodeID(repoPrefix, tag string) string {
 //
 // Errors from individual git invocations are tolerated — a broken
 // ref shouldn't kill enrichment for the rest of the tag set.
-func EnrichGraph(g *graph.Graph, repoRoot string) (int, error) {
+func EnrichGraph(g graph.Store, repoRoot string) (int, error) {
 	return EnrichGraphWithRepoPrefix(g, repoRoot, "")
 }
 
@@ -112,7 +112,7 @@ func EnrichGraph(g *graph.Graph, repoRoot string) (int, error) {
 // EnrichGraph. EnrichGraph delegates to it with an empty prefix; the
 // multi-repo enricher passes the per-repo prefix so KindRelease IDs
 // stay collision-free across repos.
-func EnrichGraphWithRepoPrefix(g *graph.Graph, repoRoot, repoPrefix string) (int, error) {
+func EnrichGraphWithRepoPrefix(g graph.Store, repoRoot, repoPrefix string) (int, error) {
 	if g == nil || repoRoot == "" {
 		return 0, nil
 	}

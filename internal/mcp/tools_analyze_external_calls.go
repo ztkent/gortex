@@ -247,7 +247,7 @@ func suffixVersion(v string) string {
 // countCallersToExternal counts every incoming non-EdgeDependsOnModule
 // edge to an external symbol node — those are the calls / references
 // that goanalysis attributed.
-func countCallersToExternal(g *graph.Graph, nodeID string) int {
+func countCallersToExternal(g graph.Store, nodeID string) int {
 	n := 0
 	for _, e := range g.GetInEdges(nodeID) {
 		if e.Kind == graph.EdgeDependsOnModule {
@@ -260,7 +260,7 @@ func countCallersToExternal(g *graph.Graph, nodeID string) int {
 
 // tallyExternalCallers returns (totalCallEdges, distinctCallers) — the
 // detail surface for the per-module symbol listing.
-func tallyExternalCallers(g *graph.Graph, nodeID string) (int, int) {
+func tallyExternalCallers(g graph.Store, nodeID string) (int, int) {
 	calls := 0
 	seen := map[string]struct{}{}
 	for _, e := range g.GetInEdges(nodeID) {

@@ -31,7 +31,7 @@ import (
 //
 // Result has the same shape as DetectCommunities so the call site
 // can swap them out without other changes.
-func DetectCommunitiesLeiden(g *graph.Graph) *CommunityResult {
+func DetectCommunitiesLeiden(g graph.Store) *CommunityResult {
 	result, _ := detectCommunitiesLeidenRaw(g)
 	return result
 }
@@ -45,7 +45,7 @@ func DetectCommunitiesLeiden(g *graph.Graph) *CommunityResult {
 // ids and drops singletons, neither of which can drive a restricted
 // re-optimization. The returned partition is nil when the graph has
 // no clustering-relevant edges (the result is then empty too).
-func detectCommunitiesLeidenRaw(g *graph.Graph) (*CommunityResult, *leidenPartition) {
+func detectCommunitiesLeidenRaw(g graph.Store) (*CommunityResult, *leidenPartition) {
 	lg := buildLeidenGraph(g)
 	if lg == nil {
 		return &CommunityResult{NodeToComm: make(map[string]string)}, nil
@@ -386,7 +386,7 @@ func leidenAggregate(
 // label / hub / disambiguation / parent-grouping pipeline so the UI
 // can render Leiden output identically.
 func buildCommunityResult(
-	g *graph.Graph,
+	g graph.Store,
 	finalComm map[string]string,
 	neighbors map[string]map[string]float64,
 	totalWeight float64,

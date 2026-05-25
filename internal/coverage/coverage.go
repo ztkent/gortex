@@ -168,7 +168,7 @@ func (s CoverageStats) Percent() float64 {
 // file paths are repo-relative (`pkg/file.go`). Pass "" to skip
 // the prefix-strip, useful when the profile was generated against
 // raw paths.
-func EnrichGraph(g *graph.Graph, segments []Segment, modulePath string) int {
+func EnrichGraph(g graph.Store, segments []Segment, modulePath string) int {
 	if g == nil || len(segments) == 0 {
 		return 0
 	}

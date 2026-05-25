@@ -227,7 +227,7 @@ func (s *Server) buildASTTargets(language, pathPrefix string, allowedRepos map[s
 // than `min` incoming edges. Without an enclosing symbol, the
 // match is preserved (we'd otherwise silently swallow file-level
 // matches that legitimately have no caller graph).
-func filterByMinFanIn(g *graph.Graph, matches []astquery.Match, min int) []astquery.Match {
+func filterByMinFanIn(g graph.Store, matches []astquery.Match, min int) []astquery.Match {
 	if g == nil || min <= 0 {
 		return matches
 	}

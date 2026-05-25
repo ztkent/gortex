@@ -38,7 +38,7 @@ type DiffResult struct {
 // scope: "unstaged", "staged", "all", "compare"
 // baseRef: used when scope is "compare" (e.g., "main")
 // repoRoot: absolute path to the repository root
-func MapGitDiff(g *graph.Graph, repoRoot, scope, baseRef string) (*DiffResult, error) {
+func MapGitDiff(g graph.Store, repoRoot, scope, baseRef string) (*DiffResult, error) {
 	args := buildDiffArgs(scope, baseRef)
 	cmd := exec.Command("git", args...)
 	cmd.Dir = repoRoot

@@ -189,7 +189,7 @@ func PersonNodeID(email string) string {
 	return "team::" + strings.ToLower(strings.TrimSpace(email))
 }
 
-func EnrichGraph(g *graph.Graph, repoRoot string) (int, error) {
+func EnrichGraph(g graph.Store, repoRoot string) (int, error) {
 	if g == nil || repoRoot == "" {
 		return 0, nil
 	}

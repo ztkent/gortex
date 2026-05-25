@@ -176,7 +176,7 @@ func topCommunitiesSummary(comms []analysis.Community) []map[string]any {
 // "here's where the gravity lives" signal for newcomers.
 // inScope, when non-nil, bounds the ranking to imports whose target
 // node is inside the session's workspace.
-func mostImportedFiles(g *graph.Graph, inScope map[string]bool, topN int) []map[string]any {
+func mostImportedFiles(g graph.Store, inScope map[string]bool, topN int) []map[string]any {
 	type fileCount struct {
 		path  string
 		count int

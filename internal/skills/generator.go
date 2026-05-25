@@ -16,7 +16,7 @@ import (
 type Generator struct {
 	communities *analysis.CommunityResult
 	processes   *analysis.ProcessResult
-	graph       *graph.Graph
+	graph       graph.Store
 	minSize     int
 	maxSkills   int
 }
@@ -30,7 +30,7 @@ type GeneratedSkill struct {
 }
 
 // New creates a skill generator.
-func New(communities *analysis.CommunityResult, processes *analysis.ProcessResult, g *graph.Graph) *Generator {
+func New(communities *analysis.CommunityResult, processes *analysis.ProcessResult, g graph.Store) *Generator {
 	return &Generator{
 		communities: communities,
 		processes:   processes,

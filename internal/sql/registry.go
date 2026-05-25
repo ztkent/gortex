@@ -44,7 +44,7 @@ type RebuildStats struct {
 // Returns counts for telemetry; rebuilt edges idempotently replace
 // any existing edges with the same edgeKey, so a second call after
 // the first reports tablesCreated=0, emittersLinked=0.
-func RebuildTablesFromStringRegistry(g *graph.Graph) RebuildStats {
+func RebuildTablesFromStringRegistry(g graph.Store) RebuildStats {
 	if g == nil {
 		return RebuildStats{}
 	}

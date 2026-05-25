@@ -51,13 +51,13 @@ type CommunityResult struct {
 // The Louvain implementation is preserved as
 // DetectCommunitiesLouvain so we can benchmark, A/B, or fall back
 // without re-deriving the algorithm.
-func DetectCommunities(g *graph.Graph) *CommunityResult {
+func DetectCommunities(g graph.Store) *CommunityResult {
 	return DetectCommunitiesLeiden(g)
 }
 
 // DetectCommunitiesLouvain is the original Louvain implementation,
 // retained for benchmarking and as a known-good fallback.
-func DetectCommunitiesLouvain(g *graph.Graph) *CommunityResult {
+func DetectCommunitiesLouvain(g graph.Store) *CommunityResult {
 	nodes := g.AllNodes()
 	edges := g.AllEdges()
 
@@ -794,7 +794,7 @@ func finaliseCommunityPartition(
 // Returns nil when the backend errors — callers should fall
 // through to the in-process path rather than surface a half-done
 // CommunityResult.
-func DetectCommunitiesLouvainBackend(g *graph.Graph, cd graph.CommunityDetector) *CommunityResult {
+func DetectCommunitiesLouvainBackend(g graph.Store, cd graph.CommunityDetector) *CommunityResult {
 	if g == nil || cd == nil {
 		return nil
 	}

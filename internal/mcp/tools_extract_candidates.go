@@ -126,7 +126,7 @@ func (s *Server) handleGetExtractionCandidates(ctx context.Context, req mcp.Call
 
 // callerCount returns the number of distinct call-site origins for
 // the given node. Counts EdgeCalls and the cross-repo call variant.
-func callerCount(g *graph.Graph, id string) int {
+func callerCount(g graph.Store, id string) int {
 	seen := map[string]bool{}
 	for _, e := range g.GetInEdges(id) {
 		if e.Kind != graph.EdgeCalls && e.Kind != graph.EdgeCrossRepoCalls {
@@ -140,7 +140,7 @@ func callerCount(g *graph.Graph, id string) int {
 // distinctCalleeCount returns how many distinct functions/methods
 // the node calls. Proxy for internal complexity — a function that
 // orchestrates 20 different callees is probably doing too much.
-func distinctCalleeCount(g *graph.Graph, id string) int {
+func distinctCalleeCount(g graph.Store, id string) int {
 	seen := map[string]bool{}
 	for _, e := range g.GetOutEdges(id) {
 		if e.Kind != graph.EdgeCalls && e.Kind != graph.EdgeCrossRepoCalls {

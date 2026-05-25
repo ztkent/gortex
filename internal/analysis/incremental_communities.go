@@ -76,7 +76,7 @@ type leidenGraph struct {
 // the resulting weighted graph. Returns nil when the graph has no
 // clustering-relevant edges — the caller then yields an empty
 // partition.
-func buildLeidenGraph(g *graph.Graph) *leidenGraph {
+func buildLeidenGraph(g graph.Store) *leidenGraph {
 	nodes := g.AllNodes()
 	edges := g.AllEdges()
 
@@ -217,7 +217,7 @@ func packageKey(filePath string) string {
 // kind change, or edge added/removed/reweighted flips the
 // fingerprint of every package it touches and leaves all others
 // bit-identical.
-func fingerprintPackages(g *graph.Graph) map[string]uint64 {
+func fingerprintPackages(g graph.Store) map[string]uint64 {
 	nodes := g.AllNodes()
 	edges := g.AllEdges()
 
@@ -315,7 +315,7 @@ func diffPackageFingerprints(old, cur map[string]uint64) map[string]bool {
 //   - the graph's edge-provenance revision moved under the cache, or
 //   - the changed-package fraction exceeds changedFractionFullRecompute.
 func DetectCommunitiesLeidenIncremental(
-	g *graph.Graph,
+	g graph.Store,
 	cache *LeidenPartitionCache,
 ) (*CommunityResult, *LeidenPartitionCache, IncrementalCommunityStats) {
 	curFP := fingerprintPackages(g)
@@ -399,7 +399,7 @@ type incrementalResult struct {
 // community into the gain calculation but never move themselves, so
 // every unchanged package's assignment is preserved bit-for-bit.
 func incrementalLeiden(
-	g *graph.Graph,
+	g graph.Store,
 	lg *leidenGraph,
 	cache *LeidenPartitionCache,
 	changedPkgs map[string]bool,

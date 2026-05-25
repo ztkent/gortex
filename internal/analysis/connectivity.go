@@ -109,7 +109,7 @@ const connectivityNote = "Connectivity health is a graph-EXTRACTION diagnostic, 
 // fileLimit caps how many files DeadWeightByFile carries — files are
 // ranked by dead-weight descending, ties broken by path; pass 0 or a
 // negative value for no cap.
-func GraphConnectivity(g *graph.Graph, nodes []*graph.Node, fileLimit int) GraphConnectivityReport {
+func GraphConnectivity(g graph.Store, nodes []*graph.Node, fileLimit int) GraphConnectivityReport {
 	report := GraphConnectivityReport{Note: connectivityNote}
 	if g == nil {
 		return report

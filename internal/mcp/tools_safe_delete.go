@@ -363,7 +363,7 @@ func expandDeleteRange(node *graph.Node, lines []string) (int, int) {
 // target. Iteration is bounded by cascadeIterationCap; if hit, the
 // caller surfaces cascade_truncated so the agent knows the closure
 // may be incomplete.
-func computeCascadeClosure(g *graph.Graph, target *graph.Node, cascadeIntoTests bool) ([]cascadeClosureEntry, bool) {
+func computeCascadeClosure(g graph.Store, target *graph.Node, cascadeIntoTests bool) ([]cascadeClosureEntry, bool) {
 	closure := []cascadeClosureEntry{}
 	inClosure := map[string]bool{target.ID: true}
 	reasons := map[string]string{}
@@ -423,7 +423,7 @@ func computeCascadeClosure(g *graph.Graph, target *graph.Node, cascadeIntoTests 
 // collectCascadeCandidates returns every distinct node ID that an
 // in-closure node points at via a referencing edge — the only
 // possible new entrants to the closure on this iteration.
-func collectCascadeCandidates(g *graph.Graph, inClosure map[string]bool) []string {
+func collectCascadeCandidates(g graph.Store, inClosure map[string]bool) []string {
 	seen := map[string]bool{}
 	out := []string{}
 	for from := range inClosure {
@@ -448,7 +448,7 @@ func collectCascadeCandidates(g *graph.Graph, inClosure map[string]bool) []strin
 // reports whether the node has no caller outside the current
 // closure. Returns a human-readable reason string when the node
 // qualifies (used for the response payload).
-func candidateQualifies(g *graph.Graph, cn *graph.Node, inClosure map[string]bool, cascadeIntoTests bool) (string, bool) {
+func candidateQualifies(g graph.Store, cn *graph.Node, inClosure map[string]bool, cascadeIntoTests bool) (string, bool) {
 	targetWS := ""
 	// Build an "in-closure caller" list so the reason string can
 	// name the symbol(s) that are the only ones still calling this
@@ -540,7 +540,7 @@ func workspaceKey(n *graph.Node) string {
 // represents real use (someone calls, implements, extends, or
 // references this symbol). Structural edges (defines, member_of)
 // are excluded because they don't block a delete.
-func collectReferencingEdges(g *graph.Graph, id string) []safeDeleteReference {
+func collectReferencingEdges(g graph.Store, id string) []safeDeleteReference {
 	out := make([]safeDeleteReference, 0)
 	seen := map[string]bool{}
 	for _, e := range g.GetInEdges(id) {

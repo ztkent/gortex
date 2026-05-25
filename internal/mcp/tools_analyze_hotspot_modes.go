@@ -30,7 +30,7 @@ import (
 // We don't fail when the meta is absent — the analyzer treats this
 // as a soft ranker, not a strict filter, so callers get *some*
 // ranking even on un-enriched graphs (the unweighted baseline).
-func rerankHotspots(entries []analysis.HotspotEntry, g *graph.Graph, mode, direction string, windowDays int) []analysis.HotspotEntry {
+func rerankHotspots(entries []analysis.HotspotEntry, g graph.Store, mode, direction string, windowDays int) []analysis.HotspotEntry {
 	if windowDays <= 0 {
 		windowDays = 30
 	}

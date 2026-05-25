@@ -127,7 +127,7 @@ func (s *Server) handleGetArchitecture(ctx context.Context, req mcp.CallToolRequ
 // unrecognised tier returns ("", message) so the handler can surface a
 // clean error. Otherwise it rolls the base graph up to the requested
 // tier via analysis.BuildHierarchy and returns the wire shape.
-func architectureHierarchy(g *graph.Graph, cr *analysis.CommunityResult, resolution string) (map[string]any, string) {
+func architectureHierarchy(g graph.Store, cr *analysis.CommunityResult, resolution string) (map[string]any, string) {
 	resolution = strings.ToLower(strings.TrimSpace(resolution))
 	if resolution == "" {
 		return nil, ""
@@ -170,7 +170,7 @@ func architectureHierarchy(g *graph.Graph, cr *analysis.CommunityResult, resolut
 // architectureSummary builds the language mix + node/edge count
 // header. Edges are bounded to the scoped subgraph so multi-repo
 // callers don't see cross-workspace numbers.
-func architectureSummary(allScoped []*graph.Node, inScope map[string]*graph.Node, g *graph.Graph) map[string]any {
+func architectureSummary(allScoped []*graph.Node, inScope map[string]*graph.Node, g graph.Store) map[string]any {
 	langCounts := map[string]int{}
 	for _, n := range inScope {
 		if n.Language != "" {
@@ -261,7 +261,7 @@ func architectureCommunities(cr *analysis.CommunityResult, inScope map[string]*g
 	return out
 }
 
-func architectureHotspots(g *graph.Graph, cr *analysis.CommunityResult, inScope map[string]*graph.Node, top int) []map[string]any {
+func architectureHotspots(g graph.Store, cr *analysis.CommunityResult, inScope map[string]*graph.Node, top int) []map[string]any {
 	out := []map[string]any{}
 	for _, h := range analysis.FindHotspots(g, cr, 0) {
 		if len(out) >= top {
@@ -284,7 +284,7 @@ func architectureHotspots(g *graph.Graph, cr *analysis.CommunityResult, inScope 
 	return out
 }
 
-func architectureEntryPoints(inScope map[string]*graph.Node, g *graph.Graph, top int) []map[string]any {
+func architectureEntryPoints(inScope map[string]*graph.Node, g graph.Store, top int) []map[string]any {
 	type entryCandidate struct {
 		node   *graph.Node
 		fanOut int
@@ -361,7 +361,7 @@ func architectureProcesses(pr *analysis.ProcessResult, inScope map[string]*graph
 // architectureCrossRepo bundles every cross_repo_* edge into a
 // (from_repo, to_repo, kind) → count rollup. Empty list when no
 // cross-repo edges exist (single-repo mode).
-func architectureCrossRepo(g *graph.Graph) []crossRepoRow {
+func architectureCrossRepo(g graph.Store) []crossRepoRow {
 	type key struct {
 		kind, fromRepo, toRepo string
 	}

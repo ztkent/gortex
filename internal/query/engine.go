@@ -51,7 +51,7 @@ func (e *Engine) Reader() graph.Reader { return e.g }
 // NewEngine creates a query engine wrapping the given graph. The
 // default 11-signal rerank.Pipeline is wired in; callers wanting a
 // custom signal set / weights override via SetRerank.
-func NewEngine(g *graph.Graph) *Engine {
+func NewEngine(g graph.Store) *Engine {
 	return &Engine{g: g, rerank: rerank.NewDefault()}
 }
 
