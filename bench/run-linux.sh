@@ -2,11 +2,6 @@
 # Sequential Linux-kernel bench across all viable disk backends.
 # Cleans the scratch dir between runs so disk usage stays bounded.
 #
-# Two binaries because Cozo bundles Rust's libstd and won't link
-# alongside another Rust-static-lib backend in the same Go binary:
-#   /tmp/bench-main  — duckdb / kuzu / ladybug / sqlite
-#   /tmp/bench-cozo  — cozo
-#
 # Streaming flush is engaged automatically by GORTEX_STREAMING_FLUSH=1
 # above the shadow-max threshold (default 50k files). Linux has ~64k
 # source files, so streaming flush keeps RAM bounded by chunking the
@@ -56,7 +51,6 @@ run_backend kuzu    /tmp/bench-main
 run_backend ladybug /tmp/bench-main
 run_backend duckdb  /tmp/bench-main
 run_backend sqlite  /tmp/bench-main
-run_backend cozo    /tmp/bench-cozo
 
 echo "================================================================"
 echo "[$(date +%H:%M:%S)] all backends done. Results in $RESULTS_DIR/linux-*"

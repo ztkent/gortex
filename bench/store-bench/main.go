@@ -95,8 +95,7 @@ func main() {
 	skipKuzu := flag.Bool("skip-kuzu", false, "skip the kuzu (Cypher) backend")
 	skipDuckDB := flag.Bool("skip-duckdb", false, "skip the duckdb (columnar SQL) backend")
 	skipLadybug := flag.Bool("skip-ladybug", false, "skip the ladybug (Kuzu fork, Cypher) backend")
-	skipCozo := flag.Bool("skip-cozo", false, "skip the cozo (Datalog) backend")
-	only := flag.String("only", "", "comma-separated subset to run (memory,sqlite,kuzu,duckdb,ladybug,cozo); overrides skip-* flags")
+	only := flag.String("only", "", "comma-separated subset to run (memory,sqlite,kuzu,duckdb,ladybug); overrides skip-* flags")
 	flag.Parse()
 	if *root == "" {
 		die("usage: store-bench -root <path>")
@@ -112,7 +111,6 @@ func main() {
 	wantKuzu := !*skipKuzu
 	wantDuckDB := !*skipDuckDB
 	wantLadybug := !*skipLadybug
-	wantCozo := !*skipCozo
 	if *only != "" {
 		set := map[string]bool{}
 		for _, s := range strings.Split(*only, ",") {
@@ -121,7 +119,6 @@ func main() {
 		wantMem, wantSQLite = set["memory"], set["sqlite"]
 		wantKuzu, wantDuckDB = set["kuzu"], set["duckdb"]
 		wantLadybug = set["ladybug"]
-		wantCozo = set["cozo"]
 	}
 
 	var results []benchResult
@@ -194,10 +191,6 @@ func main() {
 				}
 				return s, diskFn, nil
 			}))
-	}
-	if wantCozo && cozoFactory != nil {
-		fmt.Fprintln(os.Stderr, "[cozo] indexing through CozoDB (Datalog) Store...")
-		results = append(results, runBackend("cozo", absRoot, *workers, *querySize, cozoFactory))
 	}
 	if wantLadybug {
 		fmt.Fprintln(os.Stderr, "[ladybug] indexing through LadybugDB (Kuzu-fork, Cypher) Store...")
