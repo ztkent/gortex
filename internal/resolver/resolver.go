@@ -174,17 +174,24 @@ func (r *Resolver) ResolveAll() *ResolveStats {
 
 	// Backend-delegated resolution: when the store implements
 	// graph.BackendResolver AND the GORTEX_BACKEND_RESOLVER env var
-	// is set, push the trivially-correct subset of resolution
-	// (unique-name lookup) into the backend engine as a single
-	// Cypher/SQL statement before the Go worker pool runs. This is
-	// for the large-repo, disk-only path where the in-memory shadow
-	// swap is disabled — pushing the easy 20-40% of resolutions into
-	// the engine cuts the Go-side pending set substantially and
-	// avoids the per-edge round-trip cost. Errors fall through —
-	// the Go resolver picks up whatever wasn't resolved.
+	// is set, drain the bulk-tractable subset of the resolver's
+	// work via a sequence of Cypher / SQL / Datalog statements that
+	// run inside the backend engine. ResolveAllBulk chains the
+	// per-rule methods (SameFile → SamePackage → ImportAware → …)
+	// in precision-descending order, so higher-precision rules bind
+	// first and unique-name fallback only resolves what nothing
+	// more specific covered.
+	//
+	// This is the disk-only / large-repo path: when the in-memory
+	// shadow swap is disabled, the resolver's ~100k+ per-edge round
+	// trips dominate wall time. The bulk pass typically drains
+	// 50-80% of pending edges before the Go worker pool runs, and
+	// the remaining set fits cheaply into a single per-pass
+	// warmLookupCache. Errors are non-fatal — the Go resolver
+	// always re-runs on whatever's left.
 	if backendResolverEnabled() {
 		if br, ok := r.graph.(graph.BackendResolver); ok {
-			if n, err := br.ResolveUniqueNames(); err != nil {
+			if n, err := br.ResolveAllBulk(); err != nil {
 				// Non-fatal: the Go path resolves the same edges
 				// correctly, just slower.
 				_ = n

@@ -190,28 +190,69 @@ type Store interface {
 var _ Store = (*Graph)(nil)
 
 // BackendResolver is an optional interface backends MAY implement to
-// expose a single-query bulk-resolve pass that runs entirely inside
-// the backend engine (Cypher MATCH+SET on Kuzu, UPDATE...FROM on
-// DuckDB) instead of round-tripping every resolution decision back
-// to Go. It is intended for the disk-only large-repo path where the
-// in-memory shadow swap is disabled (above shadowMaxFileCount); on
-// the shadow path the resolver runs in RAM and the per-call cost
-// the backend would amortise is already gone.
+// drain the bulk-tractable subset of the resolver's work entirely
+// inside the backend engine (Cypher MATCH+SET on Kuzu, UPDATE...FROM
+// on DuckDB, Datalog rules on Cozo) instead of round-tripping every
+// resolution decision back to Go.
 //
-// Scope: handles only the "name is unique in the graph" case —
-// resolve every `unresolved::Foo` edge to the single Node named
-// Foo when exactly one such Node exists. That's the largest
-// trivially-correct subset of resolution; everything else (cross-
-// package visibility, type compatibility, language-specific import
-// dispatch) stays in the Go resolver against the now-thinner
-// pending-edge set.
+// Sequencing matters: earlier rules are higher-precision than later
+// ones. The orchestrator (ResolveAllBulk) runs them in the order
+// listed below so that, e.g., an intra-file call binds to its same-
+// file declaration before the unique-name pass would have bound it
+// to a same-named symbol elsewhere in the repo.
 //
-// Backends that implement it return the number of edges resolved;
-// 0 means "no candidates matched, fall through entirely". Errors
-// surface to the caller; the resolver treats an error as
-// non-fatal (logs and continues with the Go path).
+// Each method returns the number of pending edges it drained.
+// Unimplemented methods return (0, nil) and the orchestrator skips
+// to the next. Errors surface as non-fatal — the orchestrator logs
+// and continues with subsequent rules; the Go-side Resolver then
+// picks up whatever the bulk pass didn't drain.
 type BackendResolver interface {
+	// ResolveSameFile: unresolved::Name where target is in the
+	// caller's same source file. Strongest precision — a same-file
+	// declaration is almost never ambiguous.
+	ResolveSameFile() (resolved int, err error)
+
+	// ResolveSamePackage: unresolved::Name where target is in the
+	// caller's same directory (Go package). Repo_prefix must match
+	// to keep the rule within one source tree.
+	ResolveSamePackage() (resolved int, err error)
+
+	// ResolveImportAware: caller's file imports F, target is a
+	// symbol in F. Joins against the EdgeImports adjacency.
+	ResolveImportAware() (resolved int, err error)
+
+	// ResolveRelativeImports: unresolved::pyrel::<stem> / Dart
+	// relative-URI stubs rewritten to the matching KindFile node
+	// (e.g. <stem>.py or <stem>/__init__.py for Python).
+	// `lang` selects the dialect; empty string runs all supported
+	// dialects in turn.
+	ResolveRelativeImports(lang string) (resolved int, err error)
+
+	// ResolveCrossRepo: unresolved::Name where exactly one
+	// cross-repo Node carries that name. Lower precision than the
+	// same-repo rules; sets cross_repo = true on the resulting edge.
+	ResolveCrossRepo() (resolved int, err error)
+
+	// ResolveUniqueNames: unresolved::Name where exactly one Node
+	// in the entire graph carries that name. Lowest-precision
+	// "fallback" — runs after the same-file / same-package /
+	// import-aware passes have drained anything they could resolve
+	// more precisely.
 	ResolveUniqueNames() (resolved int, err error)
+
+	// ResolveExternalCallStubs: ensures every external::* edge
+	// target has a corresponding Node row (the existing
+	// SynthesizeExternalCalls pass on the Go side). Promotes
+	// origin to ast_resolved for edges that now point at a real
+	// stub.
+	ResolveExternalCallStubs() (resolved int, err error)
+
+	// ResolveAllBulk runs the bulk-tractable methods in
+	// precision-descending order and returns the cumulative count
+	// of edges resolved across all rules. The default backend
+	// implementation should chain the methods above; callers use
+	// ResolveAllBulk as the single Resolver-side hook.
+	ResolveAllBulk() (totalResolved int, err error)
 }
 
 // BulkLoader is an optional interface backends MAY implement to expose
