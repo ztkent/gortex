@@ -34,6 +34,13 @@ func emitTSFunctionShape(ownerID string, declNode *sitter.Node, src []byte, file
 	if body := tsFunctionBody(declNode); body != nil {
 		emitTSAsyncSpawns(ownerID, body, src, filePath, result)
 		emitTSFieldAccess(ownerID, body, src, filePath, result)
+		// Materialise let / const / var / range / catch bindings as
+		// KindLocal nodes — semantic parity with the Go extractor's
+		// #77 work. Idempotent on the binding ID (function-relative
+		// offset), excluded from BM25 search by shouldIndexForSearch,
+		// and consumed by the resolver's scope-aware bare-name bind
+		// (#81) for future dataflow / scope-resolution work.
+		emitTSLocalBindings(ownerID, declLine, body, src, filePath, result)
 	}
 }
 
