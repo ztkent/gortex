@@ -98,7 +98,40 @@ FROM unique_candidates u
 WHERE edges.edge_id = u.edge_id`
 	return s.runResolverUpdateLocked(q, "ResolveImportAware")
 }
-func (s *Store) ResolveRelativeImports(string) (int, error) { return 0, nil }
+// ResolveRelativeImports drains `unresolved::pyrel::<stem>` edges
+// to KindFile nodes (.py or /__init__.py form).
+func (s *Store) ResolveRelativeImports(lang string) (int, error) {
+	if lang != "" && lang != "python" {
+		return 0, nil
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	var total int
+	for _, suffix := range []string{".py", "/__init__.py"} {
+		q := `
+WITH candidates AS (
+    SELECT e.edge_id, t.id AS target_id
+    FROM edges e
+    JOIN nodes t ON t.kind = 'file'
+                AND t.id = substring(e.to_id, 20) || '` + suffix + `'
+    WHERE e.to_id LIKE 'unresolved::pyrel::%'
+      AND e.kind = 'imports'
+)
+UPDATE edges
+SET to_id  = c.target_id,
+    origin = 'ast_resolved',
+    tier   = 'ast_resolved'
+FROM candidates c
+WHERE edges.edge_id = c.edge_id`
+		n, err := s.runResolverUpdateLocked(q, "ResolveRelativeImports "+suffix)
+		if err != nil {
+			return total, err
+		}
+		total += n
+	}
+	return total, nil
+}
 func (s *Store) ResolveCrossRepo() (int, error)             { return 0, nil }
 func (s *Store) ResolveExternalCallStubs() (int, error)     { return 0, nil }
 

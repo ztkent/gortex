@@ -139,7 +139,53 @@ CREATE (caller)-[newE:Edge {
 RETURN count(newE) AS resolved`
 	return s.runResolverQueryLocked(q, "ResolveImportAware")
 }
-func (s *Store) ResolveRelativeImports(string) (int, error) { return 0, nil }
+// ResolveRelativeImports drains `unresolved::pyrel::<stem>` edges
+// (Python's relative-import placeholder emitted by the parser) by
+// rewriting them to either `<stem>.py` or `<stem>/__init__.py` —
+// whichever KindFile node exists in the graph. Dart relative
+// imports follow the same shape but are not pyrel-tagged so they
+// fall through to the same-file / import-aware passes.
+//
+// Two Cypher passes run sequentially (one per file-naming
+// convention) and the counts sum.
+func (s *Store) ResolveRelativeImports(lang string) (int, error) {
+	if lang != "" && lang != "python" {
+		// Only python is meaningful here. Future Dart support
+		// would add another pass.
+		return 0, nil
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	var total int
+	for _, suffix := range []string{".py", "/__init__.py"} {
+		q := `
+MATCH (caller:Node)-[e:Edge {kind: 'imports'}]->(stub:Node)
+WHERE stub.id STARTS WITH 'unresolved::pyrel::'
+WITH e, caller, stub, substring(stub.id, 20, size(stub.id) - 19) AS stem
+MATCH (target:Node {kind: 'file'})
+WHERE target.id = stem + '` + suffix + `'
+DELETE e
+CREATE (caller)-[newE:Edge {
+    kind: 'imports',
+    file_path: e.file_path,
+    line: e.line,
+    confidence: e.confidence,
+    confidence_label: e.confidence_label,
+    origin: 'ast_resolved',
+    tier: 'ast_resolved',
+    cross_repo: e.cross_repo,
+    meta: e.meta
+}]->(target)
+RETURN count(newE) AS resolved`
+		n, err := s.runResolverQueryLocked(q, "ResolveRelativeImports "+suffix)
+		if err != nil {
+			return total, err
+		}
+		total += n
+	}
+	return total, nil
+}
 func (s *Store) ResolveCrossRepo() (int, error)             { return 0, nil }
 func (s *Store) ResolveExternalCallStubs() (int, error)     { return 0, nil }
 
