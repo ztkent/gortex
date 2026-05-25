@@ -52,6 +52,11 @@ type Store struct {
 	bulkActive bool
 	bulkNodes  []*graph.Node
 	bulkEdges  []*graph.Edge
+
+	// fts tracks whether the native FTS extension is loaded and
+	// whether the symbol FTS index has been built. See fts.go for
+	// the SymbolSearcher implementation.
+	fts ftsState
 }
 
 // Compile-time assertion: *Store satisfies graph.Store.

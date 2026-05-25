@@ -60,4 +60,21 @@ var schemaDDL = []string{
         cross_repo       INT64,
         meta             STRING
     )`,
+	// SymbolFTS is the sidecar table the native FTS index is built
+	// against. Kept separate from Node so we don't have to touch
+	// every read/write path on the main schema, and so the
+	// search-side tokenisation (camelCase / snake_case / path-segment
+	// splits — see internal/search/tokenizer.go) lives in a clearly
+	// search-shaped column instead of polluting Node.
+	//
+	// id is the foreign anchor back to Node.id; tokens is the
+	// space-separated pre-tokenised text that the FTS index
+	// matches against. PRIMARY KEY on id makes the per-node
+	// UpsertSymbolFTS MERGE call idempotent (re-indexing a file
+	// during incremental updates replaces the prior row in place).
+	`CREATE NODE TABLE IF NOT EXISTS SymbolFTS(
+        id     STRING,
+        tokens STRING,
+        PRIMARY KEY(id)
+    )`,
 }
