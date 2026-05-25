@@ -166,8 +166,9 @@ WHERE edges.edge_id = u.edge_id`
 // derives name from the id, then promotes the edge origin to
 // ast_resolved.
 //
-// Unlike Kuzu, DuckDB's AddBatch does not auto-stub endpoints, so
-// the node insertion is required (not just kind upgrade). Uses
+// Unlike Ladybug's rel-table FK, DuckDB's AddBatch does not
+// auto-stub endpoints, so the node insertion is required
+// (not just kind upgrade). Uses
 // INSERT ... ON CONFLICT DO NOTHING to keep the operation
 // idempotent.
 func (s *Store) ResolveExternalCallStubs() (int, error) {

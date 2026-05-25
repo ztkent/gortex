@@ -236,7 +236,6 @@ require (
 	github.com/gortexhq/tree-sitter-swift v0.1.1-0.20260424235305-8dde3a3327dd
 	github.com/jedib0t/go-pretty/v6 v6.7.10
 	github.com/knights-analytics/hugot v0.7.3
-	github.com/kuzudb/go-kuzu v0.11.3
 	github.com/marcboeker/go-duckdb/v2 v2.4.3
 	github.com/mark3labs/mcp-go v0.54.0
 	github.com/pelletier/go-toml/v2 v2.3.1

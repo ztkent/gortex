@@ -19,12 +19,15 @@ func TestAnalyzeCoverage_StampsMeta(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(dir, "go.mod"),
 		[]byte("module example.test/repo\n\ngo 1.22\n"), 0o644)
 
-	// Synthetic cover profile: covers `main` (line 9), uncovered
-	// segment for `helper` (line 14). The file path is the
-	// module-qualified form Go's cover tool emits.
+	// Synthetic cover profile: covers `main` (line 7-9), uncovered
+	// segment for `helper` (line 11). Line numbers match the
+	// setupTestServer fixture in server_test.go — after the fmt
+	// import was dropped to keep external-call attribution clean,
+	// the function bodies shifted up by 2 lines. The file path is
+	// the module-qualified form Go's cover tool emits.
 	profile := []byte(`mode: set
-example.test/repo/main.go:9.13,11.2 1 1
-example.test/repo/main.go:14.13,14.16 1 0
+example.test/repo/main.go:7.13,9.2 1 1
+example.test/repo/main.go:11.13,11.16 1 0
 `)
 	profilePath := filepath.Join(dir, "cover.out")
 	if err := os.WriteFile(profilePath, profile, 0o644); err != nil {

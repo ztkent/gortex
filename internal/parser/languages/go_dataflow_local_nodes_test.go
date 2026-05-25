@@ -13,7 +13,7 @@ import (
 // TestGoDataflow_LocalsMaterialiseAsKindLocal is the regression for
 // the design change that lifted intra-function bindings from
 // edge-endpoint-only IDs to first-class KindLocal nodes. Storage
-// backends that enforce rel-table FK (Kuzu / Ladybug) had to
+// backends that enforce rel-table FK (Ladybug) had to
 // auto-stub empty Node rows for every local-binding edge endpoint —
 // 51k+ stubs on the gortex codebase. Materialising as KindLocal
 // converges every backend's node count and gives locals a proper

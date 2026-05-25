@@ -1,6 +1,6 @@
 // Package exporter writes the in-memory graph to portable formats so users
 // can load it into external visualization and query tools (Neo4j, Memgraph,
-// Kuzu via Cypher; yEd, Gephi, Cytoscape via GraphML).
+// Ladybug via Cypher; yEd, Gephi, Cytoscape via GraphML).
 //
 // The exporter is read-only and operates on a snapshot — it never mutates
 // the graph. Filters (repo, kinds) are applied during emission.

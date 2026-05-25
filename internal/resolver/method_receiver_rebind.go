@@ -16,7 +16,7 @@ import (
 // belong to the single type node defined elsewhere.
 //
 // Without this pass:
-//   - kuzu / ladybug materialise phantom Node rows to satisfy the
+//   - ladybug materialises phantom Node rows to satisfy the
 //     rel-table FK on every cross-file method-receiver edge;
 //   - InferImplements builds a typeID → method-set map keyed on the
 //     phantom IDs, so a type whose methods span N files appears as N

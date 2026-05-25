@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Sequential Linux-kernel bench for the rest of the disk backends
+# Sequential Linux-kernel bench for the disk backends
 # (ladybug, duckdb, sqlite). Forces shadow swap via
-# GORTEX_SHADOW_MAX_FILES so each backend gets the same drain
-# benefit as kuzu.
+# GORTEX_SHADOW_MAX_FILES so each backend gets the
+# drain-shadow benefit.
 
 set -euo pipefail
 

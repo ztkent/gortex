@@ -1616,8 +1616,8 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 	// the persisted state.
 	//
 	// Guards:
-	//   - Backend must implement graph.BulkLoader (kuzu / duckdb /
-	//     cayley / bbolt / sqlite all opt in).
+	//   - Backend must implement graph.BulkLoader (ladybug, duckdb,
+	//     sqlite all opt in).
 	//   - Store must be empty (NodeCount == 0 && EdgeCount == 0). The
 	//     final dump is BulkLoad's INSERT-only fast path — running it
 	//     against a non-empty store would corrupt or duplicate.
@@ -1666,7 +1666,7 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 			// iterators free each shard's node/edge maps as they
 			// advance, so peak RAM during the persist window is
 			// roughly the chunk buffer + the backend's working set,
-			// not full shadow + Kuzu COPY buffer.
+			// not full shadow + the disk backend's bulk-COPY buffer.
 			const persistChunk = 100000
 			nodeBuf := make([]*graph.Node, 0, persistChunk)
 			for n := range inMemShadow.DrainNodes() {

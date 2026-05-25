@@ -26,16 +26,17 @@ import (
 func setupTestServer(t *testing.T) (*Server, string) {
 	t.Helper()
 	dir := t.TempDir()
+	// Fixture deliberately has zero external imports so the
+	// resolver's attributeGoExternalCalls pass doesn't auto-add a
+	// `module::go:*` node — that lets the external-calls analyser
+	// tests assert on an exact set of manually-added modules.
 	_ = os.WriteFile(filepath.Join(dir, "main.go"), []byte(`package main
-
-import "fmt"
 
 type Config struct {
 	Port int
 }
 
 func main() {
-	fmt.Println("hello")
 	helper()
 }
 

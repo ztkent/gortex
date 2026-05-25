@@ -45,7 +45,7 @@ var goBuiltinConsts = map[string]struct{}{
 // classifier in internal/resolver/builtins.go but completes the
 // pattern by also creating nodes for the targets — so
 // `find_usages(builtin::go::type::float64)` answers "every variable
-// typed as float64 in this codebase", and the kuzu/ladybug stub
+// typed as float64 in this codebase", and the Ladybug stub
 // inflation drops by ~50k rows on a gortex-scale Go codebase.
 //
 // Three ID namespaces under `builtin::go::`:

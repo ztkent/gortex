@@ -12,7 +12,7 @@ import (
 // / `external::<importPath>::<symbol>` edge target, plus a KindModule
 // parent for each owning import path. Without this pass the targets
 // are stubs in storage backends that enforce rel-table FK
-// (Kuzu / Ladybug) and invisible nodes in memory / sqlite / duckdb,
+// (Ladybug) and invisible nodes in memory / sqlite / duckdb,
 // so a query like `find_usages(stdlib::encoding/json::Marshal)`
 // can't surface "every function in this codebase that calls
 // json.Marshal" — the destination doesn't exist as a graph node.

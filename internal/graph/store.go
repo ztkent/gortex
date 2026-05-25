@@ -191,8 +191,8 @@ var _ Store = (*Graph)(nil)
 
 // BackendResolver is an optional interface backends MAY implement to
 // drain the bulk-tractable subset of the resolver's work entirely
-// inside the backend engine (Cypher MATCH+SET on Kuzu, UPDATE...FROM
-// on DuckDB, Datalog rules on Cozo) instead of round-tripping every
+// inside the backend engine (Cypher MATCH+SET on Ladybug,
+// UPDATE...FROM on DuckDB) instead of round-tripping every
 // resolution decision back to Go.
 //
 // Sequencing matters: earlier rules are higher-precision than later
@@ -259,13 +259,12 @@ type BackendResolver interface {
 // a high-throughput cold-load fast path that bypasses per-call query
 // overhead. The cold-start indexer fires ~2000 small AddBatch calls
 // during its parse phase; on backends where every AddBatch round-trips
-// through a query parser (Kuzu / DuckDB / Cayley) that per-call cost
+// through a query parser (Ladybug, DuckDB) that per-call cost
 // dominates wall time. BulkLoader lets the indexer bracket the parse
 // loop with BeginBulkLoad / FlushBulk: AddBatch calls inside the
 // bracket buffer rows in memory, and FlushBulk commits them through
-// the backend's native bulk primitive (Kuzu's COPY FROM, DuckDB's
-// long-lived Appender, Cayley's batched ApplyDeltas with deferred
-// mirror rebuild).
+// the backend's native bulk primitive (Ladybug's COPY FROM,
+// DuckDB's long-lived Appender).
 //
 // Contract:
 //

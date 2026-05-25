@@ -47,7 +47,6 @@ run_backend() {
     rm -rf "$scratch"
 }
 
-run_backend kuzu    /tmp/bench-main
 run_backend ladybug /tmp/bench-main
 run_backend duckdb  /tmp/bench-main
 run_backend sqlite  /tmp/bench-main

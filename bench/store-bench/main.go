@@ -36,7 +36,6 @@ import (
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_duckdb"
-	"github.com/zzet/gortex/internal/graph/store_kuzu"
 	"github.com/zzet/gortex/internal/graph/store_ladybug"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/indexer"
@@ -103,10 +102,9 @@ func main() {
 	querySize := flag.Int("queries", 1000, "query workload size per backend")
 	skipMemory := flag.Bool("skip-memory", false, "skip the in-memory baseline")
 	skipSQLite := flag.Bool("skip-sqlite", false, "skip the sqlite backend")
-	skipKuzu := flag.Bool("skip-kuzu", false, "skip the kuzu (Cypher) backend")
 	skipDuckDB := flag.Bool("skip-duckdb", false, "skip the duckdb (columnar SQL) backend")
-	skipLadybug := flag.Bool("skip-ladybug", false, "skip the ladybug (Kuzu fork, Cypher) backend")
-	only := flag.String("only", "", "comma-separated subset to run (memory,sqlite,kuzu,duckdb,ladybug); overrides skip-* flags")
+	skipLadybug := flag.Bool("skip-ladybug", false, "skip the ladybug (embedded Cypher property-graph) backend")
+	only := flag.String("only", "", "comma-separated subset to run (memory,sqlite,duckdb,ladybug); overrides skip-* flags")
 	flag.Parse()
 	if *root == "" {
 		die("usage: store-bench -root <path>")
@@ -119,7 +117,6 @@ func main() {
 	// Resolve which backends to run. -only overrides every -skip flag.
 	wantMem := !*skipMemory
 	wantSQLite := !*skipSQLite
-	wantKuzu := !*skipKuzu
 	wantDuckDB := !*skipDuckDB
 	wantLadybug := !*skipLadybug
 	if *only != "" {
@@ -128,7 +125,7 @@ func main() {
 			set[strings.TrimSpace(s)] = true
 		}
 		wantMem, wantSQLite = set["memory"], set["sqlite"]
-		wantKuzu, wantDuckDB = set["kuzu"], set["duckdb"]
+		wantDuckDB = set["duckdb"]
 		wantLadybug = set["ladybug"]
 	}
 
@@ -161,27 +158,6 @@ func main() {
 				return s, diskFn, nil
 			}))
 	}
-	if wantKuzu {
-		fmt.Fprintln(os.Stderr, "[kuzu] indexing through KuzuDB (Cypher) Store...")
-		results = append(results, runBackend("kuzu", absRoot, *workers, *querySize,
-			func() (graph.Store, func() int64, error) {
-				dir, err := os.MkdirTemp("", "store-bench-kuzu-*")
-				if err != nil {
-					return nil, nil, err
-				}
-				path := filepath.Join(dir, "store.kuzu")
-				s, err := store_kuzu.Open(path)
-				if err != nil {
-					os.RemoveAll(dir)
-					return nil, nil, err
-				}
-				diskFn := func() int64 {
-					_ = s.Close()
-					return dirSize(path)
-				}
-				return s, diskFn, nil
-			}))
-	}
 	if wantDuckDB {
 		fmt.Fprintln(os.Stderr, "[duckdb] indexing through DuckDB (columnar SQL) Store...")
 		results = append(results, runBackend("duckdb", absRoot, *workers, *querySize,
@@ -204,7 +180,7 @@ func main() {
 			}))
 	}
 	if wantLadybug {
-		fmt.Fprintln(os.Stderr, "[ladybug] indexing through LadybugDB (Kuzu-fork, Cypher) Store...")
+		fmt.Fprintln(os.Stderr, "[ladybug] indexing through Ladybug (embedded Cypher property-graph) Store...")
 		results = append(results, runBackend("ladybug", absRoot, *workers, *querySize,
 			func() (graph.Store, func() int64, error) {
 				dir, err := os.MkdirTemp("", "store-bench-ladybug-*")
@@ -229,8 +205,8 @@ func main() {
 }
 
 // dirSize totals every regular file under root in bytes. Used for
-// backends whose persisted state is a directory (Cayley's KV bolt
-// store + Kuzu's catalog/data/wal split) rather than a single file.
+// backends whose persisted state is a directory (Ladybug's
+// catalog/data/wal split) rather than a single file.
 func dirSize(root string) int64 {
 	var total int64
 	_ = filepath.Walk(root, func(p string, info os.FileInfo, err error) error {

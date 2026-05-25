@@ -44,8 +44,8 @@ func shadowMaxFileCount() int {
 // streamingFlushActive reports whether the streaming-flush parse path
 // should engage for this IndexCtx. Requirements:
 //
-//   - the backing store implements graph.BulkLoader (kuzu / duckdb /
-//     cayley / bbolt / sqlite all do)
+//   - the backing store implements graph.BulkLoader (ladybug,
+//     duckdb, sqlite all do)
 //   - the file count is above the shadow-max threshold (small repos
 //     stay on the all-in-memory shadow path)
 //   - GORTEX_STREAMING_FLUSH is enabled (off by default — the
