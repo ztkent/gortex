@@ -61,9 +61,10 @@ func (s *Server) handleGetSurprisingConnections(ctx context.Context, req mcp.Cal
 		nodeToComm = cr.NodeToComm
 	}
 
-	// Build a fast scoped-node index and an in-edge counter for
-	// the hub check. Counting once is cheaper than calling
-	// GetInEdges per edge.
+	// Build a fast scoped-node index. We still need ALL kinds here —
+	// edges in the surprise tally can land on any node, not just
+	// function/method. Use scopedNodes' single bulk pull rather than
+	// the per-edge GetNode lookups the legacy path fell back to.
 	scopedSet := make(map[string]*graph.Node, 1024)
 	for _, n := range s.scopedNodes(ctx) {
 		scopedSet[n.ID] = n
@@ -90,18 +91,36 @@ func (s *Server) handleGetSurprisingConnections(ctx context.Context, req mcp.Cal
 		totalEdges = len(allEdges)
 	}
 
-	// In-degree still walks edges Go-side — it depends on the per-
-	// session scopedSet which is not visible to the storage layer.
-	// Lazily materialise AllEdges here only if the capability path
-	// above skipped it. Either way the loop fires exactly once.
+	// In-degree: prefer the InDegreeForNodes capability so the
+	// fan-in computation runs as one indexed COUNT { … } per scoped
+	// target instead of a full AllEdges materialisation. Fall back
+	// to the per-edge bucket pass on backends that don't implement
+	// the counter.
+	inDegree := make(map[string]int, len(scopedSet))
+	if ic, ok := s.graph.(graph.InDegreeForNodes); ok && len(scopedSet) > 0 {
+		ids := make([]string, 0, len(scopedSet))
+		for id := range scopedSet {
+			ids = append(ids, id)
+		}
+		for id, c := range ic.InDegreeForNodes(ids) {
+			inDegree[id] = c
+		}
+	} else {
+		if allEdges == nil {
+			allEdges = s.graph.AllEdges()
+		}
+		for _, e := range allEdges {
+			if _, ok := scopedSet[e.To]; ok {
+				inDegree[e.To]++
+			}
+		}
+	}
+
+	// The per-edge anomaly walk still needs the edge stream. Lazily
+	// materialise it now — the kind tally and in-degree may have
+	// already pulled it.
 	if allEdges == nil {
 		allEdges = s.graph.AllEdges()
-	}
-	inDegree := make(map[string]int, len(scopedSet))
-	for _, e := range allEdges {
-		if _, ok := scopedSet[e.To]; ok {
-			inDegree[e.To]++
-		}
 	}
 
 	// Determine which edge kinds are "unusual" — share of total
