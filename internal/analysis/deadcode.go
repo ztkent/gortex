@@ -220,13 +220,14 @@ func FindDeadCode(g graph.Store, processes *ProcessResult, excludePatterns []str
 	}
 
 	nodes := g.AllNodes()
-	allEdges := g.AllEdges()
-
 	// Build set of interface-required method names per type.
 	// If a type implements an interface, all methods that the interface
 	// requires are alive even if never called directly (they satisfy the
 	// contract).  We index: typeID → set of required method names.
-	ifaceRequiredMethods := buildIfaceRequiredMethods(g, nodes, allEdges)
+	// Only EdgeImplements is needed — pulling AllEdges over cgo was
+	// the previous OOM source (a ~300k-edge workspace materialises ~100
+	// MB of Edge structs).
+	ifaceRequiredMethods := buildIfaceRequiredMethods(g, nodes)
 
 	// Build set of entry point node IDs from processes
 	entryPoints := make(map[string]bool)
@@ -249,6 +250,18 @@ func FindDeadCode(g graph.Store, processes *ProcessResult, excludePatterns []str
 			entryPointFiles[n.FilePath] = true
 		}
 	}
+
+	// Batched in-edge fetch for every node up front. The legacy per-node
+	// g.GetInEdges(n.ID) call inside the main loop fired one Cypher per
+	// node on Ladybug — ~133k cgo round-trips on the gortex workspace,
+	// ~130s wall-clock, RSS spike that OOM-killed the daemon mid-pass.
+	// GetInEdgesByNodeIDs collapses that to a single backend round-trip
+	// keyed on the candidate id set.
+	nodeIDs := make([]string, 0, len(nodes))
+	for _, n := range nodes {
+		nodeIDs = append(nodeIDs, n.ID)
+	}
+	inEdgesByID := g.GetInEdgesByNodeIDs(nodeIDs)
 
 	var result []DeadCodeEntry
 	for _, n := range nodes {
@@ -317,8 +330,15 @@ func FindDeadCode(g graph.Store, processes *ProcessResult, excludePatterns []str
 		// References; types by References/Instantiates/MemberOf/
 		// Implements/Extends/Composes/TypedAs. See incomingUsageKinds
 		// for the rationale.
+		//
+		// Edges are pulled once below in inEdgesByID before the loop —
+		// the original per-iteration GetInEdges(n.ID) call costs ~1 ms
+		// of cgo round-trip per node on Ladybug, so on a 133k-node
+		// workspace it was the 130-second loop that OOM-killed the
+		// daemon. The batched fetch collapses that to a single Cypher
+		// keyed on the surviving candidate ids.
 		allowed := incomingUsageKinds(n.Kind)
-		inEdges := g.GetInEdges(n.ID)
+		inEdges := inEdgesByID[n.ID]
 		incomingCount := 0
 		for _, e := range inEdges {
 			for _, k := range allowed {
@@ -418,7 +438,7 @@ func FindDeadCode(g graph.Store, processes *ProcessResult, excludePatterns []str
 //  1. Collecting all interfaces with their required method names (from Meta["methods"]).
 //  2. Collecting all EdgeImplements edges (type → interface).
 //  3. For each type that implements an interface, merging all required method names.
-func buildIfaceRequiredMethods(g graph.Store, nodes []*graph.Node, edges []*graph.Edge) map[string]map[string]bool {
+func buildIfaceRequiredMethods(g graph.Store, nodes []*graph.Node) map[string]map[string]bool {
 	// Step 1: interface ID → required method names
 	ifaceMethods := make(map[string]map[string]bool)
 	for _, n := range nodes {
@@ -451,12 +471,16 @@ func buildIfaceRequiredMethods(g graph.Store, nodes []*graph.Node, edges []*grap
 		return nil
 	}
 
-	// Step 2: type ID → set of required method names (from all implemented interfaces)
+	// Step 2: type ID → set of required method names (from all implemented
+	// interfaces). Only EdgeImplements is needed — stream it via
+	// EdgesByKind so on disk backends (Ladybug) we issue a single Cypher
+	// MATCH for that kind instead of pulling every edge in the graph and
+	// filtering in Go. The pre-batched-iterator AllEdges() pull was the
+	// OOM source on the analyze(dead_code) hot path: ~300k edges × ~kb
+	// per Edge struct = enough sustained allocation to get the daemon
+	// killed before the iteration ever started.
 	result := make(map[string]map[string]bool)
-	for _, e := range edges {
-		if e.Kind != graph.EdgeImplements {
-			continue
-		}
+	for e := range g.EdgesByKind(graph.EdgeImplements) {
 		// EdgeImplements: From=type, To=interface
 		iface, ok := ifaceMethods[e.To]
 		if !ok {
