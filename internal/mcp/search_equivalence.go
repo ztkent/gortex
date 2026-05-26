@@ -54,6 +54,22 @@ func (m expandMode) allowsEquivalenceExpansion() bool {
 	return m == expandBoth || m == expandEquivalenceOnly
 }
 
+// isIdentifierClass reports whether the query class is one of the
+// identifier-shape classes (symbol / path / signature) — the classes
+// where the rerank's classWeightTable already proves the semantic
+// channel contributes near-zero useful signal (0.65 / 0.45 / 0.80 vs
+// the baseline 1.00 for concept). The handler routes these queries
+// through the identifier-shape fast path: expansion off, vector
+// channel off, fetch slack tightened.
+func isIdentifierClass(c rerank.QueryClass) bool {
+	switch c {
+	case rerank.QueryClassSymbol, rerank.QueryClassPath, rerank.QueryClassSignature:
+		return true
+	default:
+		return false
+	}
+}
+
 // expandEquivalenceClasses returns the deterministic expansion terms
 // for a query: for every query token, its curated-equivalence-table
 // siblings and its per-repo auto-mined concept siblings. The result

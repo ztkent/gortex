@@ -727,7 +727,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithString("assist", mcp.Description("LLM assist mode: \"auto\" (default — engages on natural-language queries, skips identifier lookups), \"on\" (force engage), \"off\" (bypass), \"deep\" (on + a body-grounded verification pass that reads candidate code and HONESTLY drops irrelevant matches — slower, may return empty results when nothing genuinely matches). Requires an LLM provider configured via `llm.provider` (local / anthropic / openai / ollama / claudecli / gemini / bedrock / deepseek); behaves as \"off\" when none is available.")),
 			mcp.WithBoolean("debug", mcp.Description("When true, attach a `rerank` block to the response carrying per-candidate scores and per-signal contributions from the 11-signal rerank pipeline (bm25, semantic, fan_in, hits, fan_out, churn, community, minhash, api_signature, type_signature, recency, feedback) plus the active per-signal weight map. Off by default; enable to inspect ranking decisions or tune `.gortex.yaml::search::weights`.")),
 			mcp.WithString("query_class", mcp.Description("Advisory hint that tunes the bm25-vs-semantic balance of the rerank: \"auto\" (default — detect from query shape), \"symbol\" (identifier / API lookup — BM25-heavy), \"concept\" (natural-language description — balanced), \"path\" (file-path query — most BM25-heavy), \"signature\" (type/function-signature fragment — BM25-leaning), \"keyword_soup\" (a degenerate boolean OR-list \u2014 suppresses LLM expansion and splits the soup into per-disjunct BM25 fetches; a `query_advice` nudge rides on the response). The class actually used is echoed back as `query_class` in the response.")),
-			mcp.WithString("expand", mcp.Description("Query-expansion channels: \"both\" (default \u2014 LLM expansion when the assist gate engages, plus the deterministic equivalence-class table), \"equivalence\" (only the LLM-free curated synonym table + per-repo auto-mined concepts), \"llm\" (only LLM expansion), \"off\" (pure BM25, no expansion). Equivalence expansion bridges query vocabulary to the words a symbol uses (auth->login, delete->remove) and runs even with no LLM provider configured.")),
+			mcp.WithString("expand", mcp.Description("Query-expansion channels: \"both\" (default \u2014 LLM expansion when the assist gate engages, plus the deterministic equivalence-class table), \"equivalence\" (only the LLM-free curated synonym table + per-repo auto-mined concepts), \"llm\" (only LLM expansion), \"off\" (pure BM25, no expansion). Equivalence expansion bridges query vocabulary to the words a symbol uses (auth->login, delete->remove) and runs even with no LLM provider configured. For identifier queries (query_class symbol / path / signature) the server auto-disables expansion + vector even when expand is set \u2014 these classes match best on BM25 + exact-name alone.")),
 			mcp.WithString("corpus", mcp.Description("Which corpus to search: \"code\" (default \u2014 code symbols only), \"docs\" (only Markdown prose-section nodes \u2014 the heading-delimited documentation sections), \"all\" (both). With docs/all a prose query matches the right README / guide section by its body text.")),
 			mcp.WithNumber("max_per_file", mcp.Description("Cap how many results a single source file may contribute to the diverse head of the result set (default 3). Hits beyond the cap are demoted below not-yet-capped results — never dropped — so the top of the list spans more files. Set 0 to disable diversification.")),
 		),
@@ -1129,6 +1129,37 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 		soupReason = "query reads as a boolean OR-list; search ranks best on a single concept or symbol name -- run one query per disjunct, or describe the intent in plain words"
 	}
 
+	// Identifier-shape fast path. ClassifyQuery is the structural
+	// detector the rerank uses; QueryClassSymbol / Path / Signature
+	// are queries where the rerank's classWeightTable already proves
+	// the semantic channel contributes near-zero signal (0.65 / 0.45 /
+	// 0.80 vs the baseline 1.00) — see internal/search/rerank/
+	// query_kind.go::classWeightTable. For these classes the handler
+	// forces expansion off and tells the engine to skip the vector
+	// channel entirely; the rest of the pipeline (BM25 + bundle +
+	// rerank) is the only path that matters. An explicit
+	// query_class arg pin on one of these three classes engages the
+	// fast path too. A soup query never engages the fast path —
+	// keyword_soup has its own split-disjunct treatment.
+	//
+	// Validation of the query_class arg happens here so the early
+	// gating uses the same validated value the rerank below uses;
+	// invalid input is rejected before the engine runs.
+	queryClass := rerank.ClassifyQuery(q)
+	if qcArg := strings.TrimSpace(req.GetString("query_class", "")); qcArg != "" {
+		parsed, ok := rerank.ParseQueryClass(qcArg)
+		if !ok {
+			return mcp.NewToolResultError("invalid query_class: " + qcArg + " (want auto, symbol, concept, path, signature, or keyword_soup)"), nil
+		}
+		if parsed != rerank.QueryClassUnknown {
+			queryClass = parsed
+		}
+	}
+	identifierFastPath := !isSoup && isIdentifierClass(queryClass)
+	if identifierFastPath {
+		scope.SkipVectorChannel = true
+	}
+
 	// LLM assist gate: decides whether the expansion + rerank passes
 	// run for this query. The service-enabled check is layered inside
 	// the helpers so a stub build is a clean bypass. A soup query
@@ -1138,6 +1169,14 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 	// expand mode picks which query-expansion channels run -- LLM,
 	// the deterministic equivalence table, both (default), or off.
 	expand := parseExpandMode(req)
+	// Identifier-shape queries skip every expansion channel — the
+	// rerank's classWeightTable shows BM25 is near-perfect for these
+	// classes; expansion would only add the combined-OR fan-out's
+	// extra Cypher call without lifting recall on a literal-token
+	// query. The explicit arg pin still wins for soup / concept.
+	if identifierFastPath {
+		expand = expandOff
+	}
 	engage := shouldEngageAssist(assist, q) && s.llmService != nil && s.llmService.Enabled()
 	if isSoup || !expand.allowsLLMExpansion() {
 		engage = false
@@ -1280,22 +1319,11 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 	// rctx was built above (before the BM25 fetch) so the engine's
 	// bundle path could seed its edge caches into the same rctx the
 	// handler-side rerank will read from.
-	// Per-class rerank weighting: detect the query class (or honour an
-	// explicit query_class hint) and pin it on the rerank Context so
-	// the pipeline scales the bm25 / semantic blend accordingly.
-	queryClass := rerank.ClassifyQuery(q)
-	if qcArg := strings.TrimSpace(req.GetString("query_class", "")); qcArg != "" {
-		parsed, ok := rerank.ParseQueryClass(qcArg)
-		if !ok {
-			return mcp.NewToolResultError("invalid query_class: " + qcArg + " (want auto, symbol, concept, path, signature, or keyword_soup)"), nil
-		}
-		if parsed != rerank.QueryClassUnknown {
-			queryClass = parsed
-		}
-	}
-	// A detected soup query reports the keyword_soup class even when
-	// the caller did not pin it, so the response surfaces the class
-	// the handler actually treated the query as.
+	// queryClass was classified + validated at the top of the handler
+	// so the identifier-shape fast path could read it. Re-apply the
+	// soup override here — soup detection happens after classification
+	// and reports keyword_soup regardless of what the structural
+	// detector thought the query looked like.
 	if isSoup {
 		queryClass = rerank.QueryClassKeywordSoup
 	}

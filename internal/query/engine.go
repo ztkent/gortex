@@ -419,7 +419,7 @@ func (e *Engine) SearchSymbolsRanked(query string, limit int, opts QueryOptions,
 
 	var cands []*rerank.Candidate
 	if s := e.getSearch(); s != nil && s.Count() > 0 {
-		cands = e.gatherBackendCandidates(query, fetchLimit, opts.SearchTimings, gatherCtx)
+		cands = e.gatherBackendCandidates(query, fetchLimit, opts, gatherCtx)
 	} else {
 		start := time.Now()
 		nodes := e.searchSubstring(query, fetchLimit)
@@ -514,8 +514,9 @@ func (e *Engine) SearchSymbolsScoped(query string, limit int, opts QueryOptions)
 // the rerank's 2 edge fetches) into 4 server-side queries with no
 // engine→rerank boundary crossings; the GetNodesByIDs cost goes
 // away entirely for the BM25 hits.
-func (e *Engine) gatherBackendCandidates(query string, limit int, timings *SearchTimings, rctx *rerank.Context) []*rerank.Candidate {
+func (e *Engine) gatherBackendCandidates(query string, limit int, opts QueryOptions, rctx *rerank.Context) []*rerank.Candidate {
 	backend := e.getSearch()
+	timings := opts.SearchTimings
 
 	// Bundle fast path. The SymbolBundleSearcherBackend assertion
 	// chains through Swappable → HybridBackend → SymbolSearcherBackend
@@ -575,7 +576,14 @@ func (e *Engine) gatherBackendCandidates(query string, limit int, timings *Searc
 		// VectorChannelOnly skips the BM25 re-run (the bundle already
 		// returned text hits + their full payload); a few hundred
 		// microseconds of embed + ANN, not a second FTS Cypher.
-		if vectorOnlyOK {
+		//
+		// opts.SkipVectorChannel suppresses the embed + ANN entirely.
+		// The MCP handler flips this on for identifier-shape queries
+		// (QueryClassSymbol / Path / Signature) where the rerank's
+		// classWeightTable already proves semantic contributes near-
+		// zero signal vs the BM25 channel — see classWeightTable in
+		// internal/search/rerank/query_kind.go.
+		if vectorOnlyOK && !opts.SkipVectorChannel {
 			vecIDs, stats := vectorOnlyBackend.VectorChannelOnly(query, limit*2)
 			vectorIDs = vecIDs
 			if timings != nil {
@@ -598,25 +606,39 @@ func (e *Engine) gatherBackendCandidates(query string, limit int, timings *Searc
 		type timedChan interface {
 			SearchChannelsTimed(query string, limit int) ([]search.SearchResult, []string, search.ChannelTimings)
 		}
-		if tc, ok := backend.(timedChan); ok {
-			var stats search.ChannelTimings
-			textResults, vectorIDs, stats = tc.SearchChannelsTimed(query, limit*2)
-			if timings != nil {
-				timings.TextBackendMS += stats.TextMS
-				timings.EmbedMS += stats.EmbedMS
-				timings.VectorSearchMS += stats.VectorSearchMS
-			}
-		} else if cs, ok := backend.(search.ChannelSearcher); ok {
-			textStart := time.Now()
-			textResults, vectorIDs = cs.SearchChannels(query, limit*2)
-			if timings != nil {
-				timings.TextBackendMS += time.Since(textStart).Milliseconds()
-			}
-		} else {
+		switch {
+		case opts.SkipVectorChannel:
+			// Identifier-shape fast path: skip the vector channel
+			// (no embed, no ANN) and run text-only Search. The cost
+			// saved is the per-call embedder + vector index hit; the
+			// rerank's classWeightTable proves it's not earning its
+			// keep for these query classes.
 			textStart := time.Now()
 			textResults = backend.Search(query, limit*2)
 			if timings != nil {
 				timings.TextBackendMS += time.Since(textStart).Milliseconds()
+			}
+		default:
+			if tc, ok := backend.(timedChan); ok {
+				var stats search.ChannelTimings
+				textResults, vectorIDs, stats = tc.SearchChannelsTimed(query, limit*2)
+				if timings != nil {
+					timings.TextBackendMS += stats.TextMS
+					timings.EmbedMS += stats.EmbedMS
+					timings.VectorSearchMS += stats.VectorSearchMS
+				}
+			} else if cs, ok := backend.(search.ChannelSearcher); ok {
+				textStart := time.Now()
+				textResults, vectorIDs = cs.SearchChannels(query, limit*2)
+				if timings != nil {
+					timings.TextBackendMS += time.Since(textStart).Milliseconds()
+				}
+			} else {
+				textStart := time.Now()
+				textResults = backend.Search(query, limit*2)
+				if timings != nil {
+					timings.TextBackendMS += time.Since(textStart).Milliseconds()
+				}
 			}
 		}
 	}

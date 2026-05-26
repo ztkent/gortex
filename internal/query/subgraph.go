@@ -90,6 +90,28 @@ type QueryOptions struct {
 	// engine-side rerank invocations to zero. The merge-side rerank
 	// is the source of truth either way.
 	SkipInnerRerank bool `json:"-"`
+
+	// SkipVectorChannel, when true, makes gatherBackendCandidates skip
+	// the vector channel entirely — no embedder call, no ANN search.
+	// Set by the MCP search_symbols handler on identifier-shape queries
+	// (QueryClassSymbol / QueryClassPath / QueryClassSignature) where
+	// the rerank's classWeightTable already proves the semantic
+	// channel contributes near-zero useful signal (multipliers 0.65 /
+	// 0.45 / 0.80 vs the baseline 1.00 for concept). Saves the embed
+	// + vector search round-trip on the common-case identifier lookup.
+	// The bundle path's vector-only branch and the legacy
+	// SearchChannels path both honour this flag.
+	SkipVectorChannel bool `json:"-"`
+
+	// SkipExactNameSplice, when true, makes gatherBackendCandidates
+	// skip the FindNodesByName(query) splice-in. Set by callers that
+	// know the query string cannot match any exact node name — the
+	// fetchAndMergeBM25 fan-out's combined-OR call is the canonical
+	// case: a concatenated bag of expansion terms ("NewServer
+	// StartServer Server.Init …") can't be the literal Name of any
+	// node, so the FindNodesByName Cypher round-trip is wasted work.
+	// The primary query still runs the splice.
+	SkipExactNameSplice bool `json:"-"`
 }
 
 // SearchTimings carries per-phase wall-clock measurements collected
