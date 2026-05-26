@@ -72,6 +72,8 @@ func RunConformance(t *testing.T, factory Factory) {
 	t.Run("FindNodesByNames", func(t *testing.T) { testFindNodesByNames(t, factory) })
 	t.Run("GetEdgesByNodeIDs", func(t *testing.T) { testGetEdgesByNodeIDs(t, factory) })
 	t.Run("SymbolBundleSearcher", func(t *testing.T) { testSymbolBundleSearcher(t, factory) })
+	t.Run("DeadCodeCandidator", func(t *testing.T) { testDeadCodeCandidator(t, factory) })
+	t.Run("IfaceImplementsScanner", func(t *testing.T) { testIfaceImplementsScanner(t, factory) })
 }
 
 // -- fixture helpers ---------------------------------------------------
@@ -1234,4 +1236,157 @@ func edgeKeys(es []*graph.Edge) []string {
 		out = append(out, fmt.Sprintf("%s->%s:%s", e.From, e.To, e.Kind))
 	}
 	return out
+}
+
+// testDeadCodeCandidator exercises the optional
+// graph.DeadCodeCandidator capability. Builds a small graph with
+// nodes that fall into each filter case the analyzer cares about:
+//
+//   - zero in-edges (dead).
+//   - in-edges of disallowed kind only (dead).
+//   - in-edges of allowed kind (alive).
+//   - mixed kinds across the candidate set (per-row allowlist must apply).
+//
+// The in-memory *graph.Graph implements this; Ladybug overrides with
+// a server-side Cypher query. Both must return the same candidate set.
+func testDeadCodeCandidator(t *testing.T, factory Factory) {
+	t.Helper()
+	s := factory(t)
+	dc, ok := s.(graph.DeadCodeCandidator)
+	if !ok {
+		t.Skip("backend does not implement graph.DeadCodeCandidator")
+	}
+
+	// Functions: AliveFunc (called), DeadFunc (no in-edges),
+	// ReadOnlyFunc (only EdgeReads — disallowed for KindFunction).
+	s.AddNode(mkNode("AliveFunc", "AliveFunc", "a.go", graph.KindFunction))
+	s.AddNode(mkNode("DeadFunc", "DeadFunc", "a.go", graph.KindFunction))
+	s.AddNode(mkNode("ReadOnlyFunc", "ReadOnlyFunc", "a.go", graph.KindFunction))
+	s.AddNode(mkNode("Caller", "Caller", "a.go", graph.KindFunction))
+	// Types: AliveType (referenced), DeadType (no in-edges).
+	s.AddNode(mkNode("AliveType", "AliveType", "b.go", graph.KindType))
+	s.AddNode(mkNode("DeadType", "DeadType", "b.go", graph.KindType))
+	// Methods: AliveMethod (called), DeadMethod (no in-edges).
+	s.AddNode(mkNode("AliveMethod", "AliveMethod", "c.go", graph.KindMethod))
+	s.AddNode(mkNode("DeadMethod", "DeadMethod", "c.go", graph.KindMethod))
+
+	// Edges that exercise the per-kind allowlist.
+	e1 := mkEdge("Caller", "AliveFunc", graph.EdgeCalls)
+	e1.Line = 1
+	e2 := mkEdge("Caller", "ReadOnlyFunc", graph.EdgeReads)
+	e2.Line = 2
+	e3 := mkEdge("Caller", "AliveMethod", graph.EdgeCalls)
+	e3.Line = 3
+	e4 := mkEdge("Caller", "AliveType", graph.EdgeReferences)
+	e4.Line = 4
+	s.AddEdge(e1)
+	s.AddEdge(e2)
+	s.AddEdge(e3)
+	s.AddEdge(e4)
+
+	// Per-kind allowlist mirrors analysis.incomingUsageKinds for the
+	// three kinds under test. Functions are alive on Calls/References;
+	// methods on Calls/Implements; types on References/Instantiates.
+	allowedKinds := []graph.NodeKind{
+		graph.KindFunction,
+		graph.KindMethod,
+		graph.KindType,
+	}
+	allowedInEdges := map[graph.NodeKind][]graph.EdgeKind{
+		graph.KindFunction: {graph.EdgeCalls, graph.EdgeReferences},
+		graph.KindMethod:   {graph.EdgeCalls, graph.EdgeImplements},
+		graph.KindType:     {graph.EdgeReferences, graph.EdgeInstantiates},
+	}
+
+	got := dc.DeadCodeCandidates(allowedKinds, allowedInEdges)
+	gotIDs := sortNodeIDs(got)
+	// Caller has zero in-edges of any kind, so it surfaces too — the
+	// analyzer's per-kind allowlist would also flag it as a candidate
+	// here. The backend's job is just the candidate set; post-filters
+	// (exported / test / entry-point) run in Go.
+	want := []string{"Caller", "DeadFunc", "DeadMethod", "DeadType", "ReadOnlyFunc"}
+	if fmt.Sprint(gotIDs) != fmt.Sprint(want) {
+		t.Fatalf("DeadCodeCandidates = %v\nwant %v", gotIDs, want)
+	}
+
+	// Empty kind list returns nothing — never the whole graph.
+	if got := dc.DeadCodeCandidates(nil, allowedInEdges); len(got) != 0 {
+		t.Fatalf("DeadCodeCandidates(nil) = %d, want 0", len(got))
+	}
+
+	// Empty per-kind allowlist means "any incoming edge counts as
+	// usage" — AliveFunc and ReadOnlyFunc (both have *some* in-edge)
+	// drop out; only DeadFunc + Caller remain among functions.
+	anyKind := map[graph.NodeKind][]graph.EdgeKind{
+		graph.KindFunction: nil,
+	}
+	gotAny := dc.DeadCodeCandidates([]graph.NodeKind{graph.KindFunction}, anyKind)
+	gotAnyIDs := sortNodeIDs(gotAny)
+	wantAny := []string{"Caller", "DeadFunc"}
+	if fmt.Sprint(gotAnyIDs) != fmt.Sprint(wantAny) {
+		t.Fatalf("DeadCodeCandidates(any-kind) = %v\nwant %v", gotAnyIDs, wantAny)
+	}
+}
+
+// testIfaceImplementsScanner exercises the optional
+// graph.IfaceImplementsScanner capability. Seeds two interfaces (one
+// with methods Meta, one without) plus a type that implements each;
+// the row set must include only the (type, iface) tuple whose target
+// has a Meta["methods"] payload — the no-meta interface drops out.
+func testIfaceImplementsScanner(t *testing.T, factory Factory) {
+	t.Helper()
+	s := factory(t)
+	scanner, ok := s.(graph.IfaceImplementsScanner)
+	if !ok {
+		t.Skip("backend does not implement graph.IfaceImplementsScanner")
+	}
+
+	// Interface with required methods.
+	ifaceA := mkNode("iface_A", "Reader", "a.go", graph.KindInterface)
+	ifaceA.Meta = map[string]any{"methods": []string{"Read", "Close"}}
+	s.AddNode(ifaceA)
+	// Interface with no Meta — must not appear in the row set.
+	ifaceB := mkNode("iface_B", "Empty", "a.go", graph.KindInterface)
+	s.AddNode(ifaceB)
+	// Implementing type for each.
+	s.AddNode(mkNode("type_A", "ReaderImpl", "a.go", graph.KindType))
+	s.AddNode(mkNode("type_B", "EmptyImpl", "a.go", graph.KindType))
+	s.AddEdge(mkEdge("type_A", "iface_A", graph.EdgeImplements))
+	s.AddEdge(mkEdge("type_B", "iface_B", graph.EdgeImplements))
+
+	rows := scanner.IfaceImplementsRows()
+	if len(rows) != 1 {
+		t.Fatalf("IfaceImplementsRows len = %d, want 1 (iface_B has no Meta)", len(rows))
+	}
+	r := rows[0]
+	if r.TypeID != "type_A" || r.IfaceID != "iface_A" {
+		t.Fatalf("row = %+v, want type_A → iface_A", r)
+	}
+	if r.IfaceMeta == nil {
+		t.Fatalf("IfaceMeta is nil")
+	}
+	raw, ok := r.IfaceMeta["methods"]
+	if !ok {
+		t.Fatalf("IfaceMeta missing methods key: %+v", r.IfaceMeta)
+	}
+	// Meta encoding round-trips lists differently between backends
+	// (in-memory keeps []string; gob-encoded comes back as []any).
+	// Accept either.
+	var methods []string
+	switch v := raw.(type) {
+	case []string:
+		methods = v
+	case []any:
+		for _, m := range v {
+			if str, ok := m.(string); ok {
+				methods = append(methods, str)
+			}
+		}
+	default:
+		t.Fatalf("unexpected methods type %T: %v", raw, raw)
+	}
+	sort.Strings(methods)
+	if fmt.Sprint(methods) != fmt.Sprint([]string{"Close", "Read"}) {
+		t.Fatalf("methods = %v, want [Close Read]", methods)
+	}
 }

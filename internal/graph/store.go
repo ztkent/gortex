@@ -696,3 +696,55 @@ type KCoreHit struct {
 type KCorer interface {
 	KCoreDecomposition(opts KCoreOpts) ([]KCoreHit, error)
 }
+
+// DeadCodeCandidator is an optional capability backends MAY implement
+// to compute the dead-code candidate set server-side. The default Go
+// path in analysis.FindDeadCode pulls every node + a batched in-edge
+// map and filters in Go; on disk backends (Ladybug) that's
+// ~1.3M edge rows over cgo per call. A backend that implements
+// DeadCodeCandidator runs the equivalent WHERE-NOT-EXISTS filter
+// inside the query engine and returns ~hundreds of true candidates,
+// skipping the materialise-then-filter loop entirely.
+//
+// The opts mirror analysis.FindDeadCodeOptions to keep the surface
+// in sync — only the fields the backend can act on (kinds + the
+// per-kind in-edge allowlist) are honoured. File-path / build-tag
+// / well-known-name exclusions stay in Go because they need
+// string parsing the backend can't do efficiently.
+type DeadCodeCandidator interface {
+	// DeadCodeCandidates returns nodes matching the allowed node
+	// kinds that have NO incoming edges of the corresponding
+	// allowed in-edge kinds. The map keys the in-edge allowlist by
+	// node kind — backends evaluate the right allowlist per row.
+	// Empty allowedInEdgeKinds for a kind means "any incoming edge
+	// counts as usage".
+	DeadCodeCandidates(allowedNodeKinds []NodeKind, allowedInEdgeKinds map[NodeKind][]EdgeKind) []*Node
+}
+
+// IfaceImplementsRow is the per-row payload returned by
+// IfaceImplementsScanner — one tuple per EdgeImplements edge whose
+// target is a KindInterface node carrying Meta["methods"]. TypeID
+// is the implementing type (the edge's source); IfaceID is the
+// interface (the edge's target); IfaceMeta is the interface
+// node's decoded Meta map, from which the caller pulls the
+// "methods" field. Rows where the interface had no Meta are
+// elided server-side.
+type IfaceImplementsRow struct {
+	TypeID    string
+	IfaceID   string
+	IfaceMeta map[string]any
+}
+
+// IfaceImplementsScanner returns the set of (typeID, interfaceID,
+// interfaceMeta) tuples for every EdgeImplements edge where the
+// target is a KindInterface node carrying Meta["methods"]. Used by
+// analysis.FindDeadCode to compute "type implements interface, so
+// these methods are alive even if never called directly". The
+// server-side join is one Cypher; the Go-side equivalent fetched
+// every interface node then every implements edge separately.
+//
+// Optional capability — analysis.FindDeadCode falls back to the
+// Go-side scan when the backend doesn't implement it.
+type IfaceImplementsScanner interface {
+	IfaceImplementsRows() []IfaceImplementsRow
+}

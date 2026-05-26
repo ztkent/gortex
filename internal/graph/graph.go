@@ -599,6 +599,98 @@ func (g *Graph) EdgesWithUnresolvedTarget() iter.Seq[*Edge] {
 	}
 }
 
+// DeadCodeCandidates is the in-memory reference implementation of
+// DeadCodeCandidator. Iterates the requested node kinds and filters
+// out anything whose incoming-edge bucket contains an allowlist match
+// — same algorithm the analysis.FindDeadCode loop runs, just exposed
+// as a single capability the disk backends can short-circuit with
+// one Cypher per kind. Pure map / slice walks here; the win lives
+// in disk backends where the equivalent path materialises the full
+// in-edge map over cgo.
+func (g *Graph) DeadCodeCandidates(allowedNodeKinds []NodeKind, allowedInEdgeKinds map[NodeKind][]EdgeKind) []*Node {
+	if len(allowedNodeKinds) == 0 {
+		return nil
+	}
+	// Build a per-kind set so the inner loop can match against a map
+	// instead of re-scanning the allowlist slice for every edge.
+	allowedSet := make(map[NodeKind]map[EdgeKind]struct{}, len(allowedNodeKinds))
+	for _, k := range allowedNodeKinds {
+		set := make(map[EdgeKind]struct{}, len(allowedInEdgeKinds[k]))
+		for _, ek := range allowedInEdgeKinds[k] {
+			set[ek] = struct{}{}
+		}
+		allowedSet[k] = set
+	}
+
+	var out []*Node
+	for _, k := range allowedNodeKinds {
+		allowed, hasAllow := allowedSet[k]
+		anyKindCounts := !hasAllow || len(allowed) == 0
+		for n := range g.NodesByKind(k) {
+			if n == nil {
+				continue
+			}
+			incoming := g.GetInEdges(n.ID)
+			dead := true
+			for _, e := range incoming {
+				if e == nil {
+					continue
+				}
+				if anyKindCounts {
+					dead = false
+					break
+				}
+				if _, ok := allowed[e.Kind]; ok {
+					dead = false
+					break
+				}
+			}
+			if dead {
+				out = append(out, n)
+			}
+		}
+	}
+	return out
+}
+
+// IfaceImplementsRows is the in-memory reference implementation of
+// IfaceImplementsScanner. Joins KindInterface nodes carrying
+// Meta["methods"] with their EdgeImplements predecessors and returns
+// one row per (typeID, ifaceID, ifaceMeta) tuple.
+func (g *Graph) IfaceImplementsRows() []IfaceImplementsRow {
+	// Index interfaces with methods by ID so the edge walk is O(edges)
+	// rather than O(edges × interfaces).
+	ifaceMeta := make(map[string]map[string]any)
+	for n := range g.NodesByKind(KindInterface) {
+		if n == nil || n.Meta == nil {
+			continue
+		}
+		if _, ok := n.Meta["methods"]; !ok {
+			continue
+		}
+		ifaceMeta[n.ID] = n.Meta
+	}
+	if len(ifaceMeta) == 0 {
+		return nil
+	}
+	var out []IfaceImplementsRow
+	for e := range g.EdgesByKind(EdgeImplements) {
+		if e == nil {
+			continue
+		}
+		meta, ok := ifaceMeta[e.To]
+		if !ok {
+			continue
+		}
+		out = append(out, IfaceImplementsRow{
+			TypeID:    e.From,
+			IfaceID:   e.To,
+			IfaceMeta: meta,
+		})
+	}
+	return out
+}
+
 // SetEdgeProvenanceBatch is the batched sibling of SetEdgeProvenance.
 // Same story as ReindexEdges: per-call in memory, one transaction in
 // the disk backends. Returns the number of edges whose Origin
