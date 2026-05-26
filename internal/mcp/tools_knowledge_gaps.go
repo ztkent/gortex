@@ -109,8 +109,14 @@ func (s *Server) handleGetKnowledgeGaps(ctx context.Context, req mcp.CallToolReq
 // kind filter mirrors handleAnalyzeCoverageGaps' default — variables
 // and constants always look disconnected, so including them would
 // flood the result.
+//
+// Picks NodeDegreeAggregator when the backend implements it (one
+// batched in/out count instead of 2N GetInEdges/GetOutEdges cgo
+// round-trips on Ladybug).
 func (s *Server) collectDisconnected(scoped []*graph.Node, pathPrefix string, limit int) []gapDisconnected {
-	out := make([]gapDisconnected, 0)
+	// Build the candidate list first — kind+prefix filters touch
+	// only the in-memory scoped slice so they cost nothing.
+	candidates := make([]*graph.Node, 0, len(scoped))
 	for _, n := range scoped {
 		if n.Kind != graph.KindFunction && n.Kind != graph.KindMethod {
 			continue
@@ -118,13 +124,40 @@ func (s *Server) collectDisconnected(scoped []*graph.Node, pathPrefix string, li
 		if pathPrefix != "" && !strings.HasPrefix(n.FilePath, pathPrefix) {
 			continue
 		}
-		if len(s.graph.GetInEdges(n.ID)) > 0 || len(s.graph.GetOutEdges(n.ID)) > 0 {
-			continue
+		candidates = append(candidates, n)
+	}
+
+	out := make([]gapDisconnected, 0)
+	if agg, ok := s.graph.(graph.NodeDegreeAggregator); ok && len(candidates) > 0 {
+		ids := make([]string, 0, len(candidates))
+		byID := make(map[string]*graph.Node, len(candidates))
+		for _, n := range candidates {
+			ids = append(ids, n.ID)
+			byID[n.ID] = n
 		}
-		out = append(out, gapDisconnected{
-			ID: n.ID, Name: n.Name, Kind: string(n.Kind),
-			File: n.FilePath, Line: n.StartLine,
-		})
+		for _, r := range agg.NodeDegreeCounts(ids, nil) {
+			if r.InCount > 0 || r.OutCount > 0 {
+				continue
+			}
+			n := byID[r.NodeID]
+			if n == nil {
+				continue
+			}
+			out = append(out, gapDisconnected{
+				ID: n.ID, Name: n.Name, Kind: string(n.Kind),
+				File: n.FilePath, Line: n.StartLine,
+			})
+		}
+	} else {
+		for _, n := range candidates {
+			if len(s.graph.GetInEdges(n.ID)) > 0 || len(s.graph.GetOutEdges(n.ID)) > 0 {
+				continue
+			}
+			out = append(out, gapDisconnected{
+				ID: n.ID, Name: n.Name, Kind: string(n.Kind),
+				File: n.FilePath, Line: n.StartLine,
+			})
+		}
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].File != out[j].File {
@@ -193,12 +226,19 @@ func (s *Server) collectCommunityGaps(thinSize int, pathPrefix string, limit int
 // coverage_pct < minCov or no coverage data at all. Independent of
 // analyze hotspots (which gates on mean+2σ) so it still surfaces
 // load-bearing nodes in small repos.
+//
+// Uses NodeDegreeAggregator when the backend implements it (one
+// batched in-count instead of N per-node GetInEdges cgo round-trips
+// on Ladybug).
 func (s *Server) collectUntestedHotspots(scoped []*graph.Node, pathPrefix string, hotspotLimit int, minCov float64, limit int) []gapUntestedHotspot {
 	type ranked struct {
 		node  *graph.Node
 		fanIn int
 	}
-	candidates := make([]ranked, 0, len(scoped))
+	// Pre-filter on kind + prefix Go-side first — that touches only
+	// the in-memory scoped slice. Then ask the storage layer for the
+	// bulk in-degree count if it offers one.
+	pool := make([]*graph.Node, 0, len(scoped))
 	for _, n := range scoped {
 		if n.Kind != graph.KindFunction && n.Kind != graph.KindMethod {
 			continue
@@ -206,7 +246,27 @@ func (s *Server) collectUntestedHotspots(scoped []*graph.Node, pathPrefix string
 		if pathPrefix != "" && !strings.HasPrefix(n.FilePath, pathPrefix) {
 			continue
 		}
-		candidates = append(candidates, ranked{node: n, fanIn: len(s.graph.GetInEdges(n.ID))})
+		pool = append(pool, n)
+	}
+	candidates := make([]ranked, 0, len(pool))
+	if agg, ok := s.graph.(graph.NodeDegreeAggregator); ok && len(pool) > 0 {
+		ids := make([]string, 0, len(pool))
+		byID := make(map[string]*graph.Node, len(pool))
+		for _, n := range pool {
+			ids = append(ids, n.ID)
+			byID[n.ID] = n
+		}
+		for _, r := range agg.NodeDegreeCounts(ids, nil) {
+			n := byID[r.NodeID]
+			if n == nil {
+				continue
+			}
+			candidates = append(candidates, ranked{node: n, fanIn: r.InCount})
+		}
+	} else {
+		for _, n := range pool {
+			candidates = append(candidates, ranked{node: n, fanIn: len(s.graph.GetInEdges(n.ID))})
+		}
 	}
 	sort.Slice(candidates, func(i, j int) bool {
 		return candidates[i].fanIn > candidates[j].fanIn

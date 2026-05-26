@@ -90,27 +90,42 @@ func (s *Server) buildSuggestedQueries(scoped []*graph.Node, inScope map[string]
 	// and by how many of those edges cross a community boundary. Done
 	// directly off the graph rather than via FindHotspots, whose
 	// mean+2σ threshold returns nothing on small repositories.
+	//
+	// EdgesByKind streams from the storage layer (one Cypher per kind
+	// on Ladybug, an indexed bucket scan in-memory) so the cost is
+	// O(call+reference edges) once — replacing the per-node
+	// GetInEdges loop that was N cgo round-trips materialising the
+	// full in-edge bucket per candidate.
 	nodeToComm := map[string]string{}
 	if comms := s.getCommunities(); comms != nil {
 		nodeToComm = comms.NodeToComm
 	}
-	var stats []symbolStat
+	statByID := make(map[string]*symbolStat, len(scoped))
+	stats := make([]symbolStat, 0, len(scoped))
 	for _, n := range scoped {
 		if n.Kind != graph.KindFunction && n.Kind != graph.KindMethod && n.Kind != graph.KindType {
 			continue
 		}
-		st := symbolStat{node: n}
-		myComm := nodeToComm[n.ID]
-		for _, e := range s.graph.GetInEdges(n.ID) {
-			if e.Kind != graph.EdgeCalls && e.Kind != graph.EdgeReferences {
+		stats = append(stats, symbolStat{node: n})
+	}
+	for i := range stats {
+		statByID[stats[i].node.ID] = &stats[i]
+	}
+	for _, k := range []graph.EdgeKind{graph.EdgeCalls, graph.EdgeReferences} {
+		for e := range s.graph.EdgesByKind(k) {
+			if e == nil {
+				continue
+			}
+			st, ok := statByID[e.To]
+			if !ok {
 				continue
 			}
 			st.fanIn++
+			myComm := nodeToComm[e.To]
 			if c := nodeToComm[e.From]; myComm != "" && c != "" && c != myComm {
 				st.crossings++
 			}
 		}
-		stats = append(stats, st)
 	}
 
 	// 2. Bridges — symbols pulled at from the most other subsystems.

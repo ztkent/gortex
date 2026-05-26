@@ -284,24 +284,56 @@ func architectureHotspots(g graph.Store, cr *analysis.CommunityResult, inScope m
 	return out
 }
 
+// architectureEntryPoints returns functions/methods with zero
+// incoming edges and at least one outgoing edge — the "called by
+// no one, calls into the system" pattern.
+//
+// Uses NodeDegreeAggregator when the backend implements it (one
+// batched in/out count instead of 2N GetInEdges/GetOutEdges cgo
+// round-trips on Ladybug — the per-node loop was the entire
+// wall-clock cost of this section on large repos).
 func architectureEntryPoints(inScope map[string]*graph.Node, g graph.Store, top int) []map[string]any {
 	type entryCandidate struct {
 		node   *graph.Node
 		fanOut int
 	}
-	cands := make([]entryCandidate, 0, len(inScope))
+	// Pre-filter on kind Go-side first — inScope is in-memory.
+	pool := make([]*graph.Node, 0, len(inScope))
 	for _, n := range inScope {
 		if n.Kind != graph.KindFunction && n.Kind != graph.KindMethod {
 			continue
 		}
-		if len(g.GetInEdges(n.ID)) > 0 {
-			continue
+		pool = append(pool, n)
+	}
+	cands := make([]entryCandidate, 0, len(pool))
+	if agg, ok := g.(graph.NodeDegreeAggregator); ok && len(pool) > 0 {
+		ids := make([]string, 0, len(pool))
+		byID := make(map[string]*graph.Node, len(pool))
+		for _, n := range pool {
+			ids = append(ids, n.ID)
+			byID[n.ID] = n
 		}
-		out := len(g.GetOutEdges(n.ID))
-		if out == 0 {
-			continue
+		for _, r := range agg.NodeDegreeCounts(ids, nil) {
+			if r.InCount > 0 || r.OutCount == 0 {
+				continue
+			}
+			n := byID[r.NodeID]
+			if n == nil {
+				continue
+			}
+			cands = append(cands, entryCandidate{node: n, fanOut: r.OutCount})
 		}
-		cands = append(cands, entryCandidate{node: n, fanOut: out})
+	} else {
+		for _, n := range pool {
+			if len(g.GetInEdges(n.ID)) > 0 {
+				continue
+			}
+			out := len(g.GetOutEdges(n.ID))
+			if out == 0 {
+				continue
+			}
+			cands = append(cands, entryCandidate{node: n, fanOut: out})
+		}
 	}
 	sort.Slice(cands, func(i, j int) bool {
 		if cands[i].fanOut != cands[j].fanOut {

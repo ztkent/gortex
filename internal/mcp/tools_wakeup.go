@@ -168,32 +168,72 @@ func countFileNodes(nodes []*graph.Node) int {
 	return n
 }
 
+// wakeupEntryPoints returns functions/methods with zero incoming
+// edges and at least one outgoing edge, ranked by out-degree.
+//
+// Uses NodeDegreeAggregator when the backend implements it (one
+// batched in/out count instead of up to 3N GetInEdges/GetOutEdges
+// cgo round-trips on Ladybug — the sort path called GetOutEdges
+// twice per candidate, the worst single hot spot in this file). We
+// stash the fan-out alongside each node so the sort never has to
+// re-query.
 func wakeupEntryPoints(nodes []*graph.Node, g graph.Store, top int) []*graph.Node {
-	candidates := make([]*graph.Node, 0)
+	type entry struct {
+		node   *graph.Node
+		fanOut int
+	}
+	// Pre-filter on kind Go-side first — the input slice is in-memory.
+	pool := make([]*graph.Node, 0, len(nodes))
 	for _, n := range nodes {
 		if n.Kind != graph.KindFunction && n.Kind != graph.KindMethod {
 			continue
 		}
-		if len(g.GetInEdges(n.ID)) > 0 {
-			continue
-		}
-		if len(g.GetOutEdges(n.ID)) == 0 {
-			continue
-		}
-		candidates = append(candidates, n)
+		pool = append(pool, n)
 	}
-	sort.Slice(candidates, func(i, j int) bool {
-		oi := len(g.GetOutEdges(candidates[i].ID))
-		oj := len(g.GetOutEdges(candidates[j].ID))
-		if oi != oj {
-			return oi > oj
+	entries := make([]entry, 0, len(pool))
+	if agg, ok := g.(graph.NodeDegreeAggregator); ok && len(pool) > 0 {
+		ids := make([]string, 0, len(pool))
+		byID := make(map[string]*graph.Node, len(pool))
+		for _, n := range pool {
+			ids = append(ids, n.ID)
+			byID[n.ID] = n
 		}
-		return candidates[i].ID < candidates[j].ID
+		for _, r := range agg.NodeDegreeCounts(ids, nil) {
+			if r.InCount > 0 || r.OutCount == 0 {
+				continue
+			}
+			n := byID[r.NodeID]
+			if n == nil {
+				continue
+			}
+			entries = append(entries, entry{node: n, fanOut: r.OutCount})
+		}
+	} else {
+		for _, n := range pool {
+			if len(g.GetInEdges(n.ID)) > 0 {
+				continue
+			}
+			out := len(g.GetOutEdges(n.ID))
+			if out == 0 {
+				continue
+			}
+			entries = append(entries, entry{node: n, fanOut: out})
+		}
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].fanOut != entries[j].fanOut {
+			return entries[i].fanOut > entries[j].fanOut
+		}
+		return entries[i].node.ID < entries[j].node.ID
 	})
-	if len(candidates) > top {
-		candidates = candidates[:top]
+	if len(entries) > top {
+		entries = entries[:top]
 	}
-	return candidates
+	out := make([]*graph.Node, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, e.node)
+	}
+	return out
 }
 
 // trimToTokens caps the markdown to the requested approximate token
