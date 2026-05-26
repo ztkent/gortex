@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"iter"
 	"regexp"
 	"strings"
 
@@ -270,11 +271,46 @@ func evalGraphQuery(eng *query.Engine, stages []gqStage, limit int) (*query.SubG
 	for _, st := range stages {
 		switch st.kind {
 		case gqStageNodes:
-			for _, n := range eng.AllNodes() {
-				if matchesAll(n, st.filters) {
-					add(n)
-					if len(working) >= limit {
+			// When the pipeline opens with a `kind=` predicate (the
+			// common case — e.g. `nodes kind=function ...`), iterate
+			// the backend's per-kind bucket instead of AllNodes(). On
+			// Ladybug NodesByKind hits a server-side filter and only
+			// the matching rows cross cgo; AllNodes() materialised the
+			// whole node table per request. Other filters
+			// (`name~`/`path=`/`lang=`) still post-filter in Go.
+			//
+			// Overlay views (NodesByKindReader-unaware) fall through
+			// to the AllNodes() walk — they're already in-memory, so
+			// the bucket optimisation has no win there.
+			seedKinds := seedKindsFromFilters(st.filters)
+			byKind, _ := eng.Reader().(nodesByKindReader)
+			if byKind != nil && len(seedKinds) > 0 {
+				done := false
+				for _, k := range seedKinds {
+					if done {
 						break
+					}
+					for n := range byKind.NodesByKind(k) {
+						if n == nil {
+							continue
+						}
+						if !matchesAll(n, st.filters) {
+							continue
+						}
+						add(n)
+						if len(working) >= limit {
+							done = true
+							break
+						}
+					}
+				}
+			} else {
+				for _, n := range eng.AllNodes() {
+					if matchesAll(n, st.filters) {
+						add(n)
+						if len(working) >= limit {
+							break
+						}
 					}
 				}
 			}
@@ -397,4 +433,36 @@ func evalGraphQuery(eng *query.Engine, stages []gqStage, limit int) (*query.SubG
 		TotalNodes: len(working),
 		TotalEdges: len(edges),
 	}, nil
+}
+
+// nodesByKindReader is the optional read-side capability the eng.Reader
+// underlying type may implement. *graph.Graph satisfies it directly
+// (Store has NodesByKind); OverlaidView does not, which is fine —
+// overlays already work in-memory and don't benefit from the bucket
+// fast path.
+type nodesByKindReader interface {
+	NodesByKind(kind graph.NodeKind) iter.Seq[*graph.Node]
+}
+
+// seedKindsFromFilters extracts every `kind=` predicate from a stage's
+// filter list so the seed loop can iterate the corresponding NodesByKind
+// buckets instead of AllNodes(). Returns nil when no `kind=` filter is
+// present — the caller falls back to the AllNodes() walk in that case.
+// Duplicates are deduped so a sloppy author writing `kind=function
+// kind=function` doesn't double-iterate.
+func seedKindsFromFilters(filters []gqFilter) []graph.NodeKind {
+	var out []graph.NodeKind
+	seen := make(map[graph.NodeKind]struct{}, len(filters))
+	for _, f := range filters {
+		if f.op != "kind=" {
+			continue
+		}
+		k := graph.NodeKind(f.value)
+		if _, ok := seen[k]; ok {
+			continue
+		}
+		seen[k] = struct{}{}
+		out = append(out, k)
+	}
+	return out
 }
