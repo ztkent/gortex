@@ -9,6 +9,7 @@ import (
 
 	mcp "github.com/mark3labs/mcp-go/mcp"
 
+	"github.com/zzet/gortex/internal/analysis"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/reach"
 )
@@ -135,32 +136,19 @@ func (s *Server) handleAnalyzeImpactComposite(ctx context.Context, req mcp.CallT
 		nodeToComm = c.NodeToComm
 	}
 
-	// One edge pass builds direct fan-in plus, per symbol, the set of
-	// distinct communities its call/reference neighbours belong to.
-	fanIn := map[string]int{}
-	neighborComms := map[string]map[string]struct{}{}
-	addComm := func(node, comm string) {
-		if comm == "" {
-			return
-		}
-		set := neighborComms[node]
-		if set == nil {
-			set = map[string]struct{}{}
-			neighborComms[node] = set
-		}
-		set[comm] = struct{}{}
-	}
-	for _, e := range s.graph.AllEdges() {
-		if e.Kind != graph.EdgeCalls && e.Kind != graph.EdgeReferences {
+	// Build the candidate id set up front so both the fan-in
+	// aggregator and the per-edge community walk stay bounded by
+	// the kinds / path / ids the caller actually asked for. Without
+	// this, the analyzer paid for an unfiltered AllEdges()
+	// materialisation per call -- ~500k edges over cgo on the gortex
+	// workspace, the bulk of the wall-clock cost on Ladybug.
+	scoped := s.scopedNodes(ctx)
+	candidateIDs := make([]string, 0, len(scoped))
+	candidateSet := make(map[string]struct{}, len(scoped))
+	for _, n := range scoped {
+		if n == nil {
 			continue
 		}
-		fanIn[e.To]++
-		addComm(e.From, nodeToComm[e.To])
-		addComm(e.To, nodeToComm[e.From])
-	}
-
-	rows := make([]impactRow, 0, 128)
-	for _, n := range s.scopedNodes(ctx) {
 		if allowedKinds != nil {
 			if _, ok := allowedKinds[n.Kind]; !ok {
 				continue
@@ -173,6 +161,60 @@ func (s *Server) handleAnalyzeImpactComposite(ctx context.Context, req mcp.CallT
 			if _, ok := idFilter[n.ID]; !ok {
 				continue
 			}
+		}
+		candidateIDs = append(candidateIDs, n.ID)
+		candidateSet[n.ID] = struct{}{}
+	}
+
+	// fan-in: uses the NodeFanAggregator capability when the
+	// backend supports it (one bulk Cypher per direction over the
+	// candidate id set) and falls back to a per-kind EdgesByKind
+	// stream otherwise. fanOutKinds is empty -- impact only reads
+	// fan-in.
+	fanIn, _ := analysis.CollectFanCounts(s.graph, candidateIDs,
+		[]graph.EdgeKind{graph.EdgeCalls, graph.EdgeReferences},
+		nil,
+	)
+
+	// neighborComms[n] = set of distinct communities of n's call /
+	// reference neighbours (both directions). Streamed via
+	// EdgesByKind per kind so neither backend pays for an
+	// unfiltered AllEdges walk; the per-kind MATCH on disk backends
+	// is the same plan EdgesByKind feeds every other analyzer.
+	// Membership is restricted to candidate ids -- a node outside
+	// the result set has nowhere to receive a span count.
+	neighborComms := map[string]map[string]struct{}{}
+	addComm := func(node, comm string) {
+		if comm == "" {
+			return
+		}
+		if _, ok := candidateSet[node]; !ok {
+			return
+		}
+		set := neighborComms[node]
+		if set == nil {
+			set = map[string]struct{}{}
+			neighborComms[node] = set
+		}
+		set[comm] = struct{}{}
+	}
+	for _, kind := range []graph.EdgeKind{graph.EdgeCalls, graph.EdgeReferences} {
+		for e := range s.graph.EdgesByKind(kind) {
+			if e == nil {
+				continue
+			}
+			addComm(e.From, nodeToComm[e.To])
+			addComm(e.To, nodeToComm[e.From])
+		}
+	}
+
+	rows := make([]impactRow, 0, len(candidateIDs))
+	for _, n := range scoped {
+		if n == nil {
+			continue
+		}
+		if _, ok := candidateSet[n.ID]; !ok {
+			continue
 		}
 
 		prVal := pr.ScoreOf(n.ID)
