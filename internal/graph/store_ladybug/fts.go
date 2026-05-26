@@ -306,6 +306,130 @@ LIMIT $k`
 	return hits, nil
 }
 
+// SearchSymbolBundles is the rerank-shaped fast path: in one BM25
+// fan-out we return the matched node, its score, AND the in/out
+// edges the rerank pipeline reads from. The engine routes through
+// this method when the backend implements graph.SymbolBundleSearcher,
+// pre-seeding rerank.Context's edge caches so the prepare pass skips
+// its own batched fetch.
+//
+// Implementation cost: one FTS Cypher + three batched MATCH-by-ids
+// Cypher calls (nodes, outEdges, inEdges) — four cgo round-trips
+// total. The prior search path was 1 FTS + 1 nodes-by-ids + 2 edge
+// fetches inside the rerank prepare (also 4 cgo, but they live in
+// separate timing phases so the cost compounds across the engine
+// → rerank boundary). Probe (see bench/ladybug-bundle-probe):
+//
+//	NewServer (30 hits)         med=87.4ms
+//	handleStreamable (30 hits)  med=89.5ms
+//	daemon controller (19 hits) med=67.8ms
+//
+// vs the single-shot combined-Cypher candidate (OPTIONAL MATCH +
+// collect twice), which clocked 150-185ms median because Kuzu
+// materialises a cross-product between the two collect frames.
+//
+// Idempotent on a fresh DB: lazy-builds the FTS index if it isn't
+// present yet (matching SearchSymbols's behaviour) so a daemon
+// process that came up before BuildSymbolIndex finished still serves
+// search correctly.
+func (s *Store) SearchSymbolBundles(query string, limit int) ([]graph.SymbolBundle, error) {
+	if query == "" {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	tokens := search.Tokenize(query)
+	if len(tokens) == 0 {
+		tokens = search.TokenizeQuery(query)
+		if len(tokens) == 0 {
+			return nil, nil
+		}
+	}
+	q := strings.Join(tokens, " ")
+
+	if !s.fts.indexBuilt.Load() {
+		if err := s.BuildSymbolIndex(); err != nil {
+			return nil, err
+		}
+	}
+	// Phase 1: FTS yields (id, score) ordered by score descending. Skip
+	// the round-trip when the query degenerates to no tokens (handled
+	// above) — leaving this on the hot path so an empty corpus + empty
+	// index returns cleanly.
+	const ftsCypher = `
+CALL QUERY_FTS_INDEX('SymbolFTS', '` + ftsIndexName + `', $q)
+RETURN node.id AS id, score
+ORDER BY score DESC
+LIMIT $k`
+	ftsRows, err := querySelectSafe(s, ftsCypher, map[string]any{
+		"q": q,
+		"k": int64(limit),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query fts: %w", err)
+	}
+	if len(ftsRows) == 0 {
+		return nil, nil
+	}
+
+	// Preserve FTS order — the BM25 score determines TextRank, which
+	// the rerank pipeline reads. Build a parallel id list and a
+	// score map keyed by id for the join step.
+	ids := make([]string, 0, len(ftsRows))
+	scoreByID := make(map[string]float64, len(ftsRows))
+	for _, row := range ftsRows {
+		if len(row) < 2 {
+			continue
+		}
+		id, _ := row[0].(string)
+		if id == "" {
+			continue
+		}
+		score, _ := row[1].(float64)
+		if _, dup := scoreByID[id]; dup {
+			// FTS returns each node once for a given query, but defend
+			// against future configurations that might not — first hit
+			// keeps the score / position.
+			continue
+		}
+		scoreByID[id] = score
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	// Phase 2: batched node materialise.
+	nodes := s.GetNodesByIDs(ids)
+
+	// Phase 3 + 4: batched in/out edge fetch keyed on the same ids.
+	// These two are siblings of GetNodesByIDs in terms of cgo cost;
+	// the bundle's value is that the engine sees a single result it
+	// can hand straight to the rerank pipeline without round-tripping
+	// back through Graph for prepare's edge fetch.
+	out := s.GetOutEdgesByNodeIDs(ids)
+	in := s.GetInEdgesByNodeIDs(ids)
+
+	bundles := make([]graph.SymbolBundle, 0, len(ids))
+	for _, id := range ids {
+		n := nodes[id]
+		if n == nil {
+			// FTS hit references a node that was evicted between the
+			// FTS call and the node fetch — skip; the caller does its
+			// own dedup / kind filter anyway.
+			continue
+		}
+		bundles = append(bundles, graph.SymbolBundle{
+			Node:     n,
+			Score:    scoreByID[id],
+			OutEdges: out[id],
+			InEdges:  in[id],
+		})
+	}
+	return bundles, nil
+}
+
 // runCypherSafe wraps the panicking runWriteLocked helper and
 // returns any runtime / catalog error as a normal Go error so the
 // FTS bootstrap can react to (and report) failures instead of

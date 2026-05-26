@@ -71,6 +71,7 @@ func RunConformance(t *testing.T, factory Factory) {
 	t.Run("GetNodesByIDs", func(t *testing.T) { testGetNodesByIDs(t, factory) })
 	t.Run("FindNodesByNames", func(t *testing.T) { testFindNodesByNames(t, factory) })
 	t.Run("GetEdgesByNodeIDs", func(t *testing.T) { testGetEdgesByNodeIDs(t, factory) })
+	t.Run("SymbolBundleSearcher", func(t *testing.T) { testSymbolBundleSearcher(t, factory) })
 }
 
 // -- fixture helpers ---------------------------------------------------
@@ -1088,4 +1089,149 @@ func testGetEdgesByNodeIDs(t *testing.T, factory Factory) {
 	if got := s.GetInEdgesByNodeIDs([]string{""}); len(got) != 0 {
 		t.Fatalf("GetInEdgesByNodeIDs([\"\"]) returned %d entries", len(got))
 	}
+}
+
+// testSymbolBundleSearcher exercises the optional
+// graph.SymbolBundleSearcher capability. The interface is opt-in
+// (today only the Ladybug backend implements it; the in-memory
+// *Graph deliberately leaves it unimplemented so the engine's
+// fallback path stays exercised) — backends without the capability
+// skip the subtest cleanly.
+//
+// Coverage:
+//   - SymbolSearcher.BulkUpsertSymbolFTS + BuildSymbolIndex must be
+//     called first so the FTS index is populated.
+//   - SearchSymbolBundles returns a bundle per matched id with the
+//     correct in/out edges attached.
+//   - Empty / no-match query returns an empty bundle slice.
+func testSymbolBundleSearcher(t *testing.T, factory Factory) {
+	t.Helper()
+	s := factory(t)
+	bs, ok := s.(graph.SymbolBundleSearcher)
+	if !ok {
+		t.Skip("backend does not implement graph.SymbolBundleSearcher")
+	}
+	ss, ok := s.(graph.SymbolSearcher)
+	if !ok {
+		t.Skip("backend implements SymbolBundleSearcher but not SymbolSearcher — cannot populate FTS")
+	}
+
+	// Build a small graph: A → B → C, plus an unrelated isolated D.
+	// FTS-searchable name tokens that should land on the same hit.
+	s.AddNode(mkNode("a", "AlphaWidget", "x.go", graph.KindFunction))
+	s.AddNode(mkNode("b", "BetaWidget", "x.go", graph.KindFunction))
+	s.AddNode(mkNode("c", "GammaWidget", "y.go", graph.KindFunction))
+	s.AddNode(mkNode("d", "Delta", "y.go", graph.KindFunction))
+	s.AddEdge(mkEdge("a", "b", graph.EdgeCalls))
+	s.AddEdge(mkEdge("b", "c", graph.EdgeCalls))
+	s.AddEdge(mkEdge("a", "c", graph.EdgeCalls))
+
+	// Populate the FTS sidecar — every searchable node carries its
+	// tokenised name as the FTS text.
+	items := []graph.SymbolFTSItem{
+		{NodeID: "a", Tokens: "alpha widget"},
+		{NodeID: "b", Tokens: "beta widget"},
+		{NodeID: "c", Tokens: "gamma widget"},
+		{NodeID: "d", Tokens: "delta"},
+	}
+	if err := ss.BulkUpsertSymbolFTS(items); err != nil {
+		t.Fatalf("BulkUpsertSymbolFTS: %v", err)
+	}
+	if err := ss.BuildSymbolIndex(); err != nil {
+		t.Fatalf("BuildSymbolIndex: %v", err)
+	}
+
+	// Querying for "widget" should match a/b/c and not d. Each bundle
+	// must carry the correct in/out edges off the graph.
+	bundles, err := bs.SearchSymbolBundles("widget", 10)
+	if err != nil {
+		t.Fatalf("SearchSymbolBundles: %v", err)
+	}
+	if len(bundles) == 0 {
+		t.Fatalf("SearchSymbolBundles returned no bundles — expected matches for a/b/c")
+	}
+	gotIDs := make(map[string]graph.SymbolBundle, len(bundles))
+	for _, b := range bundles {
+		if b.Node == nil {
+			t.Fatalf("bundle has nil node: %+v", b)
+		}
+		gotIDs[b.Node.ID] = b
+	}
+	for _, want := range []string{"a", "b", "c"} {
+		if _, ok := gotIDs[want]; !ok {
+			t.Fatalf("missing bundle for id %q; got ids=%v", want, idsOf(bundles))
+		}
+	}
+	if _, ok := gotIDs["d"]; ok {
+		t.Fatalf("unexpected bundle for id %q (no 'widget' token in its FTS row)", "d")
+	}
+
+	// Edge verification: per-bundle in/out edges must match the
+	// in-memory truth surfaced via the existing GetIn/Out edges.
+	for id, b := range gotIDs {
+		wantOut := s.GetOutEdges(id)
+		if !edgeSlicesMatch(wantOut, b.OutEdges) {
+			t.Fatalf("bundle[%s].OutEdges mismatch: want=%v got=%v", id, edgeKeys(wantOut), edgeKeys(b.OutEdges))
+		}
+		wantIn := s.GetInEdges(id)
+		if !edgeSlicesMatch(wantIn, b.InEdges) {
+			t.Fatalf("bundle[%s].InEdges mismatch: want=%v got=%v", id, edgeKeys(wantIn), edgeKeys(b.InEdges))
+		}
+	}
+
+	// Empty query is a clean no-op.
+	if empty, err := bs.SearchSymbolBundles("", 10); err != nil || len(empty) != 0 {
+		t.Fatalf("SearchSymbolBundles(\"\"): err=%v len=%d, want empty", err, len(empty))
+	}
+	// No-match query — backend MAY return nil or empty slice; both
+	// are valid.
+	if no, err := bs.SearchSymbolBundles("nomatchforanything", 10); err != nil {
+		t.Fatalf("SearchSymbolBundles(nomatch): err=%v", err)
+	} else if len(no) != 0 {
+		t.Fatalf("SearchSymbolBundles(nomatch) returned %d bundles, want 0", len(no))
+	}
+}
+
+// idsOf is a small helper for the bundle assertions above.
+func idsOf(bs []graph.SymbolBundle) []string {
+	out := make([]string, 0, len(bs))
+	for _, b := range bs {
+		if b.Node != nil {
+			out = append(out, b.Node.ID)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// edgeSlicesMatch reports whether two edge slices contain the same
+// (from, to, kind) tuples regardless of order. Used by the bundle
+// assertions to ignore back-end-imposed ordering differences.
+func edgeSlicesMatch(want, got []*graph.Edge) bool {
+	if len(want) != len(got) {
+		return false
+	}
+	wantKeys := edgeKeys(want)
+	gotKeys := edgeKeys(got)
+	sort.Strings(wantKeys)
+	sort.Strings(gotKeys)
+	for i := range wantKeys {
+		if wantKeys[i] != gotKeys[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// edgeKeys flattens a slice of edges into deterministic (from→to:kind)
+// strings for ordered diffing.
+func edgeKeys(es []*graph.Edge) []string {
+	out := make([]string, 0, len(es))
+	for _, e := range es {
+		if e == nil {
+			continue
+		}
+		out = append(out, fmt.Sprintf("%s->%s:%s", e.From, e.To, e.Kind))
+	}
+	return out
 }

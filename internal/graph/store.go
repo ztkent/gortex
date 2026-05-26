@@ -395,6 +395,56 @@ type SymbolSearcher interface {
 	SearchSymbols(query string, limit int) ([]SymbolHit, error)
 }
 
+// SymbolBundle is the rerank-shaped result of one search call: the
+// matched node, its BM25 score, AND the in/out edges the rerank
+// pipeline reads from. Backends that can compose this in a single
+// engine round-trip implement SymbolBundleSearcher; callers can fall
+// through to SymbolSearcher + GetNodesByIDs + GetIn/OutEdgesByNodeIDs
+// when the backend doesn't.
+//
+// The same node may appear in successive bundles when a multi-call
+// retrieval path (primary + expansion) returns it more than once; the
+// caller's dedup-by-ID step keeps the per-call shape simple and the
+// engine can merge across calls into a single rerank candidate set
+// without paying for the duplicate edge fetch — the second occurrence
+// already carries the same edges.
+type SymbolBundle struct {
+	Node     *Node
+	Score    float64
+	InEdges  []*Edge
+	OutEdges []*Edge
+}
+
+// SymbolBundleSearcher is an optional capability backends MAY
+// implement to fold the symbol-search hot path's three
+// per-BM25-call cgo round-trips (FTS + GetNodesByIDs + the rerank
+// prepare's batched in/out edge fetch) into one bundled
+// engine-side call:
+//
+//   - FTS yields (id, score)
+//   - One batched node materialise + one in-edge fan-in + one
+//     out-edge fan-out, all keyed on the same id list, return the
+//     bundle.
+//
+// Backends that do NOT implement this interface still serve the
+// search path through SymbolSearcher; callers fall back to
+// SymbolSearcher.SearchSymbols + GetNodesByIDs +
+// GetIn/OutEdgesByNodeIDs and pay the per-call cgo cost the
+// bundled form avoids. The contract is intentionally read-only —
+// writes still go through UpsertSymbolFTS / BulkUpsertSymbolFTS on
+// the SymbolSearcher.
+//
+// Today the Ladybug backend implements this via four cypher calls
+// (FTS → IDs, then a node batch + an outgoing-edge batch + an
+// inbound-edge batch on those IDs). A single combined Cypher with
+// OPTIONAL MATCH + collect() is slower in practice — the
+// cross-product Kuzu builds across the two OPTIONAL MATCH +
+// collect frames outweighs the cgo saving (probe: 150ms median vs
+// the 4-query split's 68ms median on the same id set).
+type SymbolBundleSearcher interface {
+	SearchSymbolBundles(query string, limit int) ([]SymbolBundle, error)
+}
+
 // VectorItem is the payload BulkUpsertEmbeddings takes per node:
 // the node's ID and its embedding vector. Length of Vec must
 // match the dim the corresponding BuildVectorIndex call declared
