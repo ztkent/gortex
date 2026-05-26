@@ -123,7 +123,7 @@ func main() {
 				path := filepath.Join(dir, "store.lbug")
 				s, err := store_ladybug.Open(path)
 				if err != nil {
-					os.RemoveAll(dir)
+					_ = os.RemoveAll(dir)
 					return nil, nil, err
 				}
 				return s, func() int64 {
@@ -363,17 +363,17 @@ func pickQueryWorkload(s graph.Store, n int) []string {
 // -- output -----------------------------------------------------------------
 
 func printSummary(w *os.File, rows []benchResult) {
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "# Multi-repo bench summary")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "| backend | repos | nodes | edges | cross-repo edges | index | disk | heap (alloc / inuse) | GetNode p50 / p95 |")
-	fmt.Fprintln(w, "|---------|------:|------:|------:|-----------------:|------:|-----:|---------------------:|------------------:|")
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, "# Multi-repo bench summary")
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, "| backend | repos | nodes | edges | cross-repo edges | index | disk | heap (alloc / inuse) | GetNode p50 / p95 |")
+	_, _ = fmt.Fprintln(w, "|---------|------:|------:|------:|-----------------:|------:|-----:|---------------------:|------------------:|")
 	for _, r := range rows {
 		if r.Err != "" {
-			fmt.Fprintf(w, "| %s | — | — | — | — | — | — | — | %s |\n", r.Backend, r.Err)
+			_, _ = fmt.Fprintf(w, "| %s | — | — | — | — | — | — | — | %s |\n", r.Backend, r.Err)
 			continue
 		}
-		fmt.Fprintf(w, "| %s | %d | %s | %s | %s | %s | %s | %s / %s | %s / %s |\n",
+		_, _ = fmt.Fprintf(w, "| %s | %d | %s | %s | %s | %s | %s | %s / %s | %s / %s |\n",
 			r.Backend,
 			r.RepoCount,
 			fmtInt(r.TotalNodes),
@@ -385,23 +385,23 @@ func printSummary(w *os.File, rows []benchResult) {
 			fmtUs(r.QueryP50us), fmtUs(r.QueryP95us),
 		)
 	}
-	fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w)
 
 	// Per-repo breakdown for the first backend that has it. The
 	// breakdown is identical across backends modulo the resolver
 	// path (node/edge counts may shift slightly).
-	fmt.Fprintln(w, "# Per-repo breakdown")
-	fmt.Fprintln(w)
-	fmt.Fprint(w, "| repo |")
+	_, _ = fmt.Fprintln(w, "# Per-repo breakdown")
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprint(w, "| repo |")
 	for _, r := range rows {
-		fmt.Fprintf(w, " %s nodes | %s edges |", r.Backend, r.Backend)
+		_, _ = fmt.Fprintf(w, " %s nodes | %s edges |", r.Backend, r.Backend)
 	}
-	fmt.Fprintln(w)
-	fmt.Fprint(w, "|------|")
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprint(w, "|------|")
 	for range rows {
-		fmt.Fprint(w, "------:|------:|")
+		_, _ = fmt.Fprint(w, "------:|------:|")
 	}
-	fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w)
 	// Build a stable set of prefixes from the first backend's
 	// per-repo list; fall through to the second if the first
 	// errored.
@@ -413,14 +413,14 @@ func printSummary(w *os.File, rows []benchResult) {
 		}
 	}
 	for _, base := range refRows {
-		fmt.Fprintf(w, "| %s |", base.Prefix)
+		_, _ = fmt.Fprintf(w, "| %s |", base.Prefix)
 		for _, r := range rows {
 			n, e := lookupRepoStats(r.PerRepo, base.Prefix)
-			fmt.Fprintf(w, " %s | %s |", fmtInt(n), fmtInt(e))
+			_, _ = fmt.Fprintf(w, " %s | %s |", fmtInt(n), fmtInt(e))
 		}
-		fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w)
 	}
-	fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w)
 }
 
 func lookupRepoStats(rows []repoBreakdown, prefix string) (int, int) {
@@ -442,14 +442,6 @@ func dirSize(root string) int64 {
 		return nil
 	})
 	return total
-}
-
-func fileSize(path string) int64 {
-	st, err := os.Stat(path)
-	if err != nil {
-		return 0
-	}
-	return st.Size()
 }
 
 func msSince(t time.Time) float64 { return float64(time.Since(t).Microseconds()) / 1000.0 }

@@ -154,17 +154,6 @@ func (r *Resolver) collectFileLanguages() map[string]string {
 	return out
 }
 
-// hasDependsOnModule reports whether the file already has an
-// outgoing EdgeDependsOnModule pointing at moduleID.
-func (r *Resolver) hasDependsOnModule(fileID, moduleID string) bool {
-	for _, e := range r.graph.GetOutEdges(fileID) {
-		if e.Kind == graph.EdgeDependsOnModule && e.To == moduleID {
-			return true
-		}
-	}
-	return false
-}
-
 // nonGoImportToModuleID maps a (language, importPath) pair to its
 // canonical KindModule ID. The second return value is the module's
 // own language tag (used at materialisation time so a stdlib module

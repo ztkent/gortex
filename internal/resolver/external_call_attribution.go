@@ -101,9 +101,10 @@ func (r *Resolver) attributeGoExternalCalls() {
 			moduleID = graph.StubID(k.repoPrefix, graph.StubKindModule, "go", k.importPath)
 			modules[modKey] = moduleID
 			role := "external"
-			if k.prefix == "stdlib::" {
+			switch k.prefix {
+			case "stdlib::":
 				role = "stdlib"
-			} else if k.prefix == "dep::" {
+			case "dep::":
 				role = "dep"
 			}
 			r.graph.AddNode(&graph.Node{

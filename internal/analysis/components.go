@@ -159,8 +159,7 @@ func ComputeSCC(g graph.Store, opts ComponentOptions) []ComponentResult {
 	work := make([]frame, 0, n)
 
 	var index int
-	var comp []int
-	comp = make([]int, n)
+	comp := make([]int, n)
 	for i := range comp {
 		comp[i] = -1
 	}

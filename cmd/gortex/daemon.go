@@ -324,7 +324,7 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 	// *graph.Graph; only meaningful for the memory backend.
 	// On-disk backends already persist via their own engine, so
 	// the snapshot ticker is a no-op there.
-	var stopSnapshotter func() = func() {}
+	stopSnapshotter := func() {}
 	if mg, ok := state.graph.(*graph.Graph); ok {
 		stopSnapshotter = startPeriodicSnapshots(mg, state.multiIndexer, version, 10*time.Minute, controller.IsReady, logger)
 	}

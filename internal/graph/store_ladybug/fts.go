@@ -141,7 +141,7 @@ func (s *Store) BulkUpsertSymbolFTS(items []graph.SymbolFTSItem) error {
 	if err != nil {
 		return fmt.Errorf("mkdir bulk tmp: %w", err)
 	}
-	defer os.RemoveAll(dir)
+	defer func() { _ = os.RemoveAll(dir) }()
 	// Ladybug's COPY binder rejects ".tsv" with "Cannot load from file
 	// type tsv"; the parser dispatches on extension. ".csv" + DELIM='\t'
 	// is the convention the Node / Edge / SymbolVec bulk loaders use.
@@ -173,7 +173,7 @@ func writeSymbolFTSTSV(path string, items []graph.SymbolFTSItem) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	var b strings.Builder
 	clean := func(s string) string {
 		// Strip / replace TSV-toxic characters. Replace tabs and

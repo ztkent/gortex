@@ -25,10 +25,9 @@ import (
 //   - put() returns the Connection to the pool. Always defer put
 //     after get.
 //   - Each Connection lazy-loads any extensions (FTS / VECTOR /
-//     ALGO) that have been registered with the pool. The
-//     extension list is appended to via registerExtension; the
-//     pool replays the list on every checkout against connections
-//     that haven't been seen yet for that extension.
+//     ALGO) that have been registered with the pool. The pool
+//     replays the extension list on every checkout against
+//     connections that haven't been seen yet for that extension.
 type connPool struct {
 	db        *lbug.Database
 	available chan *lbug.Connection
@@ -83,25 +82,6 @@ func (p *connPool) put(conn *lbug.Connection) {
 		_ = recover()
 	}()
 	p.available <- conn
-}
-
-// registerExtension records an extension that every connection
-// should LOAD EXTENSION on first use. Idempotent.
-//
-// We register the extension name in the pool's list; the actual
-// `LOAD EXTENSION <name>` runs lazily on each connection the
-// first time it's checked out after registration. This keeps the
-// extension list a single source of truth and survives pool
-// resizing or connection replacement.
-func (p *connPool) registerExtension(name string) {
-	p.extMu.Lock()
-	defer p.extMu.Unlock()
-	for _, e := range p.extensions {
-		if e == name {
-			return
-		}
-	}
-	p.extensions = append(p.extensions, name)
 }
 
 // ensureExtensionsLocked loads any registered extensions onto

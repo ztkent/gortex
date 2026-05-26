@@ -195,7 +195,7 @@ func (s *Store) BulkUpsertEmbeddings(items []graph.VectorItem) error {
 	if err != nil {
 		return fmt.Errorf("mkdir bulk tmp: %w", err)
 	}
-	defer os.RemoveAll(dir)
+	defer func() { _ = os.RemoveAll(dir) }()
 	// Ladybug's COPY parser picks the format from the file
 	// extension; `.csv` with DELIM='\t' is the convention the
 	// existing Node/Edge bulk loader uses, and `.tsv` is rejected
@@ -221,7 +221,7 @@ func writeSymbolVecTSV(path string, items []graph.VectorItem) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	var b strings.Builder
 	for _, it := range items {
 		b.Reset()

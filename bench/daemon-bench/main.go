@@ -91,7 +91,7 @@ func (c *client) call(method string, params any) (*rpcResp, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if sid := resp.Header.Get(sessionHeader); sid != "" {
 		c.session = sid
 	}

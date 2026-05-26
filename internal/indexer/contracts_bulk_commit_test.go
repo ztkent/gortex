@@ -109,12 +109,12 @@ func TestCommitContracts_BatchesViaAddBatch(t *testing.T) {
 	require.Zero(t, g.addNode.Load(), "no per-row AddNode calls expected")
 	require.Zero(t, g.addEdge.Load(), "no per-row AddEdge calls expected")
 
-	require.NotNil(t, g.Graph.GetNode("http::GET::/v1/items"))
-	require.NotNil(t, g.Graph.GetNode("http::POST::/v1/items"))
+	require.NotNil(t, g.GetNode("http::GET::/v1/items"))
+	require.NotNil(t, g.GetNode("http::POST::/v1/items"))
 
 	// Provider contract emits both EdgeProvides and EdgeHandlesRoute;
 	// consumer contract emits only EdgeConsumes.
-	provides := g.Graph.GetOutEdges("pkg/foo.go::Handler.List")
+	provides := g.GetOutEdges("pkg/foo.go::Handler.List")
 	var nProvides, nConsumes, nHandles int
 	for _, e := range provides {
 		switch e.Kind {

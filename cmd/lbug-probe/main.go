@@ -18,6 +18,6 @@ func main() {
 		fmt.Println("ERR:", err)
 		os.Exit(1)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	fmt.Printf("OK nodes=%d edges=%d\n", s.NodeCount(), s.EdgeCount())
 }

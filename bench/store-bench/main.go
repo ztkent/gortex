@@ -148,7 +148,7 @@ func main() {
 				path := filepath.Join(dir, "store.lbug")
 				s, err := store_ladybug.Open(path)
 				if err != nil {
-					os.RemoveAll(dir)
+					_ = os.RemoveAll(dir)
 					return nil, nil, err
 				}
 				diskFn := func() int64 {
@@ -665,17 +665,17 @@ func filterEdgeKind(edges []*graph.Edge, kind graph.EdgeKind) []*graph.Edge {
 // -- output -----------------------------------------------------------------
 
 func printTable(w *os.File, rows []benchResult) {
-	fmt.Fprintln(w, "")
-	fmt.Fprintln(w, "# Store backend comparison (full indexer pipeline per backend)")
-	fmt.Fprintln(w, "")
-	fmt.Fprintln(w, "| backend | nodes | edges | index | disk size | heap (alloc / inuse) | query p50 | query p95 |")
-	fmt.Fprintln(w, "|---------|------:|------:|------:|----------:|---------------------:|----------:|----------:|")
+	_, _ = fmt.Fprintln(w, "")
+	_, _ = fmt.Fprintln(w, "# Store backend comparison (full indexer pipeline per backend)")
+	_, _ = fmt.Fprintln(w, "")
+	_, _ = fmt.Fprintln(w, "| backend | nodes | edges | index | disk size | heap (alloc / inuse) | query p50 | query p95 |")
+	_, _ = fmt.Fprintln(w, "|---------|------:|------:|------:|----------:|---------------------:|----------:|----------:|")
 	for _, r := range rows {
 		if r.Err != "" {
-			fmt.Fprintf(w, "| %s | — | — | — | — | — | — | %s |\n", r.Backend, r.Err)
+			_, _ = fmt.Fprintf(w, "| %s | — | — | — | — | — | — | %s |\n", r.Backend, r.Err)
 			continue
 		}
-		fmt.Fprintf(w, "| %s | %s | %s | %s | %s | %s / %s | %s | %s |\n",
+		_, _ = fmt.Fprintf(w, "| %s | %s | %s | %s | %s | %s / %s | %s | %s |\n",
 			r.Backend,
 			fmtInt(r.NodeCount),
 			fmtInt(r.EdgeCount),
@@ -687,7 +687,7 @@ func printTable(w *os.File, rows []benchResult) {
 			fmtUs(r.QueryP95us),
 		)
 	}
-	fmt.Fprintln(w, "")
+	_, _ = fmt.Fprintln(w, "")
 
 	// Per-MCP-tool latency table. One row per backend, one column per
 	// tool. Each cell is "p50 / p95" of the Store-level call the tool
@@ -698,30 +698,30 @@ func printTable(w *os.File, rows []benchResult) {
 		"fts_search", "vector_search",
 		"pagerank", "louvain", "wcc", "scc", "kcore",
 	}
-	fmt.Fprintln(w, "# Per-MCP-tool latency (Store-level p50 / p95)")
-	fmt.Fprintln(w, "")
-	fmt.Fprint(w, "| backend |")
+	_, _ = fmt.Fprintln(w, "# Per-MCP-tool latency (Store-level p50 / p95)")
+	_, _ = fmt.Fprintln(w, "")
+	_, _ = fmt.Fprint(w, "| backend |")
 	for _, t := range tools {
-		fmt.Fprintf(w, " %s |", t)
+		_, _ = fmt.Fprintf(w, " %s |", t)
 	}
-	fmt.Fprintln(w)
-	fmt.Fprint(w, "|---------|")
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprint(w, "|---------|")
 	for range tools {
-		fmt.Fprint(w, "------------------:|")
+		_, _ = fmt.Fprint(w, "------------------:|")
 	}
-	fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w)
 	for _, r := range rows {
 		if r.Err != "" || r.PerTool == nil {
 			continue
 		}
-		fmt.Fprintf(w, "| %s |", r.Backend)
+		_, _ = fmt.Fprintf(w, "| %s |", r.Backend)
 		for _, t := range tools {
 			s := r.PerTool[t]
-			fmt.Fprintf(w, " %s / %s |", fmtUs(s.P50us), fmtUs(s.P95us))
+			_, _ = fmt.Fprintf(w, " %s / %s |", fmtUs(s.P50us), fmtUs(s.P95us))
 		}
-		fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w)
 	}
-	fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w)
 }
 
 // -- small helpers ----------------------------------------------------------
@@ -744,14 +744,6 @@ func pctMs(samples []time.Duration, pct int) float64 {
 
 func pctUs(samples []time.Duration, pct int) float64 {
 	return pctMs(samples, pct) * 1000.0
-}
-
-func fileSize(path string) int64 {
-	st, err := os.Stat(path)
-	if err != nil {
-		return 0
-	}
-	return st.Size()
 }
 
 func fmtInt(n int) string {

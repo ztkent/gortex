@@ -120,48 +120,6 @@ func (r *Resolver) resolveRelativeImports() {
 	}
 }
 
-// resolvePythonRelativeImport maps a project-rooted Python file-path
-// stem ("app/util", "pkg/sub") to the matching `KindFile` node ID.
-// Tries `<stem>.py` first, then `<stem>/__init__.py` (package). Returns
-// "" if no candidate exists in the graph or if `stem` doesn't look like
-// a relative-import stem (no slash separator — those are absolute
-// module references handled by attributeNonGoModuleImports).
-func resolvePythonRelativeImport(g graph.Store, stem string) string {
-	if !strings.Contains(stem, "/") {
-		return ""
-	}
-	for _, cand := range []string{stem + ".py", stem + "/__init__.py"} {
-		if n := g.GetNode(cand); n != nil && n.Kind == graph.KindFile {
-			return n.ID
-		}
-	}
-	return ""
-}
-
-// resolveDartRelativeImport joins a relative Dart import URI against
-// the importing file's directory and returns the matching `KindFile`
-// node ID. Paths starting with `dart:` or `package:` are caller-
-// validated to belong to the module-attribution pass and are skipped
-// here. Returns "" when the resolved path escapes the repo root or
-// when the target file is not in the graph.
-func resolveDartRelativeImport(g graph.Store, importingFile, uri string) string {
-	if uri == "" || strings.HasPrefix(uri, "dart:") || strings.HasPrefix(uri, "package:") {
-		return ""
-	}
-	dir := ""
-	if i := strings.LastIndex(importingFile, "/"); i >= 0 {
-		dir = importingFile[:i]
-	}
-	target := joinRelativePath(dir, uri)
-	if target == "" {
-		return ""
-	}
-	if n := g.GetNode(target); n != nil && n.Kind == graph.KindFile {
-		return n.ID
-	}
-	return ""
-}
-
 // joinRelativePath joins a relative URI onto a directory and collapses
 // `.`/`..` segments. Returns "" when the path walks above the repo root
 // (which we never want to silently silently fall through to an

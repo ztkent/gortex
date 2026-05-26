@@ -448,65 +448,6 @@ SET n.kind = row.kind,
 	}
 }
 
-// addEdgesUnwindLocked materialises edges as a list of structs and
-// inserts them with endpoint stubs in one UNWIND per chunk.
-// upsertEdgeLocked's per-edge stub-then-MERGE pattern is preserved:
-// each UNWIND row MERGE-stubs both endpoint nodes (no-ops if they
-// already exist), then MERGEs the edge with the full identity tuple,
-// then SETs every edge column.
-func (s *Store) addEdgesUnwindLocked(edges []*graph.Edge) {
-	for i := 0; i < len(edges); i += kuzuBatchChunkSize {
-		end := i + kuzuBatchChunkSize
-		if end > len(edges) {
-			end = len(edges)
-		}
-		chunk := edges[i:end]
-		rows := make([]map[string]any, 0, len(chunk))
-		for _, e := range chunk {
-			if e == nil {
-				continue
-			}
-			metaStr, err := encodeMeta(e.Meta)
-			if err != nil {
-				panicOnFatal(fmt.Errorf("encode edge meta: %w", err))
-				return
-			}
-			var crossRepo int64
-			if e.CrossRepo {
-				crossRepo = 1
-			}
-			rows = append(rows, map[string]any{
-				"from":             e.From,
-				"to":               e.To,
-				"kind":             string(e.Kind),
-				"file_path":        e.FilePath,
-				"line":             int64(e.Line),
-				"confidence":       e.Confidence,
-				"confidence_label": e.ConfidenceLabel,
-				"origin":           e.Origin,
-				"tier":             e.Tier,
-				"cross_repo":       crossRepo,
-				"meta":             metaStr,
-			})
-		}
-		if len(rows) == 0 {
-			continue
-		}
-		const q = `
-UNWIND $rows AS row
-MERGE (a:Node {id: row.from})
-MERGE (b:Node {id: row.to})
-MERGE (a)-[e:Edge {kind: row.kind, file_path: row.file_path, line: row.line}]->(b)
-SET e.confidence = row.confidence,
-    e.confidence_label = row.confidence_label,
-    e.origin = row.origin,
-    e.tier = row.tier,
-    e.cross_repo = row.cross_repo,
-    e.meta = row.meta`
-		s.runWriteLocked(q, map[string]any{"rows": rows})
-	}
-}
-
 // SetEdgeProvenance mutates an existing edge's origin in-place and
 // bumps the identity-revision counter when the origin actually
 // changes. Returns true iff a change was applied.
@@ -1586,24 +1527,6 @@ func (s *Store) FlushBulk() error {
 	return nil
 }
 
-func (s *Store) nodeCountLocked() int {
-	rows := s.querySelectLocked(`MATCH (n:Node) RETURN count(n)`, nil)
-	if len(rows) == 0 {
-		return 0
-	}
-	n, _ := rows[0][0].(int64)
-	return int(n)
-}
-
-func (s *Store) edgeCountLocked() int {
-	rows := s.querySelectLocked(`MATCH ()-[e:Edge]->() RETURN count(e)`, nil)
-	if len(rows) == 0 {
-		return 0
-	}
-	n, _ := rows[0][0].(int64)
-	return int(n)
-}
-
 // copyBulkLocked dedupes the bulk buffers, writes them to temp CSV
 // files, and runs COPY FROM for each table. Must be called with
 // s.writeMu held.
@@ -1715,7 +1638,7 @@ func (s *Store) copyBulkLocked(nodes []*graph.Node, edges []*graph.Edge) error {
 	if err != nil {
 		return fmt.Errorf("mkdir bulk tmp: %w", err)
 	}
-	defer os.RemoveAll(dir)
+	defer func() { _ = os.RemoveAll(dir) }()
 
 	if len(nodes) > 0 {
 		nodesPath := filepath.Join(dir, "nodes.csv")
@@ -1786,9 +1709,9 @@ func writeNodesTSV(path string, nodes []*graph.Node) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	bw := bufio.NewWriterSize(f, 1<<20)
-	defer bw.Flush()
+	defer func() { _ = bw.Flush() }()
 
 	for _, n := range nodes {
 		metaStr := ""
@@ -1838,9 +1761,9 @@ func writeEdgesTSV(path string, edges []*graph.Edge) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	bw := bufio.NewWriterSize(f, 1<<20)
-	defer bw.Flush()
+	defer func() { _ = bw.Flush() }()
 
 	for _, e := range edges {
 		metaStr := ""
