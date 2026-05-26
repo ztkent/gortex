@@ -78,7 +78,12 @@ func (s *Server) handleGetKnowledgeGaps(ctx context.Context, req mcp.CallToolReq
 	perCategoryLimit := max(req.GetInt("limit_per_category", 20), 1)
 	pathPrefix := strings.TrimSpace(req.GetString("path_prefix", ""))
 
-	scoped := s.scopedNodes(ctx)
+	// Only function/method candidates feed the disconnected /
+	// untested-hotspot rollups; the community pass walks the cached
+	// CommunityResult and never touches the node table. Pulling only
+	// the two kinds keeps the storage-layer materialisation
+	// proportional to that subset.
+	scoped := s.scopedNodesByKinds(ctx, []graph.NodeKind{graph.KindFunction, graph.KindMethod})
 
 	disconnected := s.collectDisconnected(scoped, pathPrefix, perCategoryLimit)
 	thin, singleFile := s.collectCommunityGaps(thinSize, pathPrefix, perCategoryLimit)
@@ -114,13 +119,10 @@ func (s *Server) handleGetKnowledgeGaps(ctx context.Context, req mcp.CallToolReq
 // batched in/out count instead of 2N GetInEdges/GetOutEdges cgo
 // round-trips on Ladybug).
 func (s *Server) collectDisconnected(scoped []*graph.Node, pathPrefix string, limit int) []gapDisconnected {
-	// Build the candidate list first — kind+prefix filters touch
-	// only the in-memory scoped slice so they cost nothing.
+	// scoped is already restricted to function/method by the caller;
+	// only the path-prefix filter remains.
 	candidates := make([]*graph.Node, 0, len(scoped))
 	for _, n := range scoped {
-		if n.Kind != graph.KindFunction && n.Kind != graph.KindMethod {
-			continue
-		}
 		if pathPrefix != "" && !strings.HasPrefix(n.FilePath, pathPrefix) {
 			continue
 		}
@@ -240,9 +242,6 @@ func (s *Server) collectUntestedHotspots(scoped []*graph.Node, pathPrefix string
 	// bulk in-degree count if it offers one.
 	pool := make([]*graph.Node, 0, len(scoped))
 	for _, n := range scoped {
-		if n.Kind != graph.KindFunction && n.Kind != graph.KindMethod {
-			continue
-		}
 		if pathPrefix != "" && !strings.HasPrefix(n.FilePath, pathPrefix) {
 			continue
 		}
