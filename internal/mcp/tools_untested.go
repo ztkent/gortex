@@ -50,10 +50,8 @@ func (s *Server) handleGetUntestedSymbols(ctx context.Context, req mcp.CallToolR
 
 	var entries []untestedEntry
 	totalCandidates := 0
-	for _, n := range s.scopedNodes(ctx) {
-		if n.Kind != graph.KindFunction && n.Kind != graph.KindMethod {
-			continue
-		}
+	scoped := s.scopedNodesByKinds(ctx, []graph.NodeKind{graph.KindFunction, graph.KindMethod})
+	for _, n := range scoped {
 		// Skip symbols defined inside test files — those ARE test code.
 		if isTestFile(n.FilePath) {
 			continue
@@ -121,26 +119,44 @@ func (s *Server) handleGetUntestedSymbols(ctx context.Context, req mcp.CallToolR
 // only materialise the two kinds rather than the whole node table.
 // The test-file predicate is a Go string heuristic — the backend has
 // no equivalent — so it stays in the post-filter.
+//
+// The BFS itself runs through graph.ReachableForwardByKinds when the
+// backend implements it (one Cypher query per layer over the frontier
+// IN-list instead of N+1 GetOutEdges cgo round-trips). Falls back to
+// the per-id GetOutEdges loop on backends that don't.
 func reachableFromTests(g graph.Store) map[string]bool {
-	covered := make(map[string]bool)
-
 	// Seed: every function/method defined in a test file. NodesByKind
 	// pushes the kind filter into the backend; isTestFile stays Go.
-	var frontier []string
+	seeds := make([]string, 0)
 	for _, kind := range []graph.NodeKind{graph.KindFunction, graph.KindMethod} {
 		for n := range g.NodesByKind(kind) {
 			if n == nil || !isTestFile(n.FilePath) {
 				continue
 			}
-			if !covered[n.ID] {
-				covered[n.ID] = true
-				frontier = append(frontier, n.ID)
-			}
+			seeds = append(seeds, n.ID)
 		}
 	}
+	if len(seeds) == 0 {
+		return map[string]bool{}
+	}
 
-	// Forward BFS along calls + references. A test function that calls X
-	// covers X; X transitively covers whatever X calls, etc.
+	kinds := []graph.EdgeKind{graph.EdgeCalls, graph.EdgeReferences}
+	if rf, ok := g.(graph.ReachableForwardByKinds); ok {
+		if got := rf.ReachableForwardByKinds(seeds, kinds); got != nil {
+			return got
+		}
+		return map[string]bool{}
+	}
+
+	// Fallback: layer-by-layer BFS using per-id GetOutEdges.
+	covered := make(map[string]bool, len(seeds))
+	frontier := make([]string, 0, len(seeds))
+	for _, id := range seeds {
+		if !covered[id] {
+			covered[id] = true
+			frontier = append(frontier, id)
+		}
+	}
 	for len(frontier) > 0 {
 		next := frontier[:0:0]
 		for _, id := range frontier {
