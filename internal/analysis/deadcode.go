@@ -624,22 +624,30 @@ const hotspotBetweennessWeight = 0.4
 // other symbols — that augments the fan-in/out signals rather than replacing them.
 // If threshold <= 0, the default threshold is mean + 2*stddev.
 func FindHotspots(g graph.Store, communities *CommunityResult, threshold float64) []HotspotEntry {
-	// Pull only function/method nodes — the hotspots ranking is
-	// callable-only, so the AllNodes() materialisation that the
-	// legacy path used to bucket the same subset Go-side pulled the
-	// whole node table over cgo for nothing. NodesByKindsScanner
-	// pushes the filter inside the backend; the in-memory fallback
-	// is functionally identical to the old loop.
+	// Pull only function/method node IDs — the hotspots ranking is
+	// callable-only, and the scoring math doesn't touch any column
+	// beyond the id. NodeIDsByKinds returns the projection from a
+	// single Cypher query (one C string per row instead of the ~10
+	// columns NodesByKinds would ship). The full *Node rows are
+	// fetched in one batched GetNodesByIDs call AFTER the threshold
+	// filter, so a typical run materialises ~100 survivors rather
+	// than the whole ~4k function/method bucket.
 	hotspotKinds := []graph.NodeKind{graph.KindFunction, graph.KindMethod}
-	var nodes []*graph.Node
-	if scan, ok := g.(graph.NodesByKindsScanner); ok {
-		nodes = scan.NodesByKinds(hotspotKinds)
+	var candidateIDs []string
+	if scan, ok := g.(graph.NodeIDsByKinds); ok {
+		candidateIDs = scan.NodeIDsByKinds(hotspotKinds)
+	} else if scan, ok := g.(graph.NodesByKindsScanner); ok {
+		ns := scan.NodesByKinds(hotspotKinds)
+		candidateIDs = make([]string, 0, len(ns))
+		for _, n := range ns {
+			candidateIDs = append(candidateIDs, n.ID)
+		}
 	} else {
 		all := g.AllNodes()
-		nodes = make([]*graph.Node, 0, len(all))
+		candidateIDs = make([]string, 0, len(all))
 		for _, n := range all {
 			if n.Kind == graph.KindFunction || n.Kind == graph.KindMethod {
-				nodes = append(nodes, n)
+				candidateIDs = append(candidateIDs, n.ID)
 			}
 		}
 	}
@@ -651,14 +659,10 @@ func FindHotspots(g graph.Store, communities *CommunityResult, threshold float64
 	}
 
 	// Restrict the fan-count pass to the kinds hotspots cares about
-	// (function + method). Computed up front because NodeFanAggregator
-	// expects the candidate id list -- it never returns rows for ids
-	// the caller didn't ask for, so the cgo payload stays bounded by
-	// the candidate count rather than the whole graph.
-	candidateIDs := make([]string, 0, len(nodes))
-	for _, n := range nodes {
-		candidateIDs = append(candidateIDs, n.ID)
-	}
+	// (function + method). NodeFanAggregator expects the candidate id
+	// list -- it never returns rows for ids the caller didn't ask
+	// for, so the cgo payload stays bounded by the candidate count
+	// rather than the whole graph.
 	fanIn, fanOut := CollectFanCounts(g, candidateIDs,
 		[]graph.EdgeKind{graph.EdgeCalls, graph.EdgeReferences},
 		[]graph.EdgeKind{graph.EdgeCalls},
@@ -706,9 +710,13 @@ func FindHotspots(g graph.Store, communities *CommunityResult, threshold float64
 		}
 	}
 
-	// Compute raw scores for function/method nodes only
+	// Compute raw scores for function/method nodes only. Keyed by id
+	// so the full *Node fetch is deferred until after the threshold
+	// filter — on a ~4k candidate set the surviving share is the top
+	// few percent, so this materialises ~100 nodes instead of the
+	// whole bucket.
 	type rawEntry struct {
-		node        *graph.Node
+		id          string
 		fanIn       int
 		fanOut      int
 		crossing    int
@@ -716,16 +724,16 @@ func FindHotspots(g graph.Store, communities *CommunityResult, threshold float64
 		rawScore    float64
 	}
 
-	var entries []rawEntry
-	for _, n := range nodes {
-		fi := fanIn[n.ID]
-		fo := fanOut[n.ID]
-		cc := crossings[n.ID]
-		bw := betweenness[n.ID]
+	entries := make([]rawEntry, 0, len(candidateIDs))
+	for _, id := range candidateIDs {
+		fi := fanIn[id]
+		fo := fanOut[id]
+		cc := crossings[id]
+		bw := betweenness[id]
 		raw := float64(fi)*2.0 + float64(fo)*1.5 + float64(cc)*3.0 + bw*hotspotBetweennessWeight
 
 		entries = append(entries, rawEntry{
-			node:        n,
+			id:          id,
 			fanIn:       fi,
 			fanOut:      fo,
 			crossing:    cc,
@@ -773,25 +781,49 @@ func FindHotspots(g graph.Store, communities *CommunityResult, threshold float64
 		threshold = mean + 2.0*stddev
 	}
 
-	// Filter and build result
-	var result []HotspotEntry
-	for i, e := range entries {
+	// Filter by threshold first to identify the surviving id set, so
+	// the full *Node materialisation is bounded by the result size,
+	// not the candidate count.
+	type survivor struct {
+		entryIdx int
+		score    float64
+	}
+	survivors := make([]survivor, 0, len(entries))
+	for i := range entries {
 		score := math.Round(normalized[i]*100) / 100 // round to 2 decimal places
 		if score < threshold {
 			continue
 		}
+		survivors = append(survivors, survivor{entryIdx: i, score: score})
+	}
+	if len(survivors) == 0 {
+		return nil
+	}
 
+	survivorIDs := make([]string, 0, len(survivors))
+	for _, s := range survivors {
+		survivorIDs = append(survivorIDs, entries[s.entryIdx].id)
+	}
+	nodesByID := g.GetNodesByIDs(survivorIDs)
+
+	result := make([]HotspotEntry, 0, len(survivors))
+	for _, s := range survivors {
+		e := entries[s.entryIdx]
+		n := nodesByID[e.id]
+		if n == nil {
+			continue
+		}
 		result = append(result, HotspotEntry{
-			ID:                 e.node.ID,
-			Name:               e.node.Name,
-			Kind:               string(e.node.Kind),
-			FilePath:           e.node.FilePath,
-			Line:               e.node.StartLine,
+			ID:                 n.ID,
+			Name:               n.Name,
+			Kind:               string(n.Kind),
+			FilePath:           n.FilePath,
+			Line:               n.StartLine,
 			FanIn:              e.fanIn,
 			FanOut:             e.fanOut,
 			CommunityCrossings: e.crossing,
 			Betweenness:        math.Round(e.betweenness*100) / 100,
-			ComplexityScore:    score,
+			ComplexityScore:    s.score,
 		})
 	}
 

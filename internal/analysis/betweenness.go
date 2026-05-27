@@ -78,37 +78,41 @@ func ComputeBetweenness(g graph.Store) *BetweennessResult {
 	}
 	// Betweenness measures shortest-path centrality across the
 	// call / reference subgraph; only function and method nodes carry
-	// those edges, so the unfiltered AllNodes() pull was wasted on the
-	// other 90% of the node table. NodesByKindsScanner pushes the
-	// kind filter into the storage layer; the in-memory fallback is
-	// functionally identical to the old loop.
+	// those edges. The scoring kernel only ever touches node IDs, so
+	// the unfiltered AllNodes() pull was wasted on the other 90% of
+	// the node table AND on the 9 unused columns of every retained
+	// row. NodeIDsByKinds returns just the id column from a single
+	// Cypher query; NodesByKindsScanner is the legacy fallback for
+	// backends that haven't shipped the id projection yet.
 	betweennessKinds := []graph.EdgeKind{graph.EdgeCalls, graph.EdgeReferences}
 	bcNodeKinds := []graph.NodeKind{graph.KindFunction, graph.KindMethod}
-	var nodes []*graph.Node
-	if scan, ok := g.(graph.NodesByKindsScanner); ok {
-		nodes = scan.NodesByKinds(bcNodeKinds)
+	var ids []string
+	if scan, ok := g.(graph.NodeIDsByKinds); ok {
+		ids = scan.NodeIDsByKinds(bcNodeKinds)
+	} else if scan, ok := g.(graph.NodesByKindsScanner); ok {
+		ns := scan.NodesByKinds(bcNodeKinds)
+		ids = make([]string, 0, len(ns))
+		for _, nd := range ns {
+			ids = append(ids, nd.ID)
+		}
 	} else {
 		all := g.AllNodes()
-		nodes = make([]*graph.Node, 0, len(all))
-		for _, n := range all {
-			if n.Kind == graph.KindFunction || n.Kind == graph.KindMethod {
-				nodes = append(nodes, n)
+		ids = make([]string, 0, len(all))
+		for _, nd := range all {
+			if nd.Kind == graph.KindFunction || nd.Kind == graph.KindMethod {
+				ids = append(ids, nd.ID)
 			}
 		}
 	}
-	n := len(nodes)
+	n := len(ids)
 	if n == 0 {
 		return &BetweennessResult{Scores: map[string]float64{}}
 	}
 
 	// Stable node ordering: betweenness itself is order-independent,
 	// but a deterministic order makes the sampled pivot pick
-	// reproducible regardless of the map-iteration order
-	// NodesByKinds happens to return.
-	ids := make([]string, n)
-	for i, nd := range nodes {
-		ids[i] = nd.ID
-	}
+	// reproducible regardless of the iteration order
+	// NodeIDsByKinds happens to return.
 	sort.Strings(ids)
 
 	// Forward adjacency over the call / reference subgraph.
