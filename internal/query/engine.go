@@ -132,10 +132,23 @@ func (e *Engine) FindSymbols(name string, kinds ...graph.NodeKind) []*graph.Node
 // GetFileSymbols returns all symbols defined in a file.
 func (e *Engine) GetFileSymbols(filePath string) *SubGraph {
 	nodes := e.g.GetFileNodes(filePath)
-	var edges []*graph.Edge
+	if len(nodes) == 0 {
+		return &SubGraph{}
+	}
+	// Batched in/out edges: one Cypher per direction instead of 2N
+	// per-node queries. Replaces the per-node GetIn/OutEdges loop —
+	// for a file with 30 symbols that was 60 backend round-trips on
+	// Ladybug just to collect imports + intra-file references.
+	ids := make([]string, 0, len(nodes))
 	for _, n := range nodes {
-		edges = append(edges, e.g.GetOutEdges(n.ID)...)
-		edges = append(edges, e.g.GetInEdges(n.ID)...)
+		ids = append(ids, n.ID)
+	}
+	outByID := e.g.GetOutEdgesByNodeIDs(ids)
+	inByID := e.g.GetInEdgesByNodeIDs(ids)
+	var edges []*graph.Edge
+	for _, id := range ids {
+		edges = append(edges, outByID[id]...)
+		edges = append(edges, inByID[id]...)
 	}
 	return &SubGraph{
 		Nodes: nodes, Edges: dedup(edges),
