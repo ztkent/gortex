@@ -4,27 +4,25 @@ import (
 	"context"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/zzet/gortex/internal/blame"
+
 	"github.com/zzet/gortex/internal/graph"
 )
 
-// registerChurnRateTool wires get_churn_rate — a standalone MCP tool
-// that exposes per-symbol git-commit density. The metric is already
-// implicit in `analyze hotspots` (composite); this tool surfaces the
-// raw number so refactor planning, code review, and bus-factor work
-// can read it directly.
+// registerChurnRateTool wires get_churn_rate — a pure graph scan over
+// per-symbol churn metadata pre-computed by `gortex enrich churn`.
 //
-// Computation: walk the scoped subgraph for function/method nodes,
-// group by file_path, run `git blame -p` once per unique file, count
-// distinct commits whose blame range intersects the symbol's line
-// range. Bounded by file count, not symbol count.
+// At read time the handler does NOT shell out to git. Every value it
+// returns lives in n.Meta["churn"] on the node, populated either by
+// the CLI/git-hook (which writes through the LadyBug backend) or by
+// an in-process call to the enrich_churn MCP tool. When no node in
+// scope has the data, the response is a structured error pointing
+// the agent at the enrich command.
 func (s *Server) registerChurnRateTool() {
 	s.addTool(
 		mcp.NewTool("get_churn_rate",
-			mcp.WithDescription("Per-symbol git-commit density. For each function/method in scope, runs `git blame -p` once per unique file and counts distinct commits intersecting the symbol's line range. Returns {symbol_id, name, file, churn_rate (commits per active day), commit_count, age_days, last_author, last_commit_at}. Sort and filter by churn_rate or commit_count to find unstable abstractions, hidden coupling, and bus-factor risks. Pairs with `analyze hotspots` — that returns the composite; this returns the raw signal."),
+			mcp.WithDescription("Per-symbol git-commit density, read from pre-computed graph data. For each function/method in scope returns {symbol_id, name, file, churn_rate (commits per active day), commit_count, age_days, last_author, last_commit_at}. Sort and filter by churn_rate or commit_count to find unstable abstractions, hidden coupling, and bus-factor risks. Data is populated by `gortex enrich churn` (or the enrich_churn MCP tool); when nothing in scope has churn meta the tool returns a structured error with the suggested next command. No git subprocess at request time — sub-second on indexed repos."),
 			mcp.WithString("path_prefix", mcp.Description("Scope analysis to nodes under this file-path prefix.")),
 			mcp.WithNumber("min_commits", mcp.Description("Only return symbols with at least this many commits (default: 1).")),
 			mcp.WithString("kinds", mcp.Description("Comma-separated kinds (default: function,method). Pass 'all' for every symbol.")),
@@ -65,11 +63,10 @@ func (s *Server) handleGetChurnRate(ctx context.Context, req mcp.CallToolRequest
 		allowed = nil
 	}
 
-	// Resolve the repo root once so blame.Run can be called with a
-	// fixed cwd. In multi-repo mode each file lives under one of the
-	// MultiIndexer repos; we resolve per-file with resolveFilePath.
 	scoped := s.scopedNodes(ctx)
-	byFile := map[string][]*graph.Node{}
+	rows := make([]churnRow, 0, 64)
+	seenFiles := map[string]struct{}{}
+	sawMeta := false
 	for _, n := range scoped {
 		if allowed != nil {
 			if _, ok := allowed[n.Kind]; !ok {
@@ -79,88 +76,30 @@ func (s *Server) handleGetChurnRate(ctx context.Context, req mcp.CallToolRequest
 		if pathPrefix != "" && !strings.HasPrefix(n.FilePath, pathPrefix) {
 			continue
 		}
-		if n.StartLine == 0 {
+		row, ok := churnRowFromMeta(n)
+		if !ok {
 			continue
 		}
-		byFile[n.FilePath] = append(byFile[n.FilePath], n)
+		sawMeta = true
+		if row.CommitCount < minCommits {
+			continue
+		}
+		rows = append(rows, row)
+		seenFiles[n.FilePath] = struct{}{}
 	}
 
-	rows := make([]churnRow, 0, len(scoped))
-	scannedFiles := 0
-	for filePath, nodes := range byFile {
-		abs, _, err := s.resolveFilePath(filePath)
-		if err != nil {
-			continue
-		}
-		workTree := repoRootContaining(abs)
-		if workTree == "" {
-			continue
-		}
-		// Convert absolute path back to a path relative to the git
-		// work tree — git blame takes tree-relative paths.
-		gitRel := abs
-		if rel, err := stripPathPrefix(abs, workTree+"/"); err == nil {
-			gitRel = rel
-		}
-		lines, err := blame.Run(workTree, gitRel)
-		if err != nil || len(lines) == 0 {
-			continue
-		}
-		scannedFiles++
-
-		for _, n := range nodes {
-			endLine := n.EndLine
-			if endLine == 0 {
-				endLine = n.StartLine
-			}
-			commits := map[string]bool{}
-			oldest, newest := time.Time{}, time.Time{}
-			latestEmail := ""
-			for line := n.StartLine; line <= endLine; line++ {
-				a, ok := lines[line]
-				if !ok {
-					continue
-				}
-				if !commits[a.Commit] {
-					commits[a.Commit] = true
-				}
-				if oldest.IsZero() || a.Timestamp.Before(oldest) {
-					oldest = a.Timestamp
-				}
-				if newest.IsZero() || a.Timestamp.After(newest) {
-					newest = a.Timestamp
-					latestEmail = a.Email
-				}
-			}
-			if len(commits) == 0 || len(commits) < minCommits {
-				continue
-			}
-			ageDays := 0
-			if !oldest.IsZero() {
-				ageDays = int(time.Since(oldest).Hours() / 24)
-			}
-			// Churn rate: commits per active day. A symbol active for
-			// 1 day with 3 commits gets churn_rate=3.0; one active for
-			// 100 days with the same 3 commits gets 0.03. The minimum
-			// denominator of 1 day stops a fresh symbol from looking
-			// infinitely churny.
-			activeDays := ageDays
-			if activeDays < 1 {
-				activeDays = 1
-			}
-			row := churnRow{
-				ID: n.ID, Name: n.Name, File: n.FilePath,
-				StartLine: n.StartLine, EndLine: endLine,
-				CommitCount: len(commits),
-				AgeDays:     ageDays,
-				ChurnRate:   roundScore(float64(len(commits)) / float64(activeDays)),
-				LastAuthor:  latestEmail,
-			}
-			if !newest.IsZero() {
-				row.LastCommitAt = newest.UTC().Format(time.RFC3339)
-			}
-			rows = append(rows, row)
-		}
+	if !sawMeta {
+		// No node in scope carries meta.churn — the agent needs to
+		// run the enricher before this tool can answer. We surface
+		// the gap loudly rather than returning an empty result that
+		// looks like "nothing churns" (which is misleading).
+		return s.respondJSONOrTOON(ctx, req, map[string]any{
+			"error":      "no churn data in scope; run `gortex enrich churn` (or call the enrich_churn MCP tool) to populate meta.churn",
+			"suggestion": "gortex enrich churn",
+			"symbols":    []churnRow{},
+			"total":      0,
+			"truncated":  false,
+		})
 	}
 
 	sort.Slice(rows, func(i, j int) bool {
@@ -187,23 +126,84 @@ func (s *Server) handleGetChurnRate(ctx context.Context, req mcp.CallToolRequest
 	}
 
 	return s.respondJSONOrTOON(ctx, req, map[string]any{
-		"symbols":        rows,
-		"total":          len(rows),
-		"truncated":      truncated,
-		"scanned_files":  scannedFiles,
-		"sort_by":        sortBy,
-		"min_commits":    minCommits,
+		"symbols":       rows,
+		"total":         len(rows),
+		"truncated":     truncated,
+		"scanned_files": len(seenFiles),
+		"sort_by":       sortBy,
+		"min_commits":   minCommits,
 	})
 }
 
-// stripPathPrefix returns path with prefix stripped iff path begins
-// with prefix. Used to convert absolute paths back to git-tree-relative.
-func stripPathPrefix(path, prefix string) (string, error) {
-	if strings.HasPrefix(path, prefix) {
-		return path[len(prefix):], nil
+// churnRowFromMeta projects a node's meta.churn payload into the
+// response row. Returns (zero, false) when the node has no churn
+// metadata — the caller distinguishes "missing data" from
+// "filtered out". The Meta layout matches what
+// internal/churn.EnrichGraph writes:
+//
+//	meta.churn = {
+//	  commit_count:   int,
+//	  age_days:       int,
+//	  churn_rate:     float64,
+//	  last_author:    string,
+//	  last_commit_at: RFC3339 string,
+//	}
+//
+// Numeric fields tolerate both int and float64 because Meta round-
+// trips through gob (LadyBug) or JSON (snapshots), which can widen
+// ints to floats. Missing fields default to zero — they're stamped
+// together so partial payloads are unexpected, but a defensive read
+// is cheaper than asserting and crashing on an old snapshot.
+func churnRowFromMeta(n *graph.Node) (churnRow, bool) {
+	if n == nil || n.Meta == nil {
+		return churnRow{}, false
 	}
-	if path == strings.TrimSuffix(prefix, "/") {
-		return "", nil
+	raw, ok := n.Meta["churn"].(map[string]any)
+	if !ok || len(raw) == 0 {
+		return churnRow{}, false
 	}
-	return path, errPathUnresolved
+	endLine := n.EndLine
+	if endLine == 0 {
+		endLine = n.StartLine
+	}
+	row := churnRow{
+		ID: n.ID, Name: n.Name, File: n.FilePath,
+		StartLine: n.StartLine, EndLine: endLine,
+		CommitCount: intFromAny(raw["commit_count"]),
+		AgeDays:     intFromAny(raw["age_days"]),
+		ChurnRate:   floatFromAny(raw["churn_rate"]),
+	}
+	if v, ok := raw["last_author"].(string); ok {
+		row.LastAuthor = v
+	}
+	if v, ok := raw["last_commit_at"].(string); ok {
+		row.LastCommitAt = v
+	}
+	return row, true
+}
+
+func intFromAny(v any) int {
+	switch x := v.(type) {
+	case int:
+		return x
+	case int64:
+		return int(x)
+	case float64:
+		return int(x)
+	}
+	return 0
+}
+
+func floatFromAny(v any) float64 {
+	switch x := v.(type) {
+	case float64:
+		return x
+	case float32:
+		return float64(x)
+	case int:
+		return float64(x)
+	case int64:
+		return float64(x)
+	}
+	return 0
 }

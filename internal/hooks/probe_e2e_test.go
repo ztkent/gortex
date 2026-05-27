@@ -38,6 +38,9 @@ func (f *fakeController) Shutdown(_ context.Context) error { return nil }
 func (f *fakeController) SearchSymbols(_ context.Context, _ daemon.SearchSymbolsParams) (daemon.SearchSymbolsResult, error) {
 	return daemon.SearchSymbolsResult{Hits: f.hits}, nil
 }
+func (f *fakeController) EnrichChurn(_ context.Context, _ daemon.EnrichChurnParams) (daemon.EnrichChurnResult, error) {
+	return daemon.EnrichChurnResult{}, nil
+}
 
 // startTestDaemon spins up a real daemon on a short-path unix socket and
 // points GORTEX_DAEMON_SOCKET at it so daemon.Dial finds it.

@@ -18,10 +18,32 @@ import (
 // Begin and end markers wrap the gortex-managed block inside a hook
 // file. The MARKER_BEGIN / MARKER_END convention is checked by every
 // install/uninstall pass and never re-written verbatim by the user.
+//
+// These exported constants preserve the post-commit form for callers
+// that pre-date multi-hook support; new code goes through markerBegin
+// / markerEnd which derive the strings from the hook name (so
+// post-merge gets its own pair).
 const (
 	MarkerBegin = "# gortex-managed:post-commit:begin"
 	MarkerEnd   = "# gortex-managed:post-commit:end"
 )
+
+// SupportedHooks enumerates the hook names that InstallHook accepts.
+// Anything else returns an error so we don't silently scatter our
+// markers into hooks we haven't audited.
+var SupportedHooks = []string{"post-commit", "post-merge"}
+
+func isSupportedHook(name string) bool {
+	for _, h := range SupportedHooks {
+		if h == name {
+			return true
+		}
+	}
+	return false
+}
+
+func markerBegin(hook string) string { return "# gortex-managed:" + hook + ":begin" }
+func markerEnd(hook string) string   { return "# gortex-managed:" + hook + ":end" }
 
 // InstallOpts controls what the installed hook runs.
 type InstallOpts struct {
@@ -42,6 +64,16 @@ type InstallOpts struct {
 	// DocsOutPath is the docs bundle output path. Defaults to
 	// "CHANGELOG_AUTO.md".
 	DocsOutPath string
+	// RegenChurn toggles a `gortex enrich churn` run. The companion
+	// MCP tool get_churn_rate reads the data this enrich pass writes,
+	// so wiring this into post-commit / post-merge keeps the signal
+	// fresh without the agent paying the recompute cost at read time.
+	RegenChurn bool
+	// ChurnBranch overrides the branch the enricher pins to. Empty
+	// means "let `gortex enrich churn` resolve the default branch
+	// at run time" — the right default for shared repos where the
+	// branch name varies per checkout.
+	ChurnBranch string
 }
 
 func (o InstallOpts) withDefaults() InstallOpts {
@@ -62,12 +94,11 @@ func (o InstallOpts) withDefaults() InstallOpts {
 
 // hookCommands builds the body the installer writes inside the
 // marker block. The body is a `#!/bin/sh` snippet that runs every
-// enabled action and tolerates failures so the commit still
-// completes when gortex isn't on PATH.
-func hookCommands(opts InstallOpts) []string {
+// enabled action and tolerates failures so the hook always completes.
+func hookCommands(hook string, opts InstallOpts) []string {
 	var cmds []string
-	cmds = append(cmds, "# Auto-regenerate gortex artefacts after each commit.")
-	cmds = append(cmds, "# Failures are tolerated so the commit always completes.")
+	cmds = append(cmds, fmt.Sprintf("# Auto-regenerate gortex artefacts on %s.", hook))
+	cmds = append(cmds, "# Failures are tolerated so the hook always completes.")
 	if opts.RegenMermaid {
 		cmds = append(cmds, fmt.Sprintf("(%s export --format mermaid --scope all --out-dir %q --on-commit) >/dev/null 2>&1 || true",
 			opts.Binary, opts.MermaidOutDir))
@@ -80,6 +111,14 @@ func hookCommands(opts InstallOpts) []string {
 		cmds = append(cmds, fmt.Sprintf("(%s docs . --out %q) >/dev/null 2>&1 || true",
 			opts.Binary, opts.DocsOutPath))
 	}
+	if opts.RegenChurn {
+		if strings.TrimSpace(opts.ChurnBranch) == "" {
+			cmds = append(cmds, fmt.Sprintf("(%s enrich churn) >/dev/null 2>&1 || true", opts.Binary))
+		} else {
+			cmds = append(cmds, fmt.Sprintf("(%s enrich churn --branch=%q) >/dev/null 2>&1 || true",
+				opts.Binary, opts.ChurnBranch))
+		}
+	}
 	if len(cmds) == 2 {
 		// No actions selected — note it explicitly.
 		cmds = append(cmds, "# (no regeneration actions enabled)")
@@ -89,9 +128,21 @@ func hookCommands(opts InstallOpts) []string {
 
 // HookPath resolves the absolute path of the post-commit hook for the
 // repository rooted at repoRoot. Honours core.hooksPath when set.
+// Thin wrapper over HookPathFor — preserved for backwards compatibility.
 func HookPath(repoRoot string) (string, error) {
+	return HookPathFor(repoRoot, "post-commit")
+}
+
+// HookPathFor resolves the absolute path of the named hook file in
+// the repository rooted at repoRoot. Honours core.hooksPath when set.
+// hook is a bare hook name from SupportedHooks ("post-commit",
+// "post-merge", …).
+func HookPathFor(repoRoot, hook string) (string, error) {
 	if repoRoot == "" {
 		return "", fmt.Errorf("githooks: repoRoot is empty")
+	}
+	if !isSupportedHook(hook) {
+		return "", fmt.Errorf("githooks: unsupported hook %q (supported: %s)", hook, strings.Join(SupportedHooks, ", "))
 	}
 	gitDir, err := runGit(repoRoot, "rev-parse", "--git-dir")
 	if err != nil {
@@ -112,7 +163,7 @@ func HookPath(repoRoot string) (string, error) {
 	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
 		return "", fmt.Errorf("githooks: create hooks dir %q: %w", hooksDir, err)
 	}
-	return filepath.Join(hooksDir, "post-commit"), nil
+	return filepath.Join(hooksDir, hook), nil
 }
 
 // StatusReport describes the current state of the post-commit hook.
@@ -148,36 +199,45 @@ func Status(repoRoot string) (StatusReport, error) {
 	return rep, nil
 }
 
-// InstallPostCommit writes a post-commit hook with the configured
-// commands inside our marker block. Idempotent: re-running replaces
+// InstallPostCommit is a backwards-compatible wrapper over InstallHook
+// that installs the post-commit hook. New callers should reach for
+// InstallHook directly so they can install post-merge too.
+func InstallPostCommit(repoRoot string, opts InstallOpts) (string, error) {
+	return InstallHook(repoRoot, "post-commit", opts)
+}
+
+// InstallHook writes the named hook with the configured commands
+// inside a hook-specific marker block. Idempotent: re-running replaces
 // just the gortex block, leaving any other content intact.
 //
 // Returns the absolute path of the hook so callers can show it to the
-// user.
-func InstallPostCommit(repoRoot string, opts InstallOpts) (string, error) {
+// user. `hook` must be one of SupportedHooks.
+func InstallHook(repoRoot, hook string, opts InstallOpts) (string, error) {
 	opts = opts.withDefaults()
-	hookPath, err := HookPath(repoRoot)
+	hookPath, err := HookPathFor(repoRoot, hook)
 	if err != nil {
 		return "", err
 	}
 
-	cmds := hookCommands(opts)
+	cmds := hookCommands(hook, opts)
+	mBegin := markerBegin(hook)
+	mEnd := markerEnd(hook)
 
 	var newBlock bytes.Buffer
-	newBlock.WriteString(MarkerBegin)
+	newBlock.WriteString(mBegin)
 	newBlock.WriteString("\n")
 	for _, line := range cmds {
 		newBlock.WriteString(line)
 		newBlock.WriteString("\n")
 	}
-	newBlock.WriteString(MarkerEnd)
+	newBlock.WriteString(mEnd)
 	newBlock.WriteString("\n")
 
 	existing, _ := os.ReadFile(hookPath) // nil bytes when file doesn't exist
 	var out bytes.Buffer
 	if len(existing) == 0 {
 		out.WriteString("#!/bin/sh\n")
-		out.WriteString("# Installed by `gortex githook install post-commit`.\n")
+		out.WriteString(fmt.Sprintf("# Installed by `gortex githook install %s`.\n", hook))
 		out.WriteString("# Marker block below is regenerated on each install/uninstall;\n")
 		out.WriteString("# add your own commands outside the markers and they will be preserved.\n\n")
 		out.Write(newBlock.Bytes())
@@ -187,10 +247,10 @@ func InstallPostCommit(repoRoot string, opts InstallOpts) (string, error) {
 		if !strings.HasPrefix(body, "#!") {
 			out.WriteString("#!/bin/sh\n")
 		}
-		if strings.Contains(body, MarkerBegin) && strings.Contains(body, MarkerEnd) {
+		if strings.Contains(body, mBegin) && strings.Contains(body, mEnd) {
 			// Replace existing block.
-			before, rest, _ := strings.Cut(body, MarkerBegin)
-			_, after, _ := strings.Cut(rest, MarkerEnd)
+			before, rest, _ := strings.Cut(body, mBegin)
+			_, after, _ := strings.Cut(rest, mEnd)
 			after = strings.TrimLeft(after, "\n")
 			out.WriteString(before)
 			out.Write(newBlock.Bytes())
@@ -214,18 +274,25 @@ func InstallPostCommit(repoRoot string, opts InstallOpts) (string, error) {
 	return hookPath, nil
 }
 
-// UninstallPostCommit removes the gortex-managed block. If the file
-// then contains nothing but the shebang and our installer comment,
-// the file is deleted entirely. Otherwise we leave the residual
-// (user-authored) content in place.
+// UninstallPostCommit is a backwards-compatible wrapper.
+func UninstallPostCommit(repoRoot string) (string, bool, error) {
+	return UninstallHook(repoRoot, "post-commit")
+}
+
+// UninstallHook removes the gortex-managed block from the named hook.
+// If the file then contains nothing but the shebang and our installer
+// comment, the file is deleted entirely. Otherwise we leave the
+// residual (user-authored) content in place.
 //
 // Returns the path of the hook (whether it now exists or was deleted)
 // and a bool indicating "block was found and removed".
-func UninstallPostCommit(repoRoot string) (string, bool, error) {
-	hookPath, err := HookPath(repoRoot)
+func UninstallHook(repoRoot, hook string) (string, bool, error) {
+	hookPath, err := HookPathFor(repoRoot, hook)
 	if err != nil {
 		return "", false, err
 	}
+	mBegin := markerBegin(hook)
+	mEnd := markerEnd(hook)
 	body, err := os.ReadFile(hookPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -234,11 +301,11 @@ func UninstallPostCommit(repoRoot string) (string, bool, error) {
 		return "", false, err
 	}
 	b := string(body)
-	if !strings.Contains(b, MarkerBegin) || !strings.Contains(b, MarkerEnd) {
+	if !strings.Contains(b, mBegin) || !strings.Contains(b, mEnd) {
 		return hookPath, false, nil
 	}
-	before, rest, _ := strings.Cut(b, MarkerBegin)
-	_, after, _ := strings.Cut(rest, MarkerEnd)
+	before, rest, _ := strings.Cut(b, mBegin)
+	_, after, _ := strings.Cut(rest, mEnd)
 	after = strings.TrimLeft(after, "\n")
 	cleaned := strings.TrimRight(before, "\n") + "\n" + after
 	cleaned = strings.TrimSpace(cleaned)

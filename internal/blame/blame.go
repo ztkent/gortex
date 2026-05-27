@@ -46,13 +46,27 @@ type Author struct {
 	Timestamp time.Time // author-time
 }
 
-// Run executes `git blame -p` on the file and returns a map from
-// 1-based line number to Author. errors include both git invocation
-// failures (file not in repo, repo not initialised) and parse
-// failures. Callers may treat any error as "skip this file" — the
-// enrichment pass is best-effort.
+// Run executes `git blame -p` on the file at the current worktree
+// (HEAD) and returns a map from 1-based line number to Author. errors
+// include both git invocation failures (file not in repo, repo not
+// initialised) and parse failures. Callers may treat any error as
+// "skip this file" — the enrichment pass is best-effort.
 func Run(repoRoot, relPath string) (map[int]Author, error) {
-	cmd := exec.Command("git", "-C", repoRoot, "blame", "-p", "--", relPath)
+	return RunAt(repoRoot, "", relPath)
+}
+
+// RunAt is Run with an explicit revision (branch / tag / SHA). Pass
+// "" for HEAD. Used by enrichments that must blame the default branch
+// regardless of the user's current checkout — e.g. the churn enricher
+// pinning to `origin/main` so feature-branch work-in-progress doesn't
+// pollute the persisted data.
+func RunAt(repoRoot, rev, relPath string) (map[int]Author, error) {
+	args := []string{"-C", repoRoot, "blame", "-p"}
+	if rev != "" {
+		args = append(args, rev)
+	}
+	args = append(args, "--", relPath)
+	cmd := exec.Command("git", args...)
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("git blame %s: %w", relPath, err)

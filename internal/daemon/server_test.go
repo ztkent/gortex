@@ -84,6 +84,10 @@ func (f *fakeController) SearchSymbols(_ context.Context, p SearchSymbolsParams)
 	return SearchSymbolsResult{Hits: f.searchHits}, nil
 }
 
+func (f *fakeController) EnrichChurn(_ context.Context, _ EnrichChurnParams) (EnrichChurnResult, error) {
+	return EnrichChurnResult{}, nil
+}
+
 // newDaemon spins up a Server on a short socket path + Fake controller.
 // macOS limits Unix socket paths to ~104 chars (sizeof(sun_path)), and
 // Go's t.TempDir() path can exceed that for long test names, so we mint

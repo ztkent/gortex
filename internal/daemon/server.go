@@ -97,6 +97,11 @@ type Controller interface {
 	// (Claude Code's Grep-redirect hook) that need a single short answer
 	// without setting up a full MCP session.
 	SearchSymbols(ctx context.Context, params SearchSymbolsParams) (SearchSymbolsResult, error)
+	// EnrichChurn runs the per-symbol / per-file churn enricher against
+	// the daemon's in-process graph. Exposed over the control surface so
+	// CLI invocations (and the post-commit / post-merge git hook) can
+	// trigger it without taking the LadyBug write lock the daemon owns.
+	EnrichChurn(ctx context.Context, params EnrichChurnParams) (EnrichChurnResult, error)
 	// Shutdown is invoked via the control surface and should return
 	// quickly; the daemon's actual shutdown work happens after the
 	// response is written.
@@ -517,6 +522,21 @@ func (s *Server) handleControl(_ *Session, req ControlRequest) ControlResponse {
 			return controlErr(ErrInternal, err.Error())
 		}
 		return ControlResponse{OK: true}
+
+	case ControlEnrichChurn:
+		var p EnrichChurnParams
+		if err := unmarshalParams(req.Params, &p); err != nil {
+			return controlErr(ErrInternal, err.Error())
+		}
+		result, err := s.Controller.EnrichChurn(ctx, p)
+		if err != nil {
+			return controlErr(ErrInternal, err.Error())
+		}
+		buf, err := json.Marshal(result)
+		if err != nil {
+			return controlErr(ErrInternal, "marshal enrich_churn result: "+err.Error())
+		}
+		return ControlResponse{OK: true, Result: buf}
 	}
 	return controlErr(ErrInternal, "unknown control kind: "+req.Kind)
 }

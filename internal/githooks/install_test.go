@@ -192,6 +192,54 @@ func TestStatus_NewRepo(t *testing.T) {
 	}
 }
 
+func TestInstallHook_PostMergeAndChurn(t *testing.T) {
+	repo := initRepo(t)
+	path, err := InstallHook(repo, "post-merge", InstallOpts{RegenChurn: true, ChurnBranch: "origin/main"})
+	if err != nil {
+		t.Fatalf("InstallHook post-merge: %v", err)
+	}
+	if filepath.Base(path) != "post-merge" {
+		t.Errorf("expected post-merge hook file, got %s", path)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read hook: %v", err)
+	}
+	got := string(body)
+	for _, want := range []string{
+		"# gortex-managed:post-merge:begin",
+		"# gortex-managed:post-merge:end",
+		"gortex enrich churn",
+		`--branch="origin/main"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("hook missing %q. Body:\n%s", want, got)
+		}
+	}
+	// Post-commit and post-merge should be independently managed.
+	if _, err := InstallHook(repo, "post-commit", InstallOpts{RegenChurn: true}); err != nil {
+		t.Fatalf("InstallHook post-commit: %v", err)
+	}
+	if _, removed, err := UninstallHook(repo, "post-merge"); err != nil || !removed {
+		t.Fatalf("UninstallHook post-merge removed=%v err=%v", removed, err)
+	}
+	// Post-commit hook should still exist after we uninstalled post-merge.
+	postCommitPath, err := HookPathFor(repo, "post-commit")
+	if err != nil {
+		t.Fatalf("HookPathFor: %v", err)
+	}
+	if _, err := os.Stat(postCommitPath); err != nil {
+		t.Errorf("post-commit hook should survive post-merge uninstall: %v", err)
+	}
+}
+
+func TestInstallHook_RejectsUnsupportedHook(t *testing.T) {
+	repo := initRepo(t)
+	if _, err := InstallHook(repo, "pre-push", InstallOpts{RegenMermaid: true}); err == nil {
+		t.Fatal("expected error for unsupported hook pre-push")
+	}
+}
+
 func TestHookPath_HonoursCoreHooksPath(t *testing.T) {
 	repo := initRepo(t)
 	customHooks := filepath.Join(repo, "custom-hooks")

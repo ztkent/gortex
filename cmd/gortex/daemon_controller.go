@@ -14,6 +14,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/zzet/gortex/internal/churn"
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/daemon"
 	"github.com/zzet/gortex/internal/graph"
@@ -110,6 +111,66 @@ func (c *realController) Track(ctx context.Context, p daemon.TrackParams) (json.
 		"node_count": result.NodeCount,
 		"edge_count": result.EdgeCount,
 	})
+}
+
+// EnrichChurn runs the churn enricher in-process against the daemon's
+// graph. We hold c.mu for the duration so a concurrent Track/Untrack
+// can't reshape the set of files while the enricher walks them. The
+// caller (CLI / git hook) picks the params; an empty Path means "every
+// tracked repo", an empty Branch means "resolve each repo's default
+// branch from its working tree".
+func (c *realController) EnrichChurn(ctx context.Context, p daemon.EnrichChurnParams) (daemon.EnrichChurnResult, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.graph == nil {
+		return daemon.EnrichChurnResult{}, fmt.Errorf("graph not initialized")
+	}
+	if c.multiIndexer == nil {
+		return daemon.EnrichChurnResult{}, fmt.Errorf("multi-repo indexer not initialized")
+	}
+
+	// Resolve the set of repo roots the call targets. Empty Path =
+	// every tracked repo. A path or prefix narrows to one.
+	type target struct {
+		prefix string
+		root   string
+	}
+	var targets []target
+	want := strings.TrimSpace(p.Path)
+	for prefix, meta := range c.multiIndexer.AllMetadata() {
+		if want != "" && want != prefix && want != meta.RootPath {
+			continue
+		}
+		targets = append(targets, target{prefix: prefix, root: meta.RootPath})
+	}
+	if len(targets) == 0 {
+		return daemon.EnrichChurnResult{}, fmt.Errorf("no tracked repo matches %q", p.Path)
+	}
+
+	started := time.Now()
+	var combined daemon.EnrichChurnResult
+	for _, t := range targets {
+		branch := strings.TrimSpace(p.Branch)
+		if branch == "" {
+			branch = gitDefaultBranch(t.root)
+		}
+		if branch == "" {
+			c.logger.Warn("enrich churn: no default branch resolved",
+				zap.String("prefix", t.prefix), zap.String("root", t.root))
+			continue
+		}
+		res, err := churn.EnrichGraph(ctx, c.graph, t.root, churn.Options{Branch: branch})
+		if err != nil {
+			return daemon.EnrichChurnResult{}, fmt.Errorf("enrich %s: %w", t.prefix, err)
+		}
+		combined.Files += res.Files
+		combined.Symbols += res.Symbols
+		combined.Branch = res.Branch
+		combined.HeadSHA = res.HeadSHA
+	}
+	combined.DurationMS = time.Since(started).Milliseconds()
+	return combined, nil
 }
 
 // Untrack evicts a repo from the graph and drops it from config.

@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/zzet/gortex/internal/churn"
 	"github.com/zzet/gortex/internal/indexer"
 )
 
@@ -50,3 +51,12 @@ func gitBranch(dir string) string {
 func canonicalRepo(dir string) string {
 	return indexer.ResolveWorktree(dir).MainRepoPath
 }
+
+// gitDefaultBranch returns the repository's default branch as a
+// rev-parseable reference. Thin wrapper over churn.DefaultBranch so
+// the CLI, daemon controller, and MCP tool resolve the same branch
+// the same way.
+func gitDefaultBranch(dir string) string {
+	return churn.DefaultBranch(dir)
+}
+

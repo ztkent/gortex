@@ -91,6 +91,11 @@ const (
 	ControlStatus        = "status"
 	ControlShutdown      = "shutdown"
 	ControlSearchSymbols = "search_symbols"
+	// ControlEnrichChurn dispatches to Controller.EnrichChurn — the daemon
+	// runs the churn enricher against its in-process graph so the CLI
+	// (and the post-commit / post-merge git hooks) don't have to fight
+	// the LadyBug write lock the daemon holds.
+	ControlEnrichChurn = "enrich_churn"
 )
 
 // TrackParams is the payload for ControlTrack.
@@ -237,6 +242,29 @@ type SymbolHit struct {
 // successful ControlSearchSymbols call.
 type SearchSymbolsResult struct {
 	Hits []SymbolHit `json:"hits"`
+}
+
+// EnrichChurnParams is the payload for ControlEnrichChurn.
+//
+// Path scopes the enrichment to a single tracked repo (matched by
+// prefix, abs path, or "" for "every tracked repo"). Branch overrides
+// the default-branch resolution — pass "origin/main" / "main" / a tag
+// / a SHA. Empty Branch means the daemon picks the default branch
+// from each repo's working tree.
+type EnrichChurnParams struct {
+	Path   string `json:"path,omitempty"`
+	Branch string `json:"branch,omitempty"`
+}
+
+// EnrichChurnResult is the payload returned under Result for a
+// successful ControlEnrichChurn call. Counts are summed across every
+// repo that participated (typically one).
+type EnrichChurnResult struct {
+	Files      int    `json:"files"`
+	Symbols    int    `json:"symbols"`
+	Branch     string `json:"branch"`
+	HeadSHA    string `json:"head_sha"`
+	DurationMS int64  `json:"duration_ms"`
 }
 
 // TrackedRepoStatus is one row in StatusResponse.TrackedRepos.
