@@ -1084,6 +1084,38 @@ func (g *Graph) CommunityCrossingsByKind(kinds []EdgeKind, nodeToComm map[string
 	return out
 }
 
+// NodeIDsByKinds is the in-memory reference implementation of the
+// NodeIDsByKinds capability. Single AllNodes pass with a kind-set
+// filter, deduped on input — same algorithm as NodesByKinds but
+// returns only the ID column. The disk-backend win is the projection
+// drop, not the algorithmic shape.
+func (g *Graph) NodeIDsByKinds(kinds []NodeKind) []string {
+	if len(kinds) == 0 {
+		return nil
+	}
+	seen := make(map[NodeKind]struct{}, len(kinds))
+	for _, k := range kinds {
+		if k == "" {
+			continue
+		}
+		seen[k] = struct{}{}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	var out []string
+	for _, n := range g.AllNodes() {
+		if n == nil {
+			continue
+		}
+		if _, ok := seen[n.Kind]; !ok {
+			continue
+		}
+		out = append(out, n.ID)
+	}
+	return out
+}
+
 // EdgeKindCounts is the in-memory reference implementation of the
 // EdgeKindCounter capability. One AllEdges scan with a per-kind
 // tally — the exact loop the get_surprising_connections Go fallback

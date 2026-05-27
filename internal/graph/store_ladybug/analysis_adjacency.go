@@ -13,6 +13,7 @@ import (
 var (
 	_ graph.EdgeAdjacencyForKinds    = (*Store)(nil)
 	_ graph.CommunityCrossingsByKind = (*Store)(nil)
+	_ graph.NodeIDsByKinds           = (*Store)(nil)
 )
 
 // EdgeAdjacencyForKinds returns (from, to) id pairs for every edge
@@ -110,6 +111,39 @@ RETURN a.id, b.id`
 	}
 	if len(out) == 0 {
 		return nil
+	}
+	return out
+}
+
+// NodeIDsByKinds returns the IDs of every node whose Kind is in the
+// supplied set. Identical filter shape to NodesByKinds, but ships
+// only the id column — one C string per row instead of ~10. On the
+// gortex workspace the betweenness/hotspots candidate set is ~4k
+// rows; the projection cuts the cgo string-alloc count by an order
+// of magnitude per call.
+func (s *Store) NodeIDsByKinds(kinds []graph.NodeKind) []string {
+	if len(kinds) == 0 {
+		return nil
+	}
+	allowed := nodeKindSliceToAny(dedupeNodeKinds(kinds))
+	if len(allowed) == 0 {
+		return nil
+	}
+	const q = `MATCH (n:Node) WHERE n.kind IN $kinds RETURN n.id`
+	rows := s.querySelect(q, map[string]any{"kinds": allowed})
+	if len(rows) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(rows))
+	for _, r := range rows {
+		if len(r) < 1 {
+			continue
+		}
+		id, _ := r[0].(string)
+		if id == "" {
+			continue
+		}
+		out = append(out, id)
 	}
 	return out
 }

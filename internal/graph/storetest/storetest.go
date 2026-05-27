@@ -89,6 +89,7 @@ func RunConformance(t *testing.T, factory Factory) {
 	t.Run("ThrowerErrorSurfacer", func(t *testing.T) { testThrowerErrorSurfacer(t, factory) })
 	t.Run("EdgeAdjacencyForKinds", func(t *testing.T) { testEdgeAdjacencyForKinds(t, factory) })
 	t.Run("CommunityCrossingsByKind", func(t *testing.T) { testCommunityCrossingsByKind(t, factory) })
+	t.Run("NodeIDsByKinds", func(t *testing.T) { testNodeIDsByKinds(t, factory) })
 }
 
 // -- fixture helpers ---------------------------------------------------
@@ -2634,5 +2635,58 @@ func testCommunityCrossingsByKind(t *testing.T, factory Factory) {
 	// Kind absent from graph yields nil.
 	if r := scan.CommunityCrossingsByKind([]graph.EdgeKind{graph.EdgeKind("nonexistent")}, communities); r != nil {
 		t.Fatalf("CommunityCrossingsByKind(nonexistent) = %v, want nil", r)
+	}
+}
+
+// testNodeIDsByKinds exercises the optional graph.NodeIDsByKinds
+// capability. Seeds nodes of several kinds and asserts the
+// projection returns just the IDs of the requested kinds, with
+// duplicates collapsed and empty input returning nil.
+func testNodeIDsByKinds(t *testing.T, factory Factory) {
+	t.Helper()
+	s := factory(t)
+	scan, ok := s.(graph.NodeIDsByKinds)
+	if !ok {
+		t.Skip("backend does not implement graph.NodeIDsByKinds")
+	}
+
+	s.AddNode(mkNode("F1", "F1", "x.go", graph.KindFunction))
+	s.AddNode(mkNode("F2", "F2", "x.go", graph.KindFunction))
+	s.AddNode(mkNode("M1", "M1", "x.go", graph.KindMethod))
+	s.AddNode(mkNode("T1", "T1", "y.go", graph.KindType))
+	s.AddNode(mkNode("V1", "V1", "y.go", graph.KindVariable))
+
+	got := scan.NodeIDsByKinds([]graph.NodeKind{graph.KindFunction, graph.KindMethod})
+	sort.Strings(got)
+	want := []string{"F1", "F2", "M1"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("NodeIDsByKinds(Function,Method) = %v, want %v", got, want)
+	}
+
+	// Empty kinds returns nil.
+	if r := scan.NodeIDsByKinds(nil); r != nil {
+		t.Fatalf("NodeIDsByKinds(nil) = %v, want nil", r)
+	}
+	if r := scan.NodeIDsByKinds([]graph.NodeKind{}); r != nil {
+		t.Fatalf("NodeIDsByKinds(empty) = %v, want nil", r)
+	}
+
+	// Blank kinds are elided.
+	if r := scan.NodeIDsByKinds([]graph.NodeKind{"", ""}); r != nil {
+		t.Fatalf("NodeIDsByKinds(blank) = %v, want nil", r)
+	}
+
+	// Duplicates collapse — the IN-list must dedupe.
+	dup := scan.NodeIDsByKinds([]graph.NodeKind{graph.KindFunction, graph.KindFunction})
+	sort.Strings(dup)
+	wantDup := []string{"F1", "F2"}
+	if fmt.Sprint(dup) != fmt.Sprint(wantDup) {
+		t.Fatalf("NodeIDsByKinds(Function,Function) = %v, want %v", dup, wantDup)
+	}
+
+	// Kinds absent from the graph yield an empty slice (or nil).
+	miss := scan.NodeIDsByKinds([]graph.NodeKind{graph.KindInterface})
+	if len(miss) != 0 {
+		t.Fatalf("NodeIDsByKinds(Interface) = %v, want empty", miss)
 	}
 }

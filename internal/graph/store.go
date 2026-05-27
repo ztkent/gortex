@@ -995,6 +995,24 @@ type CommunityCrossingsByKind interface {
 	CommunityCrossingsByKind(kinds []EdgeKind, nodeToComm map[string]string) map[string]int
 }
 
+// NodeIDsByKinds is an optional capability backends MAY implement
+// to return just the IDs of nodes whose Kind is in the supplied
+// set. Replaces NodesByKinds in ranking paths (betweenness,
+// hotspots) that only need to iterate ids — the full *Node carries
+// ~10 string columns over cgo per row, and the candidate set is
+// thousands of function/method rows, so the projection drops the
+// per-call cgo allocation count by an order of magnitude.
+//
+// Empty kinds returns nil without touching the backend. Duplicated
+// input kinds must NOT duplicate the output — backends MUST dedup
+// the kind set in the IN-list.
+//
+// Optional capability — callers fall back to NodesByKinds when the
+// backend doesn't implement it.
+type NodeIDsByKinds interface {
+	NodeIDsByKinds(kinds []NodeKind) []string
+}
+
 // EdgeKindCounter is an optional capability backends MAY implement
 // to return one row per distinct edge kind with its occurrence
 // count, server-side. Used by handleGetSurprisingConnections to
