@@ -876,9 +876,13 @@ func pyEmitImportNode(filePath, fileID, importPath, alias string, line int, resu
 		Language:  "python",
 		Meta:      meta,
 	})
+	// File → import-node uses EdgeContains (the file contains an
+	// import statement; it doesn't define the imported module).
+	// GetFileSubGraph walks EdgeDefines ∪ EdgeContains to recover the
+	// full file neighbourhood.
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: importNodeID,
-		Kind: graph.EdgeDefines, FilePath: filePath, Line: line,
+		Kind: graph.EdgeContains, FilePath: filePath, Line: line,
 	})
 }
 

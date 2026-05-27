@@ -1459,12 +1459,15 @@ func (e *GoExtractor) emitImport(m parser.QueryResult, filePath, fileID string, 
 		Language:  "go",
 		Meta:      importMeta,
 	})
-	// File → import-node edge (Defines), so get_file_summary picks
-	// it up under the file's children.
+	// File → import-node edge. EdgeContains is the semantic fit (the
+	// file *contains* an import statement; it doesn't *define* the
+	// imported package). The Ladybug-backed GetFileSubGraph walks
+	// EdgeDefines ∪ EdgeContains from the file node to enumerate the
+	// full neighbourhood in one rel-index pass.
 	result.Edges = append(result.Edges, &graph.Edge{
 		From:     fileID,
 		To:       importNodeID,
-		Kind:     graph.EdgeDefines,
+		Kind:     graph.EdgeContains,
 		FilePath: filePath,
 		Line:     line,
 	})

@@ -803,9 +803,14 @@ func (e *TypeScriptExtractor) emitImport(m parser.QueryResult, filePath, fileID 
 		Language:  "typescript",
 		Meta:      importMeta,
 	})
+	// File → import-node uses EdgeContains (the file contains the
+	// import statement; it doesn't define the imported module). The
+	// resolver-facing file → unresolved::import path stays on
+	// EdgeImports unchanged — that's a file-to-file dependency, a
+	// different relationship.
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: importNodeID,
-		Kind: graph.EdgeDefines, FilePath: filePath, Line: line,
+		Kind: graph.EdgeContains, FilePath: filePath, Line: line,
 	})
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: "unresolved::import::" + importPath,

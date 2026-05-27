@@ -3,8 +3,19 @@ package graph
 type EdgeKind string
 
 const (
-	EdgeImports      EdgeKind = "imports"
-	EdgeDefines      EdgeKind = "defines"
+	EdgeImports EdgeKind = "imports"
+	// EdgeContains links a file node to its non-symbol children — import
+	// nodes today, and a natural home for future side-band kinds
+	// (todos, fixtures) that "belong to" a file without being defined
+	// by it. EdgeDefines is the wrong fit for these because the file
+	// does not semantically *define* an import; it *contains* the
+	// import statement. Splitting the kinds lets walkers that want
+	// "real definitions" follow EdgeDefines and walkers that want the
+	// full file neighbourhood union both. The Ladybug-backed
+	// GetFileSubGraph relies on this union to fetch every file
+	// neighbour via the rel-table FROM index in one pass.
+	EdgeContains EdgeKind = "contains"
+	EdgeDefines  EdgeKind = "defines"
 	EdgeCalls        EdgeKind = "calls"
 	EdgeInstantiates EdgeKind = "instantiates"
 	EdgeImplements   EdgeKind = "implements"
@@ -622,7 +633,7 @@ func DefaultOriginFor(kind EdgeKind, confidence float64, semanticSource string) 
 	}
 	// Structural AST edges are unambiguous by construction.
 	switch kind {
-	case EdgeDefines, EdgeImports, EdgeExtends, EdgeMemberOf,
+	case EdgeDefines, EdgeImports, EdgeContains, EdgeExtends, EdgeMemberOf,
 		EdgeImplements, EdgeProvides, EdgeConsumes, EdgeMatches,
 		// Coverage structural edges: the extractor produces an
 		// unambiguous source→target binding for each, so they share
@@ -673,7 +684,7 @@ func DefaultOriginFor(kind EdgeKind, confidence float64, semanticSource string) 
 func ConfidenceLabelFor(kind EdgeKind, confidence float64) string {
 	// Structural edges from AST are always extracted.
 	switch kind {
-	case EdgeDefines, EdgeImports, EdgeExtends, EdgeMemberOf, EdgeImplements,
+	case EdgeDefines, EdgeImports, EdgeContains, EdgeExtends, EdgeMemberOf, EdgeImplements,
 		EdgeProvides, EdgeConsumes, EdgeMatches,
 		EdgeParamOf, EdgeAliases, EdgeComposes, EdgeOverrides, EdgeLicensedAs,
 		EdgeOwns, EdgeAuthored, EdgeGeneratedBy, EdgeDependsOnModule,
