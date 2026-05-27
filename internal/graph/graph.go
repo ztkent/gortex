@@ -2827,3 +2827,343 @@ func (g *Graph) CrossRepoCandidates(baseKinds []EdgeKind) []CrossRepoCandidateRo
 	}
 	return out
 }
+
+// ExtractCandidates is the in-memory reference implementation of
+// ExtractCandidatesScanner. Walks NodesByKind for function + method,
+// applies the threshold gates locally, and counts distinct in-edge
+// From / out-edge To values restricted to the requested edge kinds.
+func (g *Graph) ExtractCandidates(
+	kinds []EdgeKind,
+	minLines, minCallers, minFanOut int,
+	pathPrefix string,
+) []ExtractCandidateRow {
+	if len(kinds) == 0 {
+		return nil
+	}
+	kset := make(map[EdgeKind]struct{}, len(kinds))
+	for _, k := range kinds {
+		if k == "" {
+			continue
+		}
+		kset[k] = struct{}{}
+	}
+	if len(kset) == 0 {
+		return nil
+	}
+	var out []ExtractCandidateRow
+	for _, n := range g.NodesByKinds([]NodeKind{KindFunction, KindMethod}) {
+		if n == nil {
+			continue
+		}
+		if pathPrefix != "" && !strings.HasPrefix(n.FilePath, pathPrefix) {
+			continue
+		}
+		if n.StartLine == 0 || n.EndLine == 0 {
+			continue
+		}
+		lineCount := n.EndLine - n.StartLine + 1
+		if lineCount < minLines {
+			continue
+		}
+		callerSet := make(map[string]struct{})
+		for _, e := range g.GetInEdges(n.ID) {
+			if e == nil {
+				continue
+			}
+			if _, ok := kset[e.Kind]; !ok {
+				continue
+			}
+			callerSet[e.From] = struct{}{}
+		}
+		if len(callerSet) < minCallers {
+			continue
+		}
+		calleeSet := make(map[string]struct{})
+		for _, e := range g.GetOutEdges(n.ID) {
+			if e == nil {
+				continue
+			}
+			if _, ok := kset[e.Kind]; !ok {
+				continue
+			}
+			calleeSet[e.To] = struct{}{}
+		}
+		if len(calleeSet) < minFanOut {
+			continue
+		}
+		out = append(out, ExtractCandidateRow{
+			NodeID:      n.ID,
+			Name:        n.Name,
+			FilePath:    n.FilePath,
+			StartLine:   n.StartLine,
+			EndLine:     n.EndLine,
+			LineCount:   lineCount,
+			CallerCount: len(callerSet),
+			FanOut:      len(calleeSet),
+		})
+	}
+	return out
+}
+
+// FileSymbolNamesByPaths is the in-memory reference implementation of
+// the FileSymbolNamesByPaths capability. Walks GetFileNodes for every
+// input path, keeps the requested kinds, and emits one row per
+// (path, name) pair. Duplicates within a file collapse to a single
+// row (a method declared once per file emits once regardless of how
+// many times the indexer touched it).
+func (g *Graph) FileSymbolNamesByPaths(paths []string, kinds []NodeKind) []FileSymbolNameRow {
+	if len(paths) == 0 {
+		return nil
+	}
+	kset := make(map[NodeKind]struct{}, len(kinds))
+	for _, k := range kinds {
+		if k == "" {
+			continue
+		}
+		kset[k] = struct{}{}
+	}
+	seen := make(map[string]struct{})
+	dedupKey := func(p, name string) string { return p + "\x00" + name }
+	var out []FileSymbolNameRow
+	for _, p := range paths {
+		if p == "" {
+			continue
+		}
+		for _, n := range g.GetFileNodes(p) {
+			if n == nil || n.Name == "" {
+				continue
+			}
+			if len(kset) > 0 {
+				if _, ok := kset[n.Kind]; !ok {
+					continue
+				}
+			}
+			k := dedupKey(p, n.Name)
+			if _, ok := seen[k]; ok {
+				continue
+			}
+			seen[k] = struct{}{}
+			out = append(out, FileSymbolNameRow{FilePath: p, Name: n.Name})
+		}
+	}
+	return out
+}
+
+// ClassHierarchyTraverse is the in-memory reference implementation of
+// ClassHierarchyTraverser. Performs the same BFS as
+// query.ClassHierarchy, but stops at the kind/depth gates and returns
+// the full Path + EdgeKinds for each terminal node reached so the
+// disk backend's Cypher variable-length match can be a drop-in
+// replacement. Direction "up" follows out-edges; "down" follows
+// in-edges.
+func (g *Graph) ClassHierarchyTraverse(
+	seedID string,
+	direction string,
+	kinds []EdgeKind,
+	depth int,
+) []ClassHierarchyRow {
+	if seedID == "" || depth <= 0 || len(kinds) == 0 {
+		return nil
+	}
+	kset := make(map[EdgeKind]struct{}, len(kinds))
+	for _, k := range kinds {
+		if k == "" {
+			continue
+		}
+		kset[k] = struct{}{}
+	}
+	if len(kset) == 0 {
+		return nil
+	}
+	if g.GetNode(seedID) == nil {
+		return nil
+	}
+	walkUp := direction == "up"
+	walkDown := direction == "down"
+	if !walkUp && !walkDown {
+		return nil
+	}
+	type queued struct {
+		id         string
+		path       []string
+		edgeKinds  []EdgeKind
+		hops       int
+	}
+	visited := map[string]struct{}{seedID: {}}
+	queue := []queued{{id: seedID, path: nil, edgeKinds: nil, hops: 0}}
+	var out []ClassHierarchyRow
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		if cur.hops >= depth {
+			continue
+		}
+		var edges []*Edge
+		if walkUp {
+			edges = g.GetOutEdges(cur.id)
+		} else {
+			edges = g.GetInEdges(cur.id)
+		}
+		for _, e := range edges {
+			if e == nil {
+				continue
+			}
+			if _, ok := kset[e.Kind]; !ok {
+				continue
+			}
+			var nb string
+			if walkUp {
+				nb = e.To
+			} else {
+				nb = e.From
+			}
+			if nb == "" {
+				continue
+			}
+			if _, ok := visited[nb]; ok {
+				continue
+			}
+			visited[nb] = struct{}{}
+			newPath := append([]string(nil), cur.path...)
+			newPath = append(newPath, nb)
+			newKinds := append([]EdgeKind(nil), cur.edgeKinds...)
+			newKinds = append(newKinds, e.Kind)
+			out = append(out, ClassHierarchyRow{
+				Path:      newPath,
+				EdgeKinds: newKinds,
+			})
+			queue = append(queue, queued{id: nb, path: newPath, edgeKinds: newKinds, hops: cur.hops + 1})
+		}
+	}
+	return out
+}
+
+// FileEditingContext is the in-memory reference implementation of the
+// FileEditingContext capability. Performs the equivalent of
+// GetFileSymbols + per-function GetCallers/GetCallChain but bounded
+// to the call/method node set, so the disk backend's batched query
+// returns the same projection. The kinds parameter is the set of
+// kinds treated as call targets (function + method).
+func (g *Graph) FileEditingContext(filePath string, kinds []NodeKind) *FileEditingContextResult {
+	if filePath == "" {
+		return nil
+	}
+	nodes := g.GetFileNodes(filePath)
+	if len(nodes) == 0 {
+		return nil
+	}
+	kset := make(map[NodeKind]struct{}, len(kinds))
+	for _, k := range kinds {
+		if k == "" {
+			continue
+		}
+		kset[k] = struct{}{}
+	}
+	res := &FileEditingContextResult{}
+	var fileNodeID string
+	var defNodeIDs []string
+	for _, n := range nodes {
+		if n == nil {
+			continue
+		}
+		if n.Kind == KindFile {
+			res.FileNode = n
+			fileNodeID = n.ID
+			continue
+		}
+		res.Defines = append(res.Defines, n)
+		if _, ok := kset[n.Kind]; ok {
+			defNodeIDs = append(defNodeIDs, n.ID)
+		}
+	}
+	if fileNodeID != "" {
+		for _, e := range g.GetOutEdges(fileNodeID) {
+			if e == nil {
+				continue
+			}
+			if e.Kind == EdgeImports {
+				res.Imports = append(res.Imports, e)
+			}
+		}
+	}
+	if len(defNodeIDs) == 0 {
+		return res
+	}
+	inEdges := g.GetInEdgesByNodeIDs(defNodeIDs)
+	outEdges := g.GetOutEdgesByNodeIDs(defNodeIDs)
+	callerIDSet := make(map[string]struct{})
+	calleeIDSet := make(map[string]struct{})
+	for _, id := range defNodeIDs {
+		for _, e := range inEdges[id] {
+			if e == nil || e.Kind != EdgeCalls {
+				continue
+			}
+			if e.From == "" {
+				continue
+			}
+			callerIDSet[e.From] = struct{}{}
+		}
+		for _, e := range outEdges[id] {
+			if e == nil || e.Kind != EdgeCalls {
+				continue
+			}
+			if e.To == "" {
+				continue
+			}
+			calleeIDSet[e.To] = struct{}{}
+		}
+	}
+	callerIDs := make([]string, 0, len(callerIDSet))
+	for id := range callerIDSet {
+		callerIDs = append(callerIDs, id)
+	}
+	calleeIDs := make([]string, 0, len(calleeIDSet))
+	for id := range calleeIDSet {
+		calleeIDs = append(calleeIDs, id)
+	}
+	callerNodes := g.GetNodesByIDs(callerIDs)
+	calleeNodes := g.GetNodesByIDs(calleeIDs)
+	for _, id := range callerIDs {
+		n := callerNodes[id]
+		if n == nil || n.FilePath == filePath {
+			continue
+		}
+		res.CalledBy = append(res.CalledBy, n)
+	}
+	for _, id := range calleeIDs {
+		n := calleeNodes[id]
+		if n == nil || n.FilePath == filePath {
+			continue
+		}
+		res.Calls = append(res.Calls, n)
+	}
+	return res
+}
+
+// NodeDegreeByKinds is the in-memory reference implementation of the
+// NodeDegreeByKinds capability. Walks NodesByKinds and reads each
+// node's in/out edge buckets — the disk backend overrides with one
+// kind-filtered aggregation per direction so the IN-list of node IDs
+// the legacy NodeDegreeCounts path needed is avoided altogether.
+func (g *Graph) NodeDegreeByKinds(kinds []NodeKind, pathPrefix string) []NodeDegreeRow {
+	if len(kinds) == 0 {
+		return nil
+	}
+	pool := g.NodesByKinds(kinds)
+	out := make([]NodeDegreeRow, 0, len(pool))
+	for _, n := range pool {
+		if n == nil {
+			continue
+		}
+		if pathPrefix != "" && !strings.HasPrefix(n.FilePath, pathPrefix) {
+			continue
+		}
+		out = append(out, NodeDegreeRow{
+			NodeID:   n.ID,
+			InCount:  len(g.GetInEdges(n.ID)),
+			OutCount: len(g.GetOutEdges(n.ID)),
+		})
+	}
+	return out
+}
+

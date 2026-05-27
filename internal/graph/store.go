@@ -1289,3 +1289,172 @@ type CrossRepoCandidateRow struct {
 type CrossRepoCandidates interface {
 	CrossRepoCandidates(baseKinds []EdgeKind) []CrossRepoCandidateRow
 }
+
+// ExtractCandidateRow is one tuple returned by ExtractCandidatesScanner.
+// Caller / FanOut counts are distinct-by-endpoint (one caller counted
+// once per (From, kind) pair, one callee counted once per (To, kind)
+// pair) restricted to the call-like edge kinds the consumer cares
+// about. LineCount is EndLine - StartLine + 1; rows whose StartLine or
+// EndLine is zero are filtered server-side.
+type ExtractCandidateRow struct {
+	NodeID      string
+	Name        string
+	FilePath    string
+	StartLine   int
+	EndLine     int
+	LineCount   int
+	CallerCount int
+	FanOut      int
+}
+
+// ExtractCandidatesScanner is an optional capability backends MAY
+// implement to compute the get_extraction_candidates ranking in two
+// Cypher round-trips (per-node caller-count and fan-out aggregation
+// joined to the node table). Replaces the AllNodes() scan + per-node
+// GetInEdges / GetOutEdges loop the handler used previously — on the
+// gortex workspace that was ~30k node × 2 cgo trips per call, where
+// each trip materialised the full edge bucket just to count
+// distinct endpoints. The capability instead runs the count
+// (DISTINCT-by-endpoint) inside the engine and ships only the rows
+// that satisfy the three threshold gates.
+//
+// Empty kinds yields nothing — the handler always passes a non-empty
+// set (EdgeCalls + EdgeCrossRepoCalls). pathPrefix narrows the scan to
+// nodes under that file-path prefix; empty matches every path. The
+// returned rows mirror the result of the Go-side loop verbatim:
+// thresholds applied, line_count = EndLine - StartLine + 1.
+//
+// Optional capability — handleGetExtractionCandidates falls back to
+// the AllNodes scan when the backend doesn't implement it.
+type ExtractCandidatesScanner interface {
+	ExtractCandidates(
+		kinds []EdgeKind,
+		minLines, minCallers, minFanOut int,
+		pathPrefix string,
+	) []ExtractCandidateRow
+}
+
+// FileSymbolNameRow is one tuple returned by FileSymbolNamesByPaths.
+// FilePath echoes the input slot; Name is one symbol name observed in
+// the file (function / method / type / interface kinds only, matching
+// symbolNamesInFile's Go-side filter). One file may produce many rows.
+type FileSymbolNameRow struct {
+	FilePath string
+	Name     string
+}
+
+// FileSymbolNamesByPaths is an optional capability backends MAY
+// implement to fetch the sorted distinct (file → function/method/type
+// names) projection for a slice of file paths in one backend round-
+// trip. Replaces the per-file GetFileNodes loop find_co_changing_symbols
+// runs after a positive cochange match: 20 result rows × one
+// `MATCH (n {file_path: $p})` query each on Ladybug. The capability
+// runs a single `WHERE n.file_path IN $paths AND n.kind IN $kinds`
+// query and ships one row per (file, name).
+//
+// Empty paths returns nil — never a whole-table scan. Rows for paths
+// with no qualifying symbols are absent from the result; callers
+// always index by file path and treat missing keys as "no names".
+//
+// Optional capability — symbolNamesInFile and its callers fall back to
+// the per-file GetFileNodes loop when the backend doesn't implement
+// it.
+type FileSymbolNamesByPaths interface {
+	FileSymbolNamesByPaths(paths []string, kinds []NodeKind) []FileSymbolNameRow
+}
+
+// ClassHierarchyRow is one tuple returned by ClassHierarchyTraverser.
+// Path carries the node IDs visited from the seed (exclusive of the
+// seed) out to the terminal node, in BFS order. EdgeKinds carries the
+// per-hop edge kind so the caller can reconstruct the *Edge values.
+// For a single hop Path has one element and EdgeKinds has one element;
+// for a depth-N walk both slices have length N.
+type ClassHierarchyRow struct {
+	Path      []string
+	EdgeKinds []EdgeKind
+}
+
+// ClassHierarchyTraverser is an optional capability backends MAY
+// implement to compute the inheritance subgraph rooted at a seed in
+// one (or two — up + down) Cypher variable-length traversals, server-
+// side. Replaces the BFS in query.ClassHierarchy: each frontier node
+// fired GetNode + GetInEdges or GetOutEdges per visit on Ladybug, so a
+// depth-5 walk over an interface with a wide implementer set burned
+// hundreds of cgo round-trips just to discover ~50 edges.
+//
+// kinds is the edge-kind set the walk consumes (EdgeExtends +
+// EdgeImplements + EdgeComposes + EdgeOverrides). depth caps the hop
+// budget. direction:
+//   - "up"   — follow outgoing edges from each frontier node.
+//   - "down" — follow incoming edges into each frontier node.
+//
+// Empty kinds / depth <= 0 / unknown seed returns nil. The returned
+// rows are deduplicated by (Path[-1], last EdgeKind) — the consumer
+// reconstructs the visited node set and the edge list from them.
+//
+// Optional capability — query.ClassHierarchy falls back to the BFS
+// when the backend doesn't implement it.
+type ClassHierarchyTraverser interface {
+	ClassHierarchyTraverse(
+		seedID string,
+		direction string,
+		kinds []EdgeKind,
+		depth int,
+	) []ClassHierarchyRow
+}
+
+// FileEditingContext is an optional capability backends MAY
+// implement to return the get_editing_context payload (defines +
+// imports + 1-hop callers + 1-hop callees, all for one file) in a
+// small fixed number of Cypher round-trips. Replaces the handler's
+// per-symbol GetCallers / GetCallChain loop — for a file with 30
+// functions that fired 60 query-engine entry points on Ladybug.
+//
+// kinds is the set of node kinds the caller treats as call-targets
+// (KindFunction + KindMethod). The capability returns FileNode (the
+// file row), Defines (every non-file node anchored to the path,
+// signature carried through Meta), Imports (the EdgeImports out-edges
+// of the file node), CalledBy (one-hop callers of any defines node,
+// filtered to symbols outside the file), and Calls (one-hop callees of
+// any defines node, filtered to symbols outside the file). All five
+// projections are scoped to the input file in one round-trip each.
+//
+// Optional capability — handleGetEditingContext falls back to the
+// per-symbol loop when the backend doesn't implement it.
+type FileEditingContextResult struct {
+	FileNode *Node
+	Defines  []*Node
+	Imports  []*Edge
+	CalledBy []*Node
+	Calls    []*Node
+}
+
+type FileEditingContext interface {
+	FileEditingContext(filePath string, kinds []NodeKind) *FileEditingContextResult
+}
+
+// NodeDegreeByKinds is an optional capability backends MAY implement
+// to return per-node total in/out edge counts for every node whose
+// kind is in the supplied set, server-side. Replaces the
+// get_knowledge_gaps pattern of "give me all functions, then ask for
+// their in/out degree" — on Ladybug that fed an IN-list of ~30k node
+// IDs to the NodeDegreeCounts query, which has to compare every node
+// against the list. The capability instead matches kinds at the
+// source and groups by node — one Cypher per direction with a kind
+// predicate the planner can index.
+//
+// pathPrefix narrows the scan to nodes under that file-path prefix;
+// empty matches every path. Empty kinds returns nil (never a whole-
+// graph scan).
+//
+// The returned rows mirror NodeDegreeRow's shape but UsageInCount is
+// always 0 — knowledge_gaps does not need the usage subset, only the
+// total degree. Adding the usage filter back would re-tie the
+// capability to ClassifyZeroEdge's notion of "alive" without buying
+// any other call site.
+//
+// Optional capability — handleGetKnowledgeGaps falls back to the
+// NodeDegreeCounts IN-list when the backend doesn't implement it.
+type NodeDegreeByKinds interface {
+	NodeDegreeByKinds(kinds []NodeKind, pathPrefix string) []NodeDegreeRow
+}

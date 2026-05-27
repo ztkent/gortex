@@ -93,6 +93,11 @@ func RunConformance(t *testing.T, factory Factory) {
 	t.Run("MemberMethodsByType", func(t *testing.T) { testMemberMethodsByType(t, factory) })
 	t.Run("StructuralParentEdges", func(t *testing.T) { testStructuralParentEdges(t, factory) })
 	t.Run("CrossRepoCandidates", func(t *testing.T) { testCrossRepoCandidates(t, factory) })
+	t.Run("ExtractCandidates", func(t *testing.T) { testExtractCandidates(t, factory) })
+	t.Run("FileSymbolNamesByPaths", func(t *testing.T) { testFileSymbolNamesByPaths(t, factory) })
+	t.Run("ClassHierarchyTraverser", func(t *testing.T) { testClassHierarchyTraverser(t, factory) })
+	t.Run("FileEditingContext", func(t *testing.T) { testFileEditingContext(t, factory) })
+	t.Run("NodeDegreeByKinds", func(t *testing.T) { testNodeDegreeByKinds(t, factory) })
 }
 
 // -- fixture helpers ---------------------------------------------------
@@ -2878,5 +2883,356 @@ func testCrossRepoCandidates(t *testing.T, factory Factory) {
 	// Empty kinds returns nil — never a whole-table scan.
 	if r := scan.CrossRepoCandidates(nil); r != nil {
 		t.Fatalf("CrossRepoCandidates(nil) = %v, want nil", r)
+	}
+}
+
+// testExtractCandidates exercises the optional
+// graph.ExtractCandidatesScanner capability. Builds a graph with
+// three functions:
+//   - Long+Hot:   long body, 3 distinct callers, 6 distinct callees
+//     (passes every threshold).
+//   - Long+Cold:  long body, 1 caller, 6 callees (fails minCallers).
+//   - Short+Hot:  short body, 3 callers, 6 callees (fails minLines).
+func testExtractCandidates(t *testing.T, factory Factory) {
+	t.Helper()
+	s := factory(t)
+	scan, ok := s.(graph.ExtractCandidatesScanner)
+	if !ok {
+		t.Skip("backend does not implement graph.ExtractCandidatesScanner")
+	}
+
+	mk := func(id string, kind graph.NodeKind, start, end int) *graph.Node {
+		n := mkNode(id, id, "p/a.go", kind)
+		n.StartLine = start
+		n.EndLine = end
+		return n
+	}
+	s.AddNode(mk("LongHot", graph.KindFunction, 1, 60))
+	s.AddNode(mk("LongCold", graph.KindFunction, 100, 160))
+	s.AddNode(mk("ShortHot", graph.KindFunction, 200, 205))
+	// Callers + callees as plain function nodes.
+	for i := 0; i < 6; i++ {
+		c := mkNode(fmt.Sprintf("C%d", i), fmt.Sprintf("C%d", i), "p/c.go", graph.KindFunction)
+		s.AddNode(c)
+		t := mkNode(fmt.Sprintf("T%d", i), fmt.Sprintf("T%d", i), "p/t.go", graph.KindFunction)
+		s.AddNode(t)
+	}
+	// LongHot: 3 distinct callers, 6 distinct callees.
+	for i := 0; i < 3; i++ {
+		e := mkEdge(fmt.Sprintf("C%d", i), "LongHot", graph.EdgeCalls)
+		e.Line = i + 1
+		s.AddEdge(e)
+	}
+	for i := 0; i < 6; i++ {
+		e := mkEdge("LongHot", fmt.Sprintf("T%d", i), graph.EdgeCalls)
+		e.Line = 100 + i
+		s.AddEdge(e)
+	}
+	// LongCold: 1 caller, 6 callees.
+	e := mkEdge("C0", "LongCold", graph.EdgeCalls)
+	e.Line = 200
+	s.AddEdge(e)
+	for i := 0; i < 6; i++ {
+		e := mkEdge("LongCold", fmt.Sprintf("T%d", i), graph.EdgeCalls)
+		e.Line = 300 + i
+		s.AddEdge(e)
+	}
+	// ShortHot: 3 callers, 6 callees but too short.
+	for i := 0; i < 3; i++ {
+		e := mkEdge(fmt.Sprintf("C%d", i), "ShortHot", graph.EdgeCalls)
+		e.Line = 400 + i
+		s.AddEdge(e)
+	}
+	for i := 0; i < 6; i++ {
+		e := mkEdge("ShortHot", fmt.Sprintf("T%d", i), graph.EdgeCalls)
+		e.Line = 500 + i
+		s.AddEdge(e)
+	}
+
+	rows := scan.ExtractCandidates(
+		[]graph.EdgeKind{graph.EdgeCalls},
+		20, // minLines
+		2,  // minCallers
+		5,  // minFanOut
+		"", // no prefix
+	)
+	byID := make(map[string]graph.ExtractCandidateRow)
+	for _, r := range rows {
+		byID[r.NodeID] = r
+	}
+	r, ok := byID["LongHot"]
+	if !ok {
+		t.Fatalf("expected LongHot in result, got %v", rows)
+	}
+	if r.CallerCount != 3 || r.FanOut != 6 || r.LineCount != 60 {
+		t.Fatalf("LongHot row mismatch: %+v", r)
+	}
+	if _, present := byID["LongCold"]; present {
+		t.Fatalf("LongCold should have been filtered (caller count < 2)")
+	}
+	if _, present := byID["ShortHot"]; present {
+		t.Fatalf("ShortHot should have been filtered (lines < 20)")
+	}
+
+	// Path prefix narrows to only LongHot (it's the one in p/a.go;
+	// LongCold and ShortHot also are in p/a.go so use a prefix that
+	// doesn't match).
+	none := scan.ExtractCandidates(
+		[]graph.EdgeKind{graph.EdgeCalls}, 20, 2, 5, "no/such/",
+	)
+	if len(none) != 0 {
+		t.Fatalf("ExtractCandidates with non-matching prefix = %d, want 0", len(none))
+	}
+	// Empty kinds returns nil.
+	if r := scan.ExtractCandidates(nil, 0, 0, 0, ""); r != nil {
+		t.Fatalf("ExtractCandidates(nil kinds) = %v, want nil", r)
+	}
+}
+
+// testFileSymbolNamesByPaths exercises the optional
+// graph.FileSymbolNamesByPaths capability.
+func testFileSymbolNamesByPaths(t *testing.T, factory Factory) {
+	t.Helper()
+	s := factory(t)
+	scan, ok := s.(graph.FileSymbolNamesByPaths)
+	if !ok {
+		t.Skip("backend does not implement graph.FileSymbolNamesByPaths")
+	}
+
+	s.AddNode(mkNode("Alpha", "Alpha", "a.go", graph.KindFunction))
+	s.AddNode(mkNode("Beta", "Beta", "a.go", graph.KindType))
+	s.AddNode(mkNode("Gamma", "Gamma", "a.go", graph.KindMethod))
+	s.AddNode(mkNode("LowCardField", "LowCardField", "a.go", graph.KindField))
+	s.AddNode(mkNode("Delta", "Delta", "b.go", graph.KindFunction))
+
+	rows := scan.FileSymbolNamesByPaths(
+		[]string{"a.go", "b.go"},
+		[]graph.NodeKind{graph.KindFunction, graph.KindMethod, graph.KindType, graph.KindInterface},
+	)
+	byFile := make(map[string]map[string]struct{})
+	for _, r := range rows {
+		seen := byFile[r.FilePath]
+		if seen == nil {
+			seen = make(map[string]struct{})
+			byFile[r.FilePath] = seen
+		}
+		seen[r.Name] = struct{}{}
+	}
+	want := map[string]map[string]struct{}{
+		"a.go": {"Alpha": {}, "Beta": {}, "Gamma": {}},
+		"b.go": {"Delta": {}},
+	}
+	for file, names := range want {
+		got := byFile[file]
+		if len(got) != len(names) {
+			t.Fatalf("file %q: got %v, want %v", file, got, names)
+		}
+		for n := range names {
+			if _, ok := got[n]; !ok {
+				t.Errorf("file %q: missing name %q (got %v)", file, n, got)
+			}
+		}
+	}
+	// LowCardField (KindField) must not appear because it's not in
+	// the requested kinds.
+	if _, ok := byFile["a.go"]["LowCardField"]; ok {
+		t.Fatalf("kind filter leaked KindField row")
+	}
+
+	// Empty paths returns nil.
+	if r := scan.FileSymbolNamesByPaths(nil, nil); r != nil {
+		t.Fatalf("FileSymbolNamesByPaths(nil) = %v, want nil", r)
+	}
+}
+
+// testClassHierarchyTraverser exercises the optional
+// graph.ClassHierarchyTraverser capability.
+func testClassHierarchyTraverser(t *testing.T, factory Factory) {
+	t.Helper()
+	s := factory(t)
+	scan, ok := s.(graph.ClassHierarchyTraverser)
+	if !ok {
+		t.Skip("backend does not implement graph.ClassHierarchyTraverser")
+	}
+
+	s.AddNode(mkNode("Animal", "Animal", "z.go", graph.KindInterface))
+	s.AddNode(mkNode("Dog", "Dog", "z.go", graph.KindType))
+	s.AddNode(mkNode("Puppy", "Puppy", "z.go", graph.KindType))
+	// Dog implements Animal; Puppy extends Dog.
+	e1 := mkEdge("Dog", "Animal", graph.EdgeImplements)
+	e1.Line = 1
+	s.AddEdge(e1)
+	e2 := mkEdge("Puppy", "Dog", graph.EdgeExtends)
+	e2.Line = 2
+	s.AddEdge(e2)
+
+	upRows := scan.ClassHierarchyTraverse(
+		"Puppy", "up",
+		[]graph.EdgeKind{graph.EdgeExtends, graph.EdgeImplements, graph.EdgeComposes},
+		5,
+	)
+	if len(upRows) != 2 {
+		t.Fatalf("Puppy up: %d rows, want 2 (Dog, Animal). rows=%v", len(upRows), upRows)
+	}
+	visited := map[string]bool{}
+	for _, r := range upRows {
+		for _, id := range r.Path {
+			visited[id] = true
+		}
+	}
+	if !visited["Dog"] || !visited["Animal"] {
+		t.Fatalf("Puppy up: missing Dog or Animal in visited set: %v", visited)
+	}
+	downRows := scan.ClassHierarchyTraverse(
+		"Animal", "down",
+		[]graph.EdgeKind{graph.EdgeExtends, graph.EdgeImplements, graph.EdgeComposes},
+		5,
+	)
+	visited = map[string]bool{}
+	for _, r := range downRows {
+		for _, id := range r.Path {
+			visited[id] = true
+		}
+	}
+	if !visited["Dog"] || !visited["Puppy"] {
+		t.Fatalf("Animal down: missing Dog or Puppy in visited set: %v", visited)
+	}
+
+	// Empty kinds / depth=0 / unknown seed must return nil.
+	if r := scan.ClassHierarchyTraverse("Puppy", "up", nil, 5); r != nil {
+		t.Fatalf("nil kinds: got %v", r)
+	}
+	if r := scan.ClassHierarchyTraverse("Puppy", "up",
+		[]graph.EdgeKind{graph.EdgeExtends}, 0); r != nil {
+		t.Fatalf("depth=0: got %v", r)
+	}
+	if r := scan.ClassHierarchyTraverse("nope", "up",
+		[]graph.EdgeKind{graph.EdgeExtends}, 5); r != nil {
+		t.Fatalf("unknown seed: got %v", r)
+	}
+}
+
+// testFileEditingContext exercises the optional
+// graph.FileEditingContext capability.
+func testFileEditingContext(t *testing.T, factory Factory) {
+	t.Helper()
+	s := factory(t)
+	scan, ok := s.(graph.FileEditingContext)
+	if !ok {
+		t.Skip("backend does not implement graph.FileEditingContext")
+	}
+	// File node + two functions inside it; an importing file with one
+	// function that calls into the file; a downstream file with a
+	// function the file's function calls.
+	s.AddNode(mkNode("a.go", "a.go", "a.go", graph.KindFile))
+	s.AddNode(mkNode("a.go::Foo", "Foo", "a.go", graph.KindFunction))
+	s.AddNode(mkNode("a.go::Bar", "Bar", "a.go", graph.KindMethod))
+	s.AddNode(mkNode("b.go", "b.go", "b.go", graph.KindFile))
+	s.AddNode(mkNode("b.go::Caller", "Caller", "b.go", graph.KindFunction))
+	s.AddNode(mkNode("c.go::Callee", "Callee", "c.go", graph.KindFunction))
+
+	// Import edge: a.go imports b.go.
+	e := mkEdge("a.go", "b.go", graph.EdgeImports)
+	e.Line = 1
+	s.AddEdge(e)
+	// Caller in b.go calls Foo in a.go.
+	e = mkEdge("b.go::Caller", "a.go::Foo", graph.EdgeCalls)
+	e.Line = 2
+	s.AddEdge(e)
+	// Foo in a.go calls Callee in c.go.
+	e = mkEdge("a.go::Foo", "c.go::Callee", graph.EdgeCalls)
+	e.Line = 3
+	s.AddEdge(e)
+
+	res := scan.FileEditingContext("a.go", []graph.NodeKind{graph.KindFunction, graph.KindMethod})
+	if res == nil {
+		t.Fatalf("FileEditingContext returned nil for a.go")
+	}
+	if res.FileNode == nil || res.FileNode.ID != "a.go" {
+		t.Fatalf("FileNode missing or wrong: %+v", res.FileNode)
+	}
+	defineIDs := map[string]bool{}
+	for _, n := range res.Defines {
+		defineIDs[n.ID] = true
+	}
+	if !defineIDs["a.go::Foo"] || !defineIDs["a.go::Bar"] {
+		t.Fatalf("defines missing entries: got %v", defineIDs)
+	}
+	if len(res.Imports) != 1 || res.Imports[0].To != "b.go" {
+		t.Fatalf("imports = %v, want one edge a.go→b.go", res.Imports)
+	}
+	calledBy := map[string]bool{}
+	for _, n := range res.CalledBy {
+		calledBy[n.ID] = true
+	}
+	if !calledBy["b.go::Caller"] {
+		t.Fatalf("called_by missing Caller: %v", calledBy)
+	}
+	calls := map[string]bool{}
+	for _, n := range res.Calls {
+		calls[n.ID] = true
+	}
+	if !calls["c.go::Callee"] {
+		t.Fatalf("calls missing Callee: %v", calls)
+	}
+
+	// Empty path returns nil.
+	if r := scan.FileEditingContext("", nil); r != nil {
+		t.Fatalf("empty path: got %v, want nil", r)
+	}
+}
+
+// testNodeDegreeByKinds exercises the optional
+// graph.NodeDegreeByKinds capability.
+func testNodeDegreeByKinds(t *testing.T, factory Factory) {
+	t.Helper()
+	s := factory(t)
+	scan, ok := s.(graph.NodeDegreeByKinds)
+	if !ok {
+		t.Skip("backend does not implement graph.NodeDegreeByKinds")
+	}
+	s.AddNode(mkNode("Iso", "Iso", "pkg/iso.go", graph.KindFunction))
+	s.AddNode(mkNode("Hub", "Hub", "pkg/hub.go", graph.KindFunction))
+	s.AddNode(mkNode("Leaf", "Leaf", "pkg/leaf.go", graph.KindMethod))
+	s.AddNode(mkNode("Other", "Other", "pkg/other.go", graph.KindType))
+	s.AddNode(mkNode("Caller", "Caller", "pkg/caller.go", graph.KindFunction))
+	// 2 incoming + 1 outgoing on Hub.
+	for i, from := range []string{"Caller", "Leaf"} {
+		e := mkEdge(from, "Hub", graph.EdgeCalls)
+		e.Line = i + 1
+		s.AddEdge(e)
+	}
+	e := mkEdge("Hub", "Leaf", graph.EdgeCalls)
+	e.Line = 3
+	s.AddEdge(e)
+
+	rows := scan.NodeDegreeByKinds(
+		[]graph.NodeKind{graph.KindFunction, graph.KindMethod},
+		"",
+	)
+	byID := make(map[string]graph.NodeDegreeRow)
+	for _, r := range rows {
+		byID[r.NodeID] = r
+	}
+	if got := byID["Hub"]; got.InCount != 2 || got.OutCount != 1 {
+		t.Fatalf("Hub: %+v, want in=2 out=1", got)
+	}
+	if got, ok := byID["Iso"]; !ok || got.InCount != 0 || got.OutCount != 0 {
+		t.Fatalf("Iso: ok=%v got=%+v, want in=0 out=0", ok, got)
+	}
+	if _, ok := byID["Other"]; ok {
+		t.Fatalf("Other (KindType) leaked into kind-filtered result")
+	}
+	// Empty kinds returns nil.
+	if r := scan.NodeDegreeByKinds(nil, ""); r != nil {
+		t.Fatalf("NodeDegreeByKinds(nil) = %v, want nil", r)
+	}
+	// Path prefix narrows.
+	rows = scan.NodeDegreeByKinds(
+		[]graph.NodeKind{graph.KindFunction, graph.KindMethod},
+		"pkg/leaf",
+	)
+	if len(rows) != 1 || rows[0].NodeID != "Leaf" {
+		t.Fatalf("pathPrefix scope mismatch: got %v", rows)
 	}
 }
