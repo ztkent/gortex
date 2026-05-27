@@ -20,8 +20,9 @@ var (
 // node, in one Cypher round-trip. Replaces the resolver's
 // EdgesByKind(EdgeMemberOf) + per-edge GetNode(e.From) loop — each
 // per-edge GetNode pulled ~10 string columns + a Meta blob over cgo
-// just to read four scalar fields. The capability ships only the
-// (type_id, method_id, method_name, file_path, start_line) tuple.
+// just to read five scalar fields. The capability ships only the
+// (type_id, method_id, method_name, file_path, start_line,
+// repo_prefix) tuple.
 //
 // Per-type rows are deduplicated by MethodID — a method that appears
 // twice in the EdgeMemberOf bucket (e.g. emitted from a re-index)
@@ -30,7 +31,7 @@ func (s *Store) MemberMethodsByType() map[string][]graph.MemberMethodInfo {
 	const q = `
 MATCH (m:Node)-[e:Edge {kind: 'member_of'}]->(t:Node)
 WHERE m.kind = 'method'
-RETURN t.id, m.id, m.name, m.file_path, m.start_line`
+RETURN t.id, m.id, m.name, m.file_path, m.start_line, m.repo_prefix`
 	rows := s.querySelect(q, nil)
 	if len(rows) == 0 {
 		return nil
@@ -41,7 +42,7 @@ RETURN t.id, m.id, m.name, m.file_path, m.start_line`
 	out := make(map[string][]graph.MemberMethodInfo)
 	seen := make(map[string]map[string]struct{})
 	for _, r := range rows {
-		if len(r) < 5 {
+		if len(r) < 6 {
 			continue
 		}
 		typeID, _ := r[0].(string)
@@ -49,6 +50,7 @@ RETURN t.id, m.id, m.name, m.file_path, m.start_line`
 		methodName, _ := r[2].(string)
 		filePath, _ := r[3].(string)
 		startLine := int(asInt64(r[4]))
+		repoPrefix, _ := r[5].(string)
 		if typeID == "" || methodID == "" {
 			continue
 		}
@@ -62,10 +64,11 @@ RETURN t.id, m.id, m.name, m.file_path, m.start_line`
 		}
 		dedup[methodID] = struct{}{}
 		out[typeID] = append(out[typeID], graph.MemberMethodInfo{
-			MethodID:  methodID,
-			Name:      methodName,
-			FilePath:  filePath,
-			StartLine: startLine,
+			MethodID:   methodID,
+			Name:       methodName,
+			FilePath:   filePath,
+			StartLine:  startLine,
+			RepoPrefix: repoPrefix,
 		})
 	}
 	if len(out) == 0 {

@@ -2725,10 +2725,11 @@ func (g *Graph) MemberMethodsByType() map[string][]MemberMethodInfo {
 		}
 		dedup[m.ID] = struct{}{}
 		out[typeID] = append(out[typeID], MemberMethodInfo{
-			MethodID:  m.ID,
-			Name:      m.Name,
-			FilePath:  m.FilePath,
-			StartLine: m.StartLine,
+			MethodID:   m.ID,
+			Name:       m.Name,
+			FilePath:   m.FilePath,
+			StartLine:  m.StartLine,
+			RepoPrefix: m.RepoPrefix,
 		})
 	}
 	if len(out) == 0 {

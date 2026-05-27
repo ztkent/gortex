@@ -1187,12 +1187,15 @@ type ThrowerErrorSurfacer interface {
 // MethodID is the method node's id; Name is its name (the key the
 // InferImplements method-set check compares against); FilePath /
 // StartLine are the source coordinates InferOverrides stamps on the
-// EdgeOverrides edge it emits.
+// EdgeOverrides edge it emits; RepoPrefix lets consumers
+// (ResolveGRPCStubCalls' pickGRPCHandler) tie-break on same-repo
+// without a follow-up GetNode.
 type MemberMethodInfo struct {
-	MethodID  string
-	Name      string
-	FilePath  string
-	StartLine int
+	MethodID   string
+	Name       string
+	FilePath   string
+	StartLine  int
+	RepoPrefix string
 }
 
 // MemberMethodsByType is an optional capability backends MAY implement

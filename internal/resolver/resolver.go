@@ -1780,6 +1780,55 @@ func nodeReceiverType(n *graph.Node) string {
 	return ""
 }
 
+// memberMethodInfosByType returns the storage layer's per-type member
+// method projection verbatim. Routed through MemberMethodsByType when
+// the backend implements it; falls back to an EdgesByKind +
+// per-edge GetNode walk that synthesises matching info rows.
+func memberMethodInfosByType(g graph.Store) map[string][]graph.MemberMethodInfo {
+	if cap, ok := g.(graph.MemberMethodsByType); ok {
+		return cap.MemberMethodsByType()
+	}
+	out := map[string][]graph.MemberMethodInfo{}
+	for e := range g.EdgesByKind(graph.EdgeMemberOf) {
+		method := g.GetNode(e.From)
+		if method == nil || method.Kind != graph.KindMethod {
+			continue
+		}
+		out[e.To] = append(out[e.To], graph.MemberMethodInfo{
+			MethodID:   method.ID,
+			Name:       method.Name,
+			FilePath:   method.FilePath,
+			StartLine:  method.StartLine,
+			RepoPrefix: method.RepoPrefix,
+		})
+	}
+	return out
+}
+
+// nodesByKindsOrAll returns every node whose Kind is in the given
+// set, using the NodesByKindsScanner capability when the backend
+// implements it (a single Cypher kind-IN scan, one C-string column
+// per row) and falling back to AllNodes + Go-side filter otherwise.
+func nodesByKindsOrAll(g graph.Store, kinds ...graph.NodeKind) []*graph.Node {
+	if scan, ok := g.(graph.NodesByKindsScanner); ok {
+		return scan.NodesByKinds(kinds)
+	}
+	set := make(map[graph.NodeKind]struct{}, len(kinds))
+	for _, k := range kinds {
+		set[k] = struct{}{}
+	}
+	var out []*graph.Node
+	for _, n := range g.AllNodes() {
+		if n == nil {
+			continue
+		}
+		if _, ok := set[n.Kind]; ok {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
 // memberMethodsByType returns typeID → method-name-set for every
 // EdgeMemberOf edge whose source is a KindMethod node. Routed through
 // the storage layer's MemberMethodsByType capability when the backend
@@ -1837,11 +1886,12 @@ func memberMethodNodesByType(g graph.Store) map[string]map[string]*graph.Node {
 			set := make(map[string]*graph.Node, len(methods))
 			for _, m := range methods {
 				set[m.Name] = &graph.Node{
-					ID:        m.MethodID,
-					Kind:      graph.KindMethod,
-					Name:      m.Name,
-					FilePath:  m.FilePath,
-					StartLine: m.StartLine,
+					ID:         m.MethodID,
+					Kind:       graph.KindMethod,
+					Name:       m.Name,
+					FilePath:   m.FilePath,
+					StartLine:  m.StartLine,
+					RepoPrefix: m.RepoPrefix,
 				}
 			}
 			out[typeID] = set
