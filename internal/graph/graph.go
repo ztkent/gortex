@@ -984,6 +984,62 @@ func (g *Graph) NodesByKinds(kinds []NodeKind) []*Node {
 	return out
 }
 
+// EdgeAdjacencyForKinds is the in-memory reference implementation of
+// the EdgeAdjacencyForKinds capability. One AllEdges scan that yields
+// (from, to) pairs whose Kind is in the supplied edge-kind set AND
+// whose endpoints both have a Kind in the node-kind set — identical
+// shape to the Cypher join the disk backends fold into a single
+// query.
+//
+// Empty edgeKinds or empty nodeKinds yields nothing — matches the
+// disk contract.
+func (g *Graph) EdgeAdjacencyForKinds(edgeKinds []EdgeKind, nodeKinds []NodeKind) iter.Seq[[2]string] {
+	if len(edgeKinds) == 0 || len(nodeKinds) == 0 {
+		return func(yield func([2]string) bool) {}
+	}
+	eset := make(map[EdgeKind]struct{}, len(edgeKinds))
+	for _, k := range edgeKinds {
+		if k == "" {
+			continue
+		}
+		eset[k] = struct{}{}
+	}
+	nset := make(map[NodeKind]struct{}, len(nodeKinds))
+	for _, k := range nodeKinds {
+		if k == "" {
+			continue
+		}
+		nset[k] = struct{}{}
+	}
+	if len(eset) == 0 || len(nset) == 0 {
+		return func(yield func([2]string) bool) {}
+	}
+	return func(yield func([2]string) bool) {
+		for _, e := range g.AllEdges() {
+			if e == nil {
+				continue
+			}
+			if _, ok := eset[e.Kind]; !ok {
+				continue
+			}
+			from := g.GetNode(e.From)
+			to := g.GetNode(e.To)
+			if from == nil || to == nil {
+				continue
+			}
+			if _, ok := nset[from.Kind]; !ok {
+				continue
+			}
+			if _, ok := nset[to.Kind]; !ok {
+				continue
+			}
+			if !yield([2]string{e.From, e.To}) {
+				return
+			}
+		}
+	}
+}
+
 // EdgeKindCounts is the in-memory reference implementation of the
 // EdgeKindCounter capability. One AllEdges scan with a per-kind
 // tally — the exact loop the get_surprising_connections Go fallback

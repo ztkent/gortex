@@ -948,6 +948,28 @@ type NodesByKindsScanner interface {
 	NodesByKinds(kinds []NodeKind) []*Node
 }
 
+// EdgeAdjacencyForKinds is an optional capability backends MAY
+// implement to stream (from, to) id pairs for every edge whose Kind
+// is in the supplied edge-kind set AND whose endpoints both belong
+// to the supplied node-kind set. The shape covers the betweenness /
+// centrality adjacency build that today calls EdgesByKinds and
+// filters Go-side: on Ladybug the per-edge row carries ~10 string
+// columns over cgo, multiplied by ~286k edges on the gortex
+// workspace, just for a build that uses only From/To. The
+// capability returns a 2-column projection from a single Cypher
+// join — every endpoint kind is enforced by the planner, so neither
+// the cross-kind edges nor the irrelevant columns ever cross cgo.
+//
+// Empty edgeKinds or empty nodeKinds yields nothing — never a
+// whole-table scan. Iterators stop when the consumer's yield
+// returns false; implementations MUST honour early-stop.
+//
+// Optional capability — analyzers fall back to EdgesByKinds when
+// the backend doesn't implement it.
+type EdgeAdjacencyForKinds interface {
+	EdgeAdjacencyForKinds(edgeKinds []EdgeKind, nodeKinds []NodeKind) iter.Seq[[2]string]
+}
+
 // EdgeKindCounter is an optional capability backends MAY implement
 // to return one row per distinct edge kind with its occurrence
 // count, server-side. Used by handleGetSurprisingConnections to

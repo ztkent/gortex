@@ -87,6 +87,7 @@ func RunConformance(t *testing.T, factory Factory) {
 	t.Run("InDegreeForNodes", func(t *testing.T) { testInDegreeForNodes(t, factory) })
 	t.Run("ReachableForwardByKinds", func(t *testing.T) { testReachableForwardByKinds(t, factory) })
 	t.Run("ThrowerErrorSurfacer", func(t *testing.T) { testThrowerErrorSurfacer(t, factory) })
+	t.Run("EdgeAdjacencyForKinds", func(t *testing.T) { testEdgeAdjacencyForKinds(t, factory) })
 }
 
 // -- fixture helpers ---------------------------------------------------
@@ -2439,5 +2440,106 @@ func testThrowerErrorSurfacer(t *testing.T, factory Factory) {
 	drop := ts.ThrowerErrorSurface("pkg/missing/")
 	if len(drop) != 0 {
 		t.Fatalf("ThrowerErrorSurface(pkg/missing/) = %v, want empty", drop)
+	}
+}
+
+// testEdgeAdjacencyForKinds exercises the optional
+// graph.EdgeAdjacencyForKinds capability. Seeds a graph mixing
+// function/method/type nodes joined by Calls / References / Writes
+// edges and asserts the iterator yields only (from, to) pairs whose
+// edge kind is in the allowed set AND whose endpoints both fall in
+// the allowed node-kind set.
+func testEdgeAdjacencyForKinds(t *testing.T, factory Factory) {
+	t.Helper()
+	s := factory(t)
+	scan, ok := s.(graph.EdgeAdjacencyForKinds)
+	if !ok {
+		t.Skip("backend does not implement graph.EdgeAdjacencyForKinds")
+	}
+
+	s.AddNode(mkNode("F1", "F1", "x.go", graph.KindFunction))
+	s.AddNode(mkNode("F2", "F2", "x.go", graph.KindFunction))
+	s.AddNode(mkNode("M1", "M1", "x.go", graph.KindMethod))
+	s.AddNode(mkNode("T1", "T1", "y.go", graph.KindType))
+	s.AddNode(mkNode("V1", "V1", "y.go", graph.KindVariable))
+
+	// F1 → F2 Calls (function→function, in-set)
+	e1 := mkEdge("F1", "F2", graph.EdgeCalls)
+	e1.Line = 1
+	// F2 → M1 References (function→method, in-set)
+	e2 := mkEdge("F2", "M1", graph.EdgeReferences)
+	e2.Line = 2
+	// F1 → T1 References (function→type, NOT in-set: T1 excluded)
+	e3 := mkEdge("F1", "T1", graph.EdgeReferences)
+	e3.Line = 3
+	// T1 → F2 References (type→function, NOT in-set: T1 excluded)
+	e4 := mkEdge("T1", "F2", graph.EdgeReferences)
+	e4.Line = 4
+	// M1 → F1 Writes (method→function, edge kind excluded)
+	e5 := mkEdge("M1", "F1", graph.EdgeWrites)
+	e5.Line = 5
+	// F1 → V1 References (function→variable, NOT in-set: V1 excluded)
+	e6 := mkEdge("F1", "V1", graph.EdgeReferences)
+	e6.Line = 6
+	for _, e := range []*graph.Edge{e1, e2, e3, e4, e5, e6} {
+		s.AddEdge(e)
+	}
+
+	eKinds := []graph.EdgeKind{graph.EdgeCalls, graph.EdgeReferences}
+	nKinds := []graph.NodeKind{graph.KindFunction, graph.KindMethod}
+
+	got := make(map[[2]string]int)
+	for pair := range scan.EdgeAdjacencyForKinds(eKinds, nKinds) {
+		got[pair]++
+	}
+	want := map[[2]string]int{
+		{"F1", "F2"}: 1,
+		{"F2", "M1"}: 1,
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("EdgeAdjacencyForKinds = %v, want %v", got, want)
+	}
+
+	// Empty edge kinds yields nothing — never a whole-table scan.
+	empty := 0
+	for range scan.EdgeAdjacencyForKinds(nil, nKinds) {
+		empty++
+	}
+	if empty != 0 {
+		t.Fatalf("EdgeAdjacencyForKinds(nil edges) yielded %d, want 0", empty)
+	}
+	// Empty node kinds yields nothing.
+	for range scan.EdgeAdjacencyForKinds(eKinds, nil) {
+		empty++
+	}
+	if empty != 0 {
+		t.Fatalf("EdgeAdjacencyForKinds(nil nodes) yielded %d, want 0", empty)
+	}
+	// Zero-match: edge kind absent from graph yields nothing.
+	zero := 0
+	for range scan.EdgeAdjacencyForKinds([]graph.EdgeKind{graph.EdgeKind("nonexistent")}, nKinds) {
+		zero++
+	}
+	if zero != 0 {
+		t.Fatalf("EdgeAdjacencyForKinds(nonexistent edge) yielded %d, want 0", zero)
+	}
+	// Node-kind filter actually narrows: asking only for {Type} drops every pair.
+	narrowed := 0
+	for range scan.EdgeAdjacencyForKinds(eKinds, []graph.NodeKind{graph.KindType}) {
+		narrowed++
+	}
+	if narrowed != 0 {
+		t.Fatalf("EdgeAdjacencyForKinds(Type only) yielded %d, want 0", narrowed)
+	}
+	// Early stop honours the iterator contract.
+	stopped := 0
+	for range scan.EdgeAdjacencyForKinds(eKinds, nKinds) {
+		stopped++
+		if stopped == 1 {
+			break
+		}
+	}
+	if stopped != 1 {
+		t.Fatalf("early stop yielded %d before break, want 1", stopped)
 	}
 }
