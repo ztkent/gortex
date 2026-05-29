@@ -21,3 +21,9 @@ func openLadybugBackend(path string, bufferPoolMB uint64) (graph.Store, func(), 
 	}
 	return s, func() { _ = s.Close() }, nil
 }
+
+// The daemon warm-restart path consults this optional capability
+// (cmd/gortex/daemon_state.go: storeNeedsRebuild) to force a full re-index
+// when a schema migration crossed a rebuild rung. This assertion keeps the
+// concrete store and the daemon's optional-interface check from drifting.
+var _ interface{ NeedsRebuild() bool } = (*store_ladybug.Store)(nil)

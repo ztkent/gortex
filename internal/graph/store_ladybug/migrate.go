@@ -115,6 +115,14 @@ func migrateSchema(conn *lbug.Connection, current int, steps []migrationStep) (n
 			return needsRebuild, fmt.Errorf("schema migration to v%d: %w", m.to, err)
 		}
 	}
+	// Stamp the new schema version. NOTE for the first rebuild step: this
+	// stamps `current` even when a rebuild rung was crossed, but the actual
+	// data re-index happens LATER (the daemon forces it via NeedsRebuild at
+	// warm restart — see cmd/gortex/daemon_state.go storeNeedsRebuild). A
+	// crash after this stamp but before that re-index finishes would leave
+	// version=current over old-shape rows. When the first rebuild migration
+	// lands, make it crash-safe — e.g. defer the stamp until the daemon
+	// confirms the rebuild rather than stamping here.
 	if err := writeSchemaVersion(conn, current); err != nil {
 		return needsRebuild, err
 	}

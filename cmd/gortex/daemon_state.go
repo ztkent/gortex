@@ -754,6 +754,21 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger) *indexer.MultiWat
 				if state.snapshotPartial {
 					priorMtimes = nil
 				}
+				// A backend that crossed a schema-rebuild migration rung
+				// (NeedsRebuild) has on-disk rows in the old shape that an
+				// incremental reconcile cannot fix. Drop prior mtimes so every
+				// file re-indexes into the new schema (the nil branch below
+				// runs a full TrackRepoCtx and marks the repo changed, so the
+				// global resolve/derivation passes re-run too). No-op for
+				// backends without the capability and whenever no rebuild rung
+				// was crossed — the common case.
+				if storeNeedsRebuild(state.graph) {
+					if len(priorMtimes) > 0 {
+						logger.Info("daemon: backend signalled schema rebuild; forcing full re-index",
+							zap.String("path", entry.Path))
+					}
+					priorMtimes = nil
+				}
 				pathFn := "track"
 				if priorMtimes != nil {
 					pathFn = "reconcile"
@@ -1020,6 +1035,18 @@ func priorMtimesFromStore(g graph.Store, entry config.RepoEntry, logger *zap.Log
 			zap.Int("count", len(mtimes)))
 	}
 	return mtimes
+}
+
+// storeNeedsRebuild reports whether the backend signalled, via the optional
+// NeedsRebuild capability, that a schema migration crossed a rung ALTER
+// could not satisfy — so its persisted rows are in an old shape and the
+// warm/incremental reconcile must be bypassed for a full re-index. Backends
+// without the capability (the in-memory store) report false. See
+// store_ladybug.(*Store).NeedsRebuild and the ladder in
+// internal/graph/store_ladybug/migrate.go.
+func storeNeedsRebuild(g any) bool {
+	rb, ok := g.(interface{ NeedsRebuild() bool })
+	return ok && rb.NeedsRebuild()
 }
 
 // priorMtimesForEntry finds the snapshotted FileMtimes map for a
