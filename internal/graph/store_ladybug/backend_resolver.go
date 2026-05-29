@@ -1,6 +1,9 @@
 package store_ladybug
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // upgradeUnresolvedStubs stamps `kind='unresolved'` plus the extracted
 // `name` and `repo_prefix` on every auto-stub the bulk COPY created for
@@ -395,30 +398,43 @@ func (s *Store) runResolverQueryLocked(query, ruleName string) (int, error) {
 }
 
 // ResolveAllBulk chains every backend-resolver rule in precision-
-// descending order and sums the resolved counts. Errors from a
-// single rule are non-fatal; the orchestrator logs internally and
-// continues so a buggy rule can't block the others.
+// descending order and sums the resolved counts. Errors from a single
+// rule are non-fatal: the chain CONTINUES so one failing rule can't
+// disable every rule after it. (The previous code `return`ed on the
+// first error — which silently skipped e.g. ResolveMethodCalls whenever
+// an earlier rule errored on a large graph, the bug that made method
+// callers invisible. The Store has no logger, so the failing rule
+// names ride on the returned error instead; the caller can surface
+// them.)
 func (s *Store) ResolveAllBulk() (int, error) {
 	var total int
-	for _, fn := range []func() (int, error){
+	var ruleErrs []string
+	rules := []struct {
+		name string
+		fn   func() (int, error)
+	}{
 		// MUST run first: stamps kind='unresolved' + name + repo_prefix
 		// on the auto-stub Node rows so the rules below can match them
 		// in both `unresolved::*` and `<prefix>::unresolved::*` forms.
-		s.upgradeUnresolvedStubs,
-		s.ResolveSameFile,
-		s.ResolveSamePackage,
-		s.ResolveImportAware,
-		func() (int, error) { return s.ResolveRelativeImports("") },
-		s.ResolveCrossRepo,
-		s.ResolveUniqueNames,
-		s.ResolveMethodCalls,
-		s.ResolveExternalCallStubs,
-	} {
-		n, err := fn()
+		{"upgradeUnresolvedStubs", s.upgradeUnresolvedStubs},
+		{"ResolveSameFile", s.ResolveSameFile},
+		{"ResolveSamePackage", s.ResolveSamePackage},
+		{"ResolveImportAware", s.ResolveImportAware},
+		{"ResolveRelativeImports", func() (int, error) { return s.ResolveRelativeImports("") }},
+		{"ResolveCrossRepo", s.ResolveCrossRepo},
+		{"ResolveUniqueNames", s.ResolveUniqueNames},
+		{"ResolveMethodCalls", s.ResolveMethodCalls},
+		{"ResolveExternalCallStubs", s.ResolveExternalCallStubs},
+	}
+	for _, r := range rules {
+		n, err := r.fn()
 		total += n
 		if err != nil {
-			return total, err
+			ruleErrs = append(ruleErrs, fmt.Sprintf("%s: %v", r.name, err))
 		}
+	}
+	if len(ruleErrs) > 0 {
+		return total, fmt.Errorf("backend-resolver rule errors: %s", strings.Join(ruleErrs, "; "))
 	}
 	return total, nil
 }
