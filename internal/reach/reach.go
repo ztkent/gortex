@@ -146,6 +146,13 @@ func BuildIndexCtx(ctx context.Context, g graph.Store) *Stats {
 
 	const reachProgressEvery = 1000
 	seedsDone := 0
+	// Collect the seed nodes we stamp so we can persist the Meta back
+	// through the store in one batch at the end. On the in-memory
+	// backend the in-place stamp already persists (n is canonical); on
+	// disk backends (Ladybug) n is a GetNode reconstruction, so without
+	// the write-back the whole reach index would be computed and then
+	// thrown away. Mirrors the per-seed AddNode in Lookup's slow path.
+	stamped := make([]*graph.Node, 0, seedTotal)
 	for _, n := range nodes {
 		if n == nil || !ImpactSeedKind(n.Kind) {
 			continue
@@ -169,6 +176,7 @@ func BuildIndexCtx(ctx context.Context, g graph.Store) *Stats {
 		setOrDeleteStrings(n.Meta, MetaReachD2Label, tiers[1].Labels)
 		setOrDeleteStrings(n.Meta, MetaReachD3Label, tiers[2].Labels)
 
+		stamped = append(stamped, n)
 		stats.NodesIndexed++
 		stats.EntriesD1 += len(tiers[0].IDs)
 		stats.EntriesD2 += len(tiers[1].IDs)
@@ -178,6 +186,12 @@ func BuildIndexCtx(ctx context.Context, g graph.Store) *Stats {
 		if seedsDone%reachProgressEvery == 0 {
 			reporter.Report("reachability index", seedsDone, seedTotal)
 		}
+	}
+	// Persist every stamped node's Meta back through the store in one
+	// batch (no-op-ish on the in-memory backend, the durable write on
+	// disk backends). AddBatch with no edges only upserts the nodes.
+	if len(stamped) > 0 {
+		g.AddBatch(stamped, nil)
 	}
 	reporter.Report("reachability index", seedsDone, seedTotal)
 	return stats
@@ -225,10 +239,27 @@ func compute(g graph.Store, seedID string) [3]tier {
 	var result [3]tier
 	visited := map[string]struct{}{seedID: {}}
 	current := []string{seedID}
-	for depth := 1; depth <= 3; depth++ {
+	for depth := 1; depth <= 3 && len(current) > 0; depth++ {
+		// Batch the whole BFS level's incoming-edge fetch into one
+		// backend round-trip. The per-node g.GetInEdges(id) form issued
+		// one Cypher query + cgo crossing per node on disk backends — an
+		// O(reachable-nodes) query storm that turned a single
+		// AnalyzeImpact live walk into a multi-minute (timeout) call on
+		// Ladybug. GetInEdgesByNodeIDs collapses it to one query per depth.
+		inEdges := g.GetInEdgesByNodeIDs(current)
+
+		// First pass: discover this level's new From-nodes in
+		// deterministic (current-order, edge-order) order, recording the
+		// representative in-edge for each.
+		type cand struct {
+			from string
+			conf float64
+			kind graph.EdgeKind
+		}
 		var next []string
+		var cands []cand
 		for _, id := range current {
-			for _, e := range g.GetInEdges(id) {
+			for _, e := range inEdges[id] {
 				if !ReachableEdge(e.Kind) {
 					continue
 				}
@@ -237,17 +268,30 @@ func compute(g graph.Store, seedID string) [3]tier {
 				}
 				visited[e.From] = struct{}{}
 				next = append(next, e.From)
-
-				if n := g.GetNode(e.From); n == nil ||
-					n.Kind == graph.KindFile || n.Kind == graph.KindImport {
-					continue
-				}
-				slot := depth - 1
-				result[slot].IDs = append(result[slot].IDs, e.From)
-				result[slot].Conf = append(result[slot].Conf, e.Confidence)
-				result[slot].Labels = append(result[slot].Labels,
-					graph.ConfidenceLabelFor(e.Kind, e.Confidence))
+				cands = append(cands, cand{from: e.From, conf: e.Confidence, kind: e.Kind})
 			}
+		}
+
+		// Batch the node-kind lookups too — the original called
+		// g.GetNode(e.From) once per discovered node (a second per-node
+		// query storm on disk backends). File / import nodes are still
+		// walked through for fan-out (they stay in `next`) but excluded
+		// from the result tiers, exactly as before.
+		ids := make([]string, len(cands))
+		for i := range cands {
+			ids[i] = cands[i].from
+		}
+		nodes := g.GetNodesByIDs(ids)
+		slot := depth - 1
+		for _, c := range cands {
+			n := nodes[c.from]
+			if n == nil || n.Kind == graph.KindFile || n.Kind == graph.KindImport {
+				continue
+			}
+			result[slot].IDs = append(result[slot].IDs, c.from)
+			result[slot].Conf = append(result[slot].Conf, c.conf)
+			result[slot].Labels = append(result[slot].Labels,
+				graph.ConfidenceLabelFor(c.kind, c.conf))
 		}
 		current = next
 	}
@@ -385,6 +429,17 @@ func Lookup(g graph.Store, seedID string) (d1, d2, d3 []Entry, hit bool) {
 	setOrDeleteStrings(n.Meta, MetaReachD1Label, tiers[0].Labels)
 	setOrDeleteStrings(n.Meta, MetaReachD2Label, tiers[1].Labels)
 	setOrDeleteStrings(n.Meta, MetaReachD3Label, tiers[2].Labels)
+
+	// Persist the freshly-stamped Meta through the store. On the
+	// in-memory backend n is the canonical node, so the mutations above
+	// already stuck — AddNode re-inserts the same pointer idempotently.
+	// On disk backends (Ladybug) n is a per-call reconstruction returned
+	// by GetNode, so the in-place stamp would otherwise be discarded the
+	// moment this function returns: the lazy reach cache would never
+	// survive a single query, forcing a full recompute on every
+	// AnalyzeImpact / explain_change_impact / get_callers call. AddNode
+	// upserts the Meta column so the cache actually sticks.
+	g.AddNode(n)
 
 	d1 = readTier(n.Meta, MetaReachD1, MetaReachD1Conf, MetaReachD1Label)
 	d2 = readTier(n.Meta, MetaReachD2, MetaReachD2Conf, MetaReachD2Label)

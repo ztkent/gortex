@@ -215,12 +215,23 @@ func TestAnalyzeImpact_FastPathSubMillisecond(t *testing.T) {
 	reach.BuildIndex(g)
 
 	const absoluteCeiling = 15 * time.Millisecond
-	// Per BenchmarkAnalyzeImpact_FastPath vs LiveWalk the steady-
-	// state speedup on this fixture is ~1.8x. We gate at 1.3x to
-	// absorb wall-clock noise (short timed loops have more variance
-	// than the benchmark harness's adaptive sampling) while still
-	// catching a regression that drops in a live walk.
-	const minSpeedup = 1.3
+	// The reach live walk (compute) now batches its whole-BFS-level
+	// edge + node fetches into GetInEdgesByNodeIDs / GetNodesByIDs
+	// instead of issuing one GetInEdges + one GetNode per node. On the
+	// in-memory backend those batched reads are nearly as cheap as the
+	// precomputed fast path (both are then dominated by the identical
+	// per-entry GetNode rendering in fillImpactFromReach), so the old
+	// ~1.8x relative speedup no longer holds here — it collapses to
+	// ~1.0x. The precompute's large win is now realised on disk
+	// backends (Ladybug), where each per-node query the batching
+	// eliminates was a cgo round-trip, not a map read.
+	//
+	// We therefore keep the absolute sub-ms guarantee (the user-facing
+	// contract: a blast-radius query stays interactive) and a loose
+	// regression guard that the fast path is not materially SLOWER than
+	// the batched live walk — without re-asserting the obsolete
+	// in-memory speedup premise.
+	const minSpeedup = 0.9
 
 	speedup := float64(avgLive) / float64(avgFast)
 	t.Logf("AnalyzeImpact on 1000-caller fan-in: fast=%v live=%v speedup=%.2fx (over %d iters)",
@@ -229,8 +240,11 @@ func TestAnalyzeImpact_FastPathSubMillisecond(t *testing.T) {
 	if avgFast > absoluteCeiling {
 		t.Errorf("fast-path AnalyzeImpact too slow: avg=%v (absolute ceiling=%v)", avgFast, absoluteCeiling)
 	}
+	if avgLive > absoluteCeiling {
+		t.Errorf("live-walk AnalyzeImpact too slow: avg=%v (absolute ceiling=%v)", avgLive, absoluteCeiling)
+	}
 	if speedup < minSpeedup {
-		t.Errorf("fast-path speedup regressed: %.2fx (want >= %.2fx)", speedup, minSpeedup)
+		t.Errorf("fast-path is materially slower than the live walk: %.2fx (want >= %.2fx)", speedup, minSpeedup)
 	}
 }
 
