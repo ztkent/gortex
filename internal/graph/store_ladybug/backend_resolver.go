@@ -280,6 +280,60 @@ RETURN count(newE) AS resolved`
 // the edge's origin to ast_resolved. Kuzu's AddEdge already
 // auto-stubs the endpoint node via mergeStubNodeLocked, so the
 // only work here is the kind/name update + edge origin promotion.
+// ResolveMethodCalls drains the receiver-method-call stub form
+// `unresolved::*.<method>` — the target the parsers emit for a call
+// `x.Method()` when they can't name x's type at extraction time (Go:
+// internal/parser/languages/golang.go:646; same `*.` convention in
+// java/ruby/typescript/...). upgradeUnresolvedStubs leaves
+// stub.name = "*.<method>" (the `*.` is kept), so the name-EQUALITY
+// rules above never match it, and the Go-side resolver's
+// EdgesWithUnresolvedTarget scan (literal `unresolved::` prefix) never
+// sees the repo-prefixed `<repo>::unresolved::*.<method>` form — so in
+// multi-repo mode method callers were invisible to find_usages /
+// get_callers entirely.
+//
+// We bind the stub to a concrete method node when EXACTLY ONE method
+// in the caller's repo carries that method name (the segment after the
+// last "." of its qualified `<Recv>.<method>` Name). The uniqueness
+// guard means no false edges: an ambiguous method name (String / Close
+// / Get, defined on several types) is left unresolved for a future
+// receiver-type-aware pass (the edge carries a `receiver_type` meta
+// hint) rather than bound to an arbitrary type.
+func (s *Store) ResolveMethodCalls() (int, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	const q = `
+MATCH (caller:Node)-[e:Edge]->(stub:Node)
+WHERE stub.kind = 'unresolved' AND stub.name STARTS WITH '*.'
+WITH e, caller, stub, substring(stub.name, 3, size(stub.name) - 2) AS mname
+WHERE mname <> ''
+OPTIONAL MATCH (cnd:Node)
+WHERE cnd.kind = 'method'
+  AND cnd.repo_prefix = caller.repo_prefix
+  AND cnd.id <> stub.id
+  AND cnd.name ENDS WITH concat('.', mname)
+WITH e, caller, stub, mname, count(cnd) AS cnt
+WHERE cnt = 1
+MATCH (target:Node)
+WHERE target.kind = 'method'
+  AND target.repo_prefix = caller.repo_prefix
+  AND target.name ENDS WITH concat('.', mname)
+DELETE e
+CREATE (caller)-[newE:Edge {
+    kind: e.kind,
+    file_path: e.file_path,
+    line: e.line,
+    confidence: e.confidence,
+    confidence_label: e.confidence_label,
+    origin: 'ast_resolved',
+    tier: 'ast_resolved',
+    cross_repo: e.cross_repo,
+    meta: e.meta
+}]->(target)
+RETURN count(newE) AS resolved`
+	return s.runResolverQueryLocked(q, "ResolveMethodCalls")
+}
+
 func (s *Store) ResolveExternalCallStubs() (int, error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
@@ -354,6 +408,7 @@ func (s *Store) ResolveAllBulk() (int, error) {
 		func() (int, error) { return s.ResolveRelativeImports("") },
 		s.ResolveCrossRepo,
 		s.ResolveUniqueNames,
+		s.ResolveMethodCalls,
 		s.ResolveExternalCallStubs,
 	} {
 		n, err := fn()
