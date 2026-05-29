@@ -236,7 +236,13 @@ func writeSymbolVecTSV(path string, items []graph.VectorItem) error {
 	var b strings.Builder
 	for _, it := range items {
 		b.Reset()
-		b.WriteString(it.NodeID)
+		// Sanitize the id (tab / CR / LF -> space) exactly as writeNodesTSV
+		// does for the Node table: an id carrying a raw tab or newline (e.g.
+		// a string-literal-derived node) would otherwise split the TSV row
+		// and abort the whole COPY ("expected 2 values per row, but got 1").
+		// Sanitizing identically keeps the SymbolVec id equal to the
+		// persisted Node id, so the similarity-search join still matches.
+		b.WriteString(sanitizeTSV(it.NodeID))
 		b.WriteByte('\t')
 		b.WriteByte('[')
 		for i, v := range it.Vec {
