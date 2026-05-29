@@ -1025,17 +1025,10 @@ func (e *Engine) bfs(nodeID string, opts QueryOptions, forward bool, edgeKinds [
 		kindSet[k] = true
 	}
 
-	visited := make(map[string]bool)
+	visited := map[string]bool{nodeID: true}
 	var allNodes []*graph.Node
 	var allEdges []*graph.Edge
 	truncated := false
-
-	type item struct {
-		id    string
-		depth int
-	}
-	queue := []item{{id: nodeID, depth: 0}}
-	visited[nodeID] = true
 
 	if n := e.g.GetNode(nodeID); n != nil {
 		// The seed always enters the result, regardless of scope —
@@ -1044,92 +1037,147 @@ func (e *Engine) bfs(nodeID string, opts QueryOptions, forward bool, edgeKinds [
 		allNodes = append(allNodes, n)
 	}
 
-	for len(queue) > 0 {
-		cur := queue[0]
-		queue = queue[1:]
-
-		if cur.depth >= opts.Depth {
-			continue
+	// admit is the single place edge/node bookkeeping lives, shared by
+	// the batched and per-node expansion paths. It records the edge
+	// (unless the node budget is already full — the legacy code grew
+	// allEdges without bound, so a high-degree hub could pin gigabytes
+	// of edge structs), then admits a new, in-scope, non-test neighbour
+	// and returns its id to enqueue ("" = skip).
+	admit := func(edge *graph.Edge, neighborID string, neighbor *graph.Node) string {
+		// Skip unresolved/external targets.
+		if graph.IsUnresolvedTarget(neighborID) || strings.HasPrefix(neighborID, "external::") {
+			return ""
 		}
+		// Once the node budget is full, stop recording edges too: the
+		// result is already truncated and an unbounded allEdges is the
+		// memory-blowup vector this guard closes.
+		if len(allNodes) >= opts.Limit {
+			truncated = true
+			return ""
+		}
+		// ExcludeTests drops neighbours flagged as tests during a reverse
+		// traversal — a no-op for forward/bidirectional walks.
+		if opts.ExcludeTests && !forward && !bidir && isTestSource(neighbor) {
+			return ""
+		}
+		// Workspace/project scope: neighbours outside the bound scope are
+		// dropped along with the edge that pointed at them.
+		if opts.WorkspaceID != "" && neighbor != nil && !opts.ScopeAllows(neighbor) {
+			return ""
+		}
+		allEdges = append(allEdges, edge)
+		if visited[neighborID] {
+			return ""
+		}
+		visited[neighborID] = true
+		if neighbor == nil {
+			return ""
+		}
+		allNodes = append(allNodes, neighbor)
+		return neighborID
+	}
 
-		var edges []*graph.Edge
-		if bidir {
-			edges = append(e.g.GetOutEdges(cur.id), e.g.GetInEdges(cur.id)...)
-		} else if forward {
-			edges = e.g.GetOutEdges(cur.id)
+	// A backend that implements graph.FrontierExpander (the ladybug
+	// store) returns a whole frontier's edges + neighbour nodes in one
+	// round-trip — no GetNode per edge, no meta decode. Bidirectional
+	// (cluster) walks and capability-less backends (the in-memory graph,
+	// whose reads are already O(1)) keep the per-node path.
+	expander, batched := e.g.(graph.FrontierExpander)
+	batched = batched && !bidir && len(edgeKinds) > 0
+
+	frontier := []string{nodeID}
+	for depth := 0; depth < opts.Depth && len(frontier) > 0 && len(allNodes) < opts.Limit; depth++ {
+		var next []string
+		if batched {
+			for _, h := range expander.ExpandFrontier(frontier, forward, edgeKinds, opts.Limit) {
+				if h.Edge == nil {
+					continue
+				}
+				neighborID := h.Edge.To
+				if !forward {
+					neighborID = h.Edge.From
+				}
+				if id := admit(h.Edge, neighborID, h.Neighbor); id != "" {
+					next = append(next, id)
+				}
+				if len(allNodes) >= opts.Limit {
+					truncated = true
+					break
+				}
+			}
 		} else {
-			edges = e.g.GetInEdges(cur.id)
+			for _, cur := range frontier {
+				var edges []*graph.Edge
+				switch {
+				case bidir:
+					edges = append(e.g.GetOutEdges(cur), e.g.GetInEdges(cur)...)
+				case forward:
+					edges = e.g.GetOutEdges(cur)
+				default:
+					edges = e.g.GetInEdges(cur)
+				}
+				for _, edge := range edges {
+					if !bidir && !kindSet[edge.Kind] {
+						continue
+					}
+					var neighborID string
+					switch {
+					case forward || bidir:
+						if edge.From == cur {
+							neighborID = edge.To
+						} else if bidir {
+							neighborID = edge.From
+						} else {
+							continue
+						}
+					default:
+						if edge.To == cur {
+							neighborID = edge.From
+						} else {
+							continue
+						}
+					}
+					// One GetNode per neighbour (the legacy path fetched
+					// it twice — scope check, then materialise).
+					var neighbor *graph.Node
+					if !graph.IsUnresolvedTarget(neighborID) && !strings.HasPrefix(neighborID, "external::") {
+						neighbor = e.g.GetNode(neighborID)
+					}
+					if id := admit(edge, neighborID, neighbor); id != "" {
+						next = append(next, id)
+					}
+					if len(allNodes) >= opts.Limit {
+						truncated = true
+						break
+					}
+				}
+				if len(allNodes) >= opts.Limit {
+					break
+				}
+			}
 		}
+		frontier = next
+	}
 
-		for _, edge := range edges {
-			if !bidir && !kindSet[edge.Kind] {
-				continue
+	// ExpandFrontier returns meta-free neighbours; a full-detail caller
+	// (e.g. one reading Meta["signature"]) gets them re-hydrated in one
+	// batched round-trip. Brief callers (smart_context's ring, step-7)
+	// skip this — stripMeta would drop the meta anyway.
+	if batched && opts.Detail != "brief" && len(allNodes) > 1 {
+		if hyd, ok := e.g.(interface {
+			GetNodesByIDs(ids []string) map[string]*graph.Node
+		}); ok {
+			ids := make([]string, 0, len(allNodes))
+			for _, n := range allNodes {
+				ids = append(ids, n.ID)
 			}
-
-			var neighborID string
-			if forward || bidir {
-				if edge.From == cur.id {
-					neighborID = edge.To
-				} else if bidir {
-					neighborID = edge.From
-				} else {
-					continue
-				}
-			} else {
-				if edge.To == cur.id {
-					neighborID = edge.From
-				} else {
-					continue
-				}
-			}
-
-			// Skip unresolved/external targets.
-			if graph.IsUnresolvedTarget(neighborID) || strings.HasPrefix(neighborID, "external::") {
-				continue
-			}
-
-			// ExcludeTests drops neighbours flagged as tests during a
-			// reverse traversal — for forward traversals it's a no-op
-			// because callers asking "who depends on X" (reverse) are
-			// the only consumers of this filter today.
-			if opts.ExcludeTests && !forward && !bidir {
-				if n := e.g.GetNode(neighborID); isTestSource(n) {
-					continue
+			if full := hyd.GetNodesByIDs(ids); full != nil {
+				for i, n := range allNodes {
+					if fn := full[n.ID]; fn != nil {
+						allNodes[i] = fn
+					}
 				}
 			}
-
-			// Workspace/project scope. When opts.WorkspaceID is set,
-			// neighbours outside that scope are dropped along with the
-			// edge that pointed at them. Cross-workspace edges produced
-			// by the resolver only exist when an explicit
-			// cross_workspace_dep allows them, so this filter also
-			// acts as the query-time enforcement of "find_usages on a
-			// tuck symbol returns hits only from tuck".
-			if opts.WorkspaceID != "" {
-				if n := e.g.GetNode(neighborID); n != nil && !opts.ScopeAllows(n) {
-					continue
-				}
-			}
-
-			allEdges = append(allEdges, edge)
-
-			if visited[neighborID] {
-				continue
-			}
-			visited[neighborID] = true
-
-			n := e.g.GetNode(neighborID)
-			if n == nil {
-				continue
-			}
-
-			if len(allNodes) >= opts.Limit {
-				truncated = true
-				continue
-			}
-
-			allNodes = append(allNodes, n)
-			queue = append(queue, item{id: neighborID, depth: cur.depth + 1})
 		}
 	}
 

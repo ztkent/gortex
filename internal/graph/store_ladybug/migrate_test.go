@@ -13,7 +13,7 @@ func openMigrateTestStore(t *testing.T) *Store {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { _ = s.Close() })
 	return s
 }
 
@@ -84,7 +84,7 @@ func TestSchemaVersion_PersistsAcrossReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
-	defer s2.Close()
+	defer func() { _ = s2.Close() }()
 	v2, ok, err := readSchemaVersion(s2.conn)
 	if err != nil {
 		t.Fatalf("read after reopen: %v", err)

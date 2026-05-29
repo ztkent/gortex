@@ -1489,6 +1489,33 @@ type FileSubGraphReader interface {
 	GetFileSubGraph(filePath string) (nodes []*Node, edges []*Edge)
 }
 
+// FrontierHop is one (edge, neighbour) pair from a FrontierExpander: an
+// edge adjacent to a queried source node plus the node at its far end,
+// with the neighbour's columns populated and Meta left nil (traversal
+// callers don't read it). It lets a BFS record the edge and
+// scope-check / materialise the neighbour without a GetNode per edge.
+type FrontierHop struct {
+	Edge     *Edge
+	Neighbor *Node
+}
+
+// FrontierExpander is an optional backend capability: given a set of
+// source node IDs it returns, in a single round-trip, their adjacent
+// edges of the requested kinds plus the neighbour nodes — the
+// node-edge-node projection a BFS frontier needs. forward=true follows
+// outgoing edges (neighbour = edge target); forward=false follows
+// incoming (neighbour = edge source). kinds must be non-empty (the
+// directed-traversal contract). limit derives a deterministic per-call
+// row cap so a hub node's fan-out can no longer be dragged across the
+// boundary in full.
+//
+// query.Engine.bfs uses it when the reader implements it (the ladybug
+// store) and falls back to per-node GetOutEdges/GetInEdges + GetNode
+// otherwise — the in-memory graph needs no batching (its reads are O(1)).
+type FrontierExpander interface {
+	ExpandFrontier(ids []string, forward bool, kinds []EdgeKind, limit int) []FrontierHop
+}
+
 // FileSubGraphCountReader is the count-only sibling of
 // FileSubGraphReader: returns the file's nodes plus the number of
 // distinct edges adjacent to any of them, without materialising the

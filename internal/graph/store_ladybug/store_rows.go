@@ -10,6 +10,11 @@ const nodeReturnCols = `n.id, n.kind, n.name, n.qual_name, n.file_path, n.start_
 // to match rowToEdge's index reads.
 const edgeReturnCols = `a.id, b.id, e.kind, e.file_path, e.line, e.confidence, e.confidence_label, e.origin, e.tier, e.cross_repo, e.meta`
 
+// frontierEdgeCols is edgeReturnCols without e.meta — bfs / get_callers /
+// get_callchain never read Edge.Meta, and gob-decoding it per row is what
+// makes a wide fan-out expensive. Index order matches frontierHopFromRow.
+const frontierEdgeCols = `a.id, b.id, e.kind, e.file_path, e.line, e.confidence, e.confidence_label, e.origin, e.tier, e.cross_repo`
+
 func rowToNode(row []any) *graph.Node {
 	if len(row) < 12 {
 		return nil
@@ -83,6 +88,51 @@ func rowsToEdges(rows [][]any) []*graph.Edge {
 		}
 	}
 	return out
+}
+
+// frontierHopFromRow decodes one ExpandFrontier row: cols 0..9 are the
+// edge (frontierEdgeCols, no meta), cols 10..19 the neighbour node's
+// columns (kind, name, qual_name, file_path, start_line, end_line,
+// language, repo_prefix, workspace_id, project_id — no meta). The
+// neighbour id is the far end of the stored edge: To for an outgoing
+// (forward) hop, From for incoming.
+func frontierHopFromRow(row []any, forward bool) (graph.FrontierHop, bool) {
+	if len(row) < 20 {
+		return graph.FrontierHop{}, false
+	}
+	e := &graph.Edge{}
+	e.From, _ = row[0].(string)
+	e.To, _ = row[1].(string)
+	kind, _ := row[2].(string)
+	e.Kind = graph.EdgeKind(kind)
+	e.FilePath, _ = row[3].(string)
+	e.Line = int(asInt64(row[4]))
+	if v, ok := row[5].(float64); ok {
+		e.Confidence = v
+	}
+	e.ConfidenceLabel, _ = row[6].(string)
+	e.Origin, _ = row[7].(string)
+	e.Tier, _ = row[8].(string)
+	e.CrossRepo = asInt64(row[9]) != 0
+
+	n := &graph.Node{}
+	if forward {
+		n.ID = e.To
+	} else {
+		n.ID = e.From
+	}
+	knd, _ := row[10].(string)
+	n.Kind = graph.NodeKind(knd)
+	n.Name, _ = row[11].(string)
+	n.QualName, _ = row[12].(string)
+	n.FilePath, _ = row[13].(string)
+	n.StartLine = int(asInt64(row[14]))
+	n.EndLine = int(asInt64(row[15]))
+	n.Language, _ = row[16].(string)
+	n.RepoPrefix, _ = row[17].(string)
+	n.WorkspaceID, _ = row[18].(string)
+	n.ProjectID, _ = row[19].(string)
+	return graph.FrontierHop{Edge: e, Neighbor: n}, true
 }
 
 // asInt64 normalises every integer-shaped value the KuzuDB binding

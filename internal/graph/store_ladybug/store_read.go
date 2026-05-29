@@ -365,6 +365,77 @@ func (s *Store) GetNodesByIDs(ids []string) map[string]*graph.Node {
 	return out
 }
 
+// frontierRowCap bounds the adjacency rows ExpandFrontier materialises
+// per call, derived from the caller's node limit with a generous fan
+// multiplier: a normal node's full adjacency is never truncated, while a
+// routing hub (precisely what a natural-language "architecture" query
+// selects) can no longer stall the daemon by dragging its entire fan-out
+// across the cgo boundary. ORDER BY id in the query makes any truncation
+// deterministic, so a smart_context manifest pack-root stays stable.
+func frontierRowCap(limit int) int {
+	const fanMultiple, floor, ceil = 8, 256, 4096
+	switch {
+	case limit <= 0:
+		return ceil
+	case limit*fanMultiple < floor:
+		return floor
+	case limit*fanMultiple > ceil:
+		return ceil
+	default:
+		return limit * fanMultiple
+	}
+}
+
+// frontierOutQuery / frontierInQuery return, in one round-trip, every
+// adjacent edge of the frontier (of the given kinds) plus the neighbour
+// node's columns — unresolved/external targets filtered server-side
+// (both id encodings, see graph.IsUnresolvedTarget), ordered for
+// deterministic truncation, meta omitted.
+const frontierOutQuery = `MATCH (a:Node)-[e:Edge]->(b:Node)
+WHERE a.id IN $ids AND e.kind IN $kinds
+  AND NOT (b.id STARTS WITH 'unresolved::' OR b.id CONTAINS '::unresolved::' OR b.id STARTS WITH 'external::')
+RETURN ` + frontierEdgeCols + `, b.kind, b.name, b.qual_name, b.file_path, b.start_line, b.end_line, b.language, b.repo_prefix, b.workspace_id, b.project_id
+ORDER BY b.id LIMIT $k`
+
+const frontierInQuery = `MATCH (a:Node)-[e:Edge]->(b:Node)
+WHERE b.id IN $ids AND e.kind IN $kinds
+  AND NOT (a.id STARTS WITH 'unresolved::' OR a.id CONTAINS '::unresolved::' OR a.id STARTS WITH 'external::')
+RETURN ` + frontierEdgeCols + `, a.kind, a.name, a.qual_name, a.file_path, a.start_line, a.end_line, a.language, a.repo_prefix, a.workspace_id, a.project_id
+ORDER BY a.id LIMIT $k`
+
+// ExpandFrontier implements graph.FrontierExpander: one Cypher
+// round-trip returns the frontier's edges of the given kinds plus the
+// neighbour node columns, so the caller needs no GetNode per edge.
+func (s *Store) ExpandFrontier(ids []string, forward bool, kinds []graph.EdgeKind, limit int) []graph.FrontierHop {
+	if len(ids) == 0 || len(kinds) == 0 {
+		return nil
+	}
+	uniq := dedupeNonEmpty(ids)
+	if len(uniq) == 0 {
+		return nil
+	}
+	kindAny := make([]any, 0, len(kinds))
+	for _, k := range kinds {
+		kindAny = append(kindAny, string(k))
+	}
+	q := frontierOutQuery
+	if !forward {
+		q = frontierInQuery
+	}
+	rows := s.querySelect(q, map[string]any{
+		"ids":   stringSliceToAny(uniq),
+		"kinds": kindAny,
+		"k":     int64(frontierRowCap(limit)),
+	})
+	hops := make([]graph.FrontierHop, 0, len(rows))
+	for _, r := range rows {
+		if h, ok := frontierHopFromRow(r, forward); ok {
+			hops = append(hops, h)
+		}
+	}
+	return hops
+}
+
 // FindNodesByNames returns a map name→[]*Node for every input name.
 // Names that match no node are absent from the returned map.
 func (s *Store) FindNodesByNames(names []string) map[string][]*graph.Node {
