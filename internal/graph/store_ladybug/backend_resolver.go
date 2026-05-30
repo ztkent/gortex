@@ -7,6 +7,23 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 )
 
+// Type-position edges — a function/method/value "returns" / "is typed
+// as" / "extends" / "implements" / "composes" a TYPE — must resolve only
+// to a type or interface, never to a function/method/value that happens
+// to share the name. The Go resolver enforces this in resolveTypeRef
+// (internal/resolver/resolver.go); the name-only in-engine rules below
+// (ResolveSameFile / ResolveSamePackage / ResolveImportAware /
+// ResolveCrossRepo / ResolveUniqueNames) match purely on name and would
+// otherwise re-point e.g. a `returns` edge onto a same-named function —
+// a wrong edge that, because returns/typed_as aren't counted as a use of
+// a KindFunction, also makes that function look dead. These fragments
+// splice the same gate into each rule's candidate-count and target-match
+// WHERE clauses. cndKindGate / targetKindGate must stay in sync.
+const (
+	cndKindGate    = ` AND (NOT e.kind IN ['returns', 'typed_as', 'extends', 'implements', 'composes'] OR cnd.kind IN ['type', 'interface'])`
+	targetKindGate = ` AND (NOT e.kind IN ['returns', 'typed_as', 'extends', 'implements', 'composes'] OR target.kind IN ['type', 'interface'])`
+)
+
 // upgradeUnresolvedStubs stamps `kind='unresolved'` plus the extracted
 // `name` and `repo_prefix` on every auto-stub the bulk COPY created for
 // an unresolved call target. Without this, the per-rule resolver
@@ -75,11 +92,11 @@ MATCH (caller:Node)-[e:Edge]->(stub:Node)
 WHERE stub.kind = 'unresolved' AND caller.file_path <> ''
 WITH e, caller, stub, stub.name AS name
 OPTIONAL MATCH (cnd:Node {name: name})
-WHERE cnd.file_path = caller.file_path AND cnd.id <> stub.id
+WHERE cnd.file_path = caller.file_path AND cnd.id <> stub.id` + cndKindGate + `
 WITH e, caller, stub, name, count(cnd) AS cnt
 WHERE cnt = 1
 MATCH (target:Node {name: name})
-WHERE target.file_path = caller.file_path AND target.id <> stub.id
+WHERE target.file_path = caller.file_path AND target.id <> stub.id` + targetKindGate + `
 DELETE e
 CREATE (caller)-[newE:Edge {
     kind: e.kind,
@@ -121,7 +138,7 @@ WHERE cnd.repo_prefix = caller.repo_prefix
   AND cnd.id <> stub.id
   AND cnd.file_path <> caller.file_path
   AND cnd.file_path CONTAINS '/'
-  AND regexp_replace(cnd.file_path, '/[^/]+$', '') = caller_dir
+  AND regexp_replace(cnd.file_path, '/[^/]+$', '') = caller_dir` + cndKindGate + `
 WITH e, caller, stub, name, caller_dir, count(cnd) AS cnt
 WHERE cnt = 1
 MATCH (target:Node {name: name})
@@ -129,7 +146,7 @@ WHERE target.repo_prefix = caller.repo_prefix
   AND target.id <> stub.id
   AND target.file_path <> caller.file_path
   AND target.file_path CONTAINS '/'
-  AND regexp_replace(target.file_path, '/[^/]+$', '') = caller_dir
+  AND regexp_replace(target.file_path, '/[^/]+$', '') = caller_dir` + targetKindGate + `
 DELETE e
 CREATE (caller)-[newE:Edge {
     kind: e.kind,
@@ -171,7 +188,7 @@ WHERE importedFile.kind = 'file'
   AND importedFile.kind <> 'unresolved'
 OPTIONAL MATCH (cnd:Node {name: name})
 WHERE cnd.file_path = importedFile.file_path
-  AND cnd.id <> stub.id
+  AND cnd.id <> stub.id` + cndKindGate + `
 WITH e, caller, stub, name, count(DISTINCT cnd) AS cnt
 WHERE cnt = 1
 MATCH (callerFile2:Node {file_path: caller.file_path})
@@ -179,7 +196,7 @@ WHERE callerFile2.kind = 'file'
 MATCH (callerFile2)-[:Edge {kind: 'imports'}]->(importedFile2:Node)
 MATCH (target:Node {name: name})
 WHERE target.file_path = importedFile2.file_path
-  AND target.id <> stub.id
+  AND target.id <> stub.id` + targetKindGate + `
 DELETE e
 CREATE (caller)-[newE:Edge {
     kind: e.kind,
@@ -261,13 +278,13 @@ WITH e, caller, stub, stub.name AS name
 OPTIONAL MATCH (cnd:Node {name: name})
 WHERE cnd.repo_prefix <> caller.repo_prefix
   AND cnd.repo_prefix <> ''
-  AND cnd.id <> stub.id
+  AND cnd.id <> stub.id` + cndKindGate + `
 WITH e, caller, stub, name, count(cnd) AS cnt
 WHERE cnt = 1
 MATCH (target:Node {name: name})
 WHERE target.repo_prefix <> caller.repo_prefix
   AND target.repo_prefix <> ''
-  AND target.id <> stub.id
+  AND target.id <> stub.id` + targetKindGate + `
 DELETE e
 CREATE (caller)-[newE:Edge {
     kind: e.kind,
@@ -476,9 +493,11 @@ MATCH (caller:Node)-[e:Edge]->(stub:Node)
 WHERE stub.kind = 'unresolved'
 WITH e, caller, stub, stub.name AS name
 OPTIONAL MATCH (cnd:Node {name: name})
+WHERE (NOT e.kind IN ['returns', 'typed_as', 'extends', 'implements', 'composes'] OR cnd.kind IN ['type', 'interface'])
 WITH e, caller, stub, name, count(cnd) AS cnt
 WHERE cnt = 1
 MATCH (target:Node {name: name})
+WHERE (NOT e.kind IN ['returns', 'typed_as', 'extends', 'implements', 'composes'] OR target.kind IN ['type', 'interface'])
 DELETE e
 CREATE (caller)-[newE:Edge {
     kind: e.kind,
