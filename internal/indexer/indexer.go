@@ -75,7 +75,7 @@ type IndexResult struct {
 	// (MaxExtractMillis). Each is recorded in the graph as a synthetic
 	// file node carrying skipped_due_to_size / skipped_due_to_timeout
 	// telemetry. Zero unless one of those caps is set.
-	SkippedFiles int          `json:"skipped_files,omitempty"`
+	SkippedFiles int `json:"skipped_files,omitempty"`
 	// DeletedFileCount is the number of previously-indexed files that
 	// were evicted this pass because they no longer exist on disk (only
 	// populated by IncrementalReindex). Together with StaleFileCount it
@@ -110,7 +110,7 @@ type IndexError struct {
 
 // Indexer walks a repository and populates the graph.
 type Indexer struct {
-	graph         graph.Store
+	graph graph.Store
 	// indexCount tracks how many IndexCtx calls this Indexer has
 	// completed. Gates the cold-start shadow-swap: each per-repo
 	// Indexer in MultiIndexer is fresh (indexCount==0), so all of
@@ -769,12 +769,16 @@ func (idx *Indexer) RunDeferredPasses(ctx context.Context) {
 		return
 	}
 	reporter := progress.FromContext(ctx)
+	tphase := time.Now()
+	var dGoMod, dResolve, dEnrich, dContract time.Duration
 
 	// Materialise dep::<module> contract nodes from go.mod BEFORE
 	// ResolveAll so the resolver's import bridge can re-target Go
 	// imports of declared modules to their dep contract node instead
 	// of producing an `external::` stub.
 	idx.extractGoModContracts(idx.pendingContractReg)
+	dGoMod = time.Since(tphase)
+	tphase = time.Now()
 
 	// Per-repo resolver.ResolveAll walks the entire shared graph; with R
 	// repos and E edges that's O(R · E). The MultiIndexer batch driver
@@ -786,6 +790,8 @@ func (idx *Indexer) RunDeferredPasses(ctx context.Context) {
 		reporter.Report("resolving references", 0, 0)
 		idx.resolver.ResolveAll()
 	}
+	dResolve = time.Since(tphase)
+	tphase = time.Now()
 
 	if idx.semanticMgr != nil && idx.semanticMgr.Enabled() && idx.semanticMgr.HasProviders() {
 		reporter.Report("semantic enrichment", 0, 0)
@@ -807,6 +813,9 @@ func (idx *Indexer) RunDeferredPasses(ctx context.Context) {
 		}
 	}
 
+	dEnrich = time.Since(tphase)
+	tphase = time.Now()
+
 	reporter.Report("extracting contracts", 0, 0)
 	// extractGoModContracts already ran (see above) so dep nodes
 	// were available during ResolveAll's import-bridge pass.
@@ -814,6 +823,13 @@ func (idx *Indexer) RunDeferredPasses(ctx context.Context) {
 	idx.extractDIContracts(idx.pendingContractReg)
 	idx.commitContracts(idx.pendingContractReg)
 	idx.pendingContractReg = nil
+	dContract = time.Since(tphase)
+	idx.logger.Info("DEFERRED-TIMING per-repo",
+		zap.String("repo", idx.repoPrefix),
+		zap.Duration("gomod", dGoMod),
+		zap.Duration("resolve", dResolve),
+		zap.Duration("enrich", dEnrich),
+		zap.Duration("contract_commit", dContract))
 }
 
 // RootPath returns the root path used for relative path computation.
@@ -3628,8 +3644,8 @@ func (idx *Indexer) IncrementalReindexPaths(root string, paths []string) (*Index
 
 	nodes, edges := idx.repoNodeEdgeCount()
 	result := &IndexResult{
-		NodeCount:      nodes,
-		EdgeCount:      edges,
+		NodeCount:        nodes,
+		EdgeCount:        edges,
 		FileCount:        len(diskFiles),
 		StaleFileCount:   len(staleFiles),
 		DeletedFileCount: len(deletedFiles),
@@ -3846,8 +3862,8 @@ func (idx *Indexer) IncrementalReindex(root string) (*IndexResult, error) {
 
 	nodes, edges := idx.repoNodeEdgeCount()
 	result := &IndexResult{
-		NodeCount:      nodes,
-		EdgeCount:      edges,
+		NodeCount:        nodes,
+		EdgeCount:        edges,
 		FileCount:        len(diskFiles),
 		StaleFileCount:   len(staleFiles),
 		DeletedFileCount: len(deletedFiles),

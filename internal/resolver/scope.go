@@ -150,7 +150,7 @@ func scopeUseAliases(m map[string]any) map[string]string {
 // because legacy edges may not carry language). Returning nil keeps
 // the resolver behavior identical for unsupported languages.
 func (r *Resolver) preferScopeCandidate(e *graph.Edge, name string, candidates []*graph.Node) *graph.Node {
-	caller := r.graph.GetNode(e.From)
+	caller := r.cachedGetNode(e.From)
 	if caller == nil {
 		return nil
 	}
@@ -197,9 +197,9 @@ func (r *Resolver) preferCStaticCandidate(e *graph.Edge, caller *graph.Node, can
 // for an unqualified call `foo(a, b)`, if any of a's, b's argument
 // types name a class in namespace `N`, then `N::foo` is a candidate.
 // Implementation order:
-//   1. Same-namespace function/method match (lexical scope).
-//   2. ADL: walk each scope_arg_types entry's namespace.
-//   3. Fall through to the generic cascade.
+//  1. Same-namespace function/method match (lexical scope).
+//  2. ADL: walk each scope_arg_types entry's namespace.
+//  3. Fall through to the generic cascade.
 func (r *Resolver) preferCppScopeCandidate(e *graph.Edge, caller *graph.Node, name string, candidates []*graph.Node) *graph.Node {
 	callerNs := scopeMetaString(caller.Meta, MetaScopeNamespace)
 	if callerNs != "" {
@@ -453,4 +453,3 @@ func splitQualifiedFunctionName(name string) (ns, base string) {
 	}
 	return "", name
 }
-

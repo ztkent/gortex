@@ -349,6 +349,7 @@ func (mi *MultiIndexer) RunDeferredPassesAll(ctx context.Context) {
 	}
 	if mi.graph != nil {
 		master := resolver.New(mi.graph)
+		master.SetLogger(mi.logger)
 		// Mirror the resolve-time LSP helper onto the master pass
 		// too — RunDeferredPassesAll is where placeholder edges
 		// added by deferred per-repo passes get resolved in batch,
@@ -359,7 +360,9 @@ func (mi *MultiIndexer) RunDeferredPassesAll(ctx context.Context) {
 		}
 		master.SetNpmAliasResolver(mi.npmAliasResolver())
 		master.SetWorkspaceMembership(mi.workspaceMembershipResolver())
+		mt := time.Now()
 		master.ResolveAll()
+		mi.logger.Info("DEFERRED-TIMING master.ResolveAll", zap.Duration("elapsed", time.Since(mt)))
 	}
 }
 

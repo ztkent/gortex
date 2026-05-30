@@ -5,6 +5,10 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
+
+	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/graph"
 )
@@ -62,9 +66,20 @@ type CrossWorkspaceDepLookup func(sourceWorkspaceID string) []CrossWorkspaceDepR
 // the target workspace via `cross_workspace_deps` AND, for import
 // edges, the import path has a declared-module prefix.
 type CrossRepoResolver struct {
-	graph        graph.Store
-	dirIndex     map[string][]*graph.Node
-	lastDirIndex map[string][]*graph.Node
+	graph graph.Store
+	// nodeByID / nodesByName: per-pass batched lookup cache, the
+	// cross-repo mirror of the fields on Resolver (resolver.go).
+	// Populated by warmLookupCache before the per-edge fan-out and
+	// cleared on return; cachedGetNode / cachedFindNodesByName consult
+	// them first. Without it the cross-repo pass fires one
+	// GetNode/FindNodesByName Cypher per pending edge — across 200k+
+	// unresolved edges that is a warmup hang on disk backends.
+	logger          *zap.Logger
+	nodeByID        map[string]*graph.Node
+	nodesByName     map[string][]*graph.Node
+	nodesByQualName map[string]*graph.Node
+	dirIndex        map[string][]*graph.Node
+	lastDirIndex    map[string][]*graph.Node
 	// reachableReposByFile maps a caller file's ID to the set of repo
 	// prefixes that file imports (derived from resolved EdgeImports
 	// edges). It is the import-reachability evidence gate: a name-only
@@ -99,7 +114,16 @@ type CrossRepoResolver struct {
 
 // NewCrossRepo creates a CrossRepoResolver for the given graph.
 func NewCrossRepo(g graph.Store) *CrossRepoResolver {
-	return &CrossRepoResolver{graph: g, mu: g.ResolveMutex()}
+	return &CrossRepoResolver{graph: g, mu: g.ResolveMutex(), logger: zap.NewNop()}
+}
+
+// SetLogger attaches a logger so ResolveAll emits pass progress (the
+// cross-repo mirror of Resolver.SetLogger). A nil logger becomes a no-op.
+func (cr *CrossRepoResolver) SetLogger(l *zap.Logger) {
+	if l == nil {
+		l = zap.NewNop()
+	}
+	cr.logger = l
 }
 
 // SetCrossWorkspaceDepLookup wires the boundary rule. After this
@@ -116,7 +140,7 @@ func (cr *CrossRepoResolver) SetCrossWorkspaceDepLookup(lookup CrossWorkspaceDep
 // an edge. Falls back to RepoPrefix to match Contract.Effective-
 // Workspace's "missing → repo-name" rule.
 func (cr *CrossRepoResolver) callerWorkspaceID(e *graph.Edge) string {
-	from := cr.graph.GetNode(e.From)
+	from := cr.cachedGetNode(e.From)
 	if from == nil {
 		return ""
 	}
@@ -190,12 +214,52 @@ func (cr *CrossRepoResolver) ResolveAll() *CrossRepoStats {
 	// Predicate-shaped read: disk backends only enumerate the
 	// "unresolved::*" slice (the only one this pass mutates). Batch
 	// mutations to commit in chunks at the end.
-	var reindexBatch []graph.EdgeReindex
+	// Materialise the pending slice once so warmLookupCache can batch
+	// the per-edge GetNode / FindNodesByName the cascade would otherwise
+	// fire serially (the cross-repo warmup storm on disk backends).
+	var pending []*graph.Edge
 	for e := range cr.graph.EdgesWithUnresolvedTarget() {
-		cr.resolveEdge(e, stats, &reindexBatch)
+		pending = append(pending, e)
 	}
+	cr.warmLookupCache(pending)
+	defer cr.clearLookupCache()
+
+	passStart := time.Now()
+	cr.logger.Info("cross-repo resolve: pass start", zap.Int("pending", len(pending)))
+	var processed atomic.Int64
+	progressDone := make(chan struct{})
+	go func() {
+		t := time.NewTicker(3 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-progressDone:
+				return
+			case <-t.C:
+				cr.logger.Info("cross-repo resolve: compute progress",
+					zap.Int64("processed", processed.Load()),
+					zap.Int("pending", len(pending)),
+					zap.Duration("elapsed", time.Since(passStart)))
+			}
+		}
+	}()
+
+	var reindexBatch []graph.EdgeReindex
+	for _, e := range pending {
+		cr.resolveEdge(e, stats, &reindexBatch)
+		processed.Add(1)
+	}
+	close(progressDone)
+	cr.logger.Info("cross-repo resolve: compute done",
+		zap.Int("pending", len(pending)),
+		zap.Int("reindex_batch", len(reindexBatch)),
+		zap.Duration("elapsed", time.Since(passStart)))
 	if len(reindexBatch) > 0 {
+		applyStart := time.Now()
 		cr.graph.ReindexEdges(reindexBatch)
+		cr.logger.Info("cross-repo resolve: apply done",
+			zap.Int("edges", len(reindexBatch)),
+			zap.Duration("elapsed", time.Since(applyStart)))
 	}
 	// Materialise the cross_repo_* edge layer over the freshly lifted
 	// calls / implements / extends edges.
@@ -374,7 +438,7 @@ func (cr *CrossRepoResolver) repoReachable(e *graph.Edge, targetRepo string) boo
 // reachableReposByFile. Falls back to the edge's own FilePath when the
 // From node can't be resolved.
 func (cr *CrossRepoResolver) callerFileID(e *graph.Edge) string {
-	if from := cr.graph.GetNode(e.From); from != nil {
+	if from := cr.cachedGetNode(e.From); from != nil {
 		if from.Kind == graph.KindFile {
 			return from.ID
 		}
@@ -391,6 +455,144 @@ func (cr *CrossRepoResolver) callerFileID(e *graph.Edge) string {
 // ReindexEdge transaction. The caller flushes the accumulated batch
 // after the whole pass via ReindexEdges so disk backends amortise
 // the commit cost.
+// warmLookupCache batches the per-edge GetNode / FindNodesByName the
+// cross-repo worker loop would otherwise fire serially — the mirror of
+// Resolver.warmLookupCache (resolver.go). It includes the authoritative
+// negative: a queried name with no node records an empty result, so the
+// 200k+ external-call stubs return from the cache instead of each
+// scanning the unindexed name column (the warmup hang).
+func (cr *CrossRepoResolver) warmLookupCache(pending []*graph.Edge) {
+	if len(pending) == 0 {
+		return
+	}
+	idSet := make(map[string]struct{}, len(pending))
+	nameSet := make(map[string]struct{}, len(pending))
+	qualNameSet := make(map[string]struct{})
+	for _, e := range pending {
+		if e == nil {
+			continue
+		}
+		if e.From != "" {
+			idSet[e.From] = struct{}{}
+		}
+		if name := identifierFromTarget(graph.UnresolvedName(e.To)); name != "" {
+			nameSet[name] = struct{}{}
+		}
+		// Import targets: mirror resolveEdge's dispatch (TrimPrefix of the
+		// bare unresolved:: form) so the seeded qual-name matches what
+		// resolveImport looks up via GetNodeByQualName.
+		if t := strings.TrimPrefix(e.To, unresolvedPrefix); strings.HasPrefix(t, "import::") {
+			if qn := strings.TrimPrefix(t, "import::"); qn != "" {
+				qualNameSet[qn] = struct{}{}
+			}
+		}
+	}
+	ids := make([]string, 0, len(idSet))
+	for id := range idSet {
+		ids = append(ids, id)
+	}
+	names := make([]string, 0, len(nameSet))
+	for n := range nameSet {
+		names = append(names, n)
+	}
+	cr.nodeByID = cr.graph.GetNodesByIDs(ids)
+	cr.nodesByName = cr.graph.FindNodesByNames(names)
+	// Authoritative negatives: record an empty result for every queried
+	// name that has no node, so the cached lookup returns empty instead
+	// of falling through to a per-edge FindNodesByName scan.
+	if cr.nodesByName == nil {
+		cr.nodesByName = make(map[string][]*graph.Node, len(nameSet))
+	}
+	for n := range nameSet {
+		if _, ok := cr.nodesByName[n]; !ok {
+			cr.nodesByName[n] = nil
+		}
+	}
+	// Fold every candidate node into the id cache too, so a downstream
+	// GetNode on a chosen target hits instead of going to the store.
+	if cr.nodeByID == nil && len(cr.nodesByName) > 0 {
+		cr.nodeByID = make(map[string]*graph.Node, len(cr.nodesByName))
+	}
+	for _, hits := range cr.nodesByName {
+		for _, n := range hits {
+			if n == nil || n.ID == "" {
+				continue
+			}
+			if _, ok := cr.nodeByID[n.ID]; !ok {
+				cr.nodeByID[n.ID] = n
+			}
+		}
+	}
+	// Pre-warm the import qual-name cache + authoritative negatives, so
+	// resolveImport's GetNodeByQualName hits instead of scanning the
+	// unindexed qual_name column per cross-repo import edge.
+	if len(qualNameSet) > 0 {
+		qns := make([]string, 0, len(qualNameSet))
+		for q := range qualNameSet {
+			qns = append(qns, q)
+		}
+		cr.nodesByQualName = cr.graph.GetNodesByQualNames(qns)
+		if cr.nodesByQualName == nil {
+			cr.nodesByQualName = make(map[string]*graph.Node, len(qualNameSet))
+		}
+		for q := range qualNameSet {
+			if _, ok := cr.nodesByQualName[q]; !ok {
+				cr.nodesByQualName[q] = nil
+			}
+		}
+	}
+}
+
+func (cr *CrossRepoResolver) clearLookupCache() {
+	cr.nodeByID = nil
+	cr.nodesByName = nil
+	cr.nodesByQualName = nil
+}
+
+// cachedGetNode consults the per-pass id cache first, falling through to
+// the store on a miss (positive-only: absence means "not pre-warmed").
+func (cr *CrossRepoResolver) cachedGetNode(id string) *graph.Node {
+	if id == "" {
+		return nil
+	}
+	if cr.nodeByID != nil {
+		if n, ok := cr.nodeByID[id]; ok {
+			return n
+		}
+	}
+	return cr.graph.GetNode(id)
+}
+
+// cachedFindNodesByName consults the per-pass name cache first. A
+// pre-warmed name with no node returns empty (authoritative negative);
+// a name absent from the cache falls through to the store.
+func (cr *CrossRepoResolver) cachedFindNodesByName(name string) []*graph.Node {
+	if name == "" {
+		return nil
+	}
+	if cr.nodesByName != nil {
+		if hits, ok := cr.nodesByName[name]; ok {
+			return hits
+		}
+	}
+	return cr.graph.FindNodesByName(name)
+}
+
+// cachedGetNodeByQualName serves resolveImport's qual-name lookup from the
+// per-pass cache (authoritative negative for queried-but-absent import
+// paths), mirroring Resolver.cachedGetNodeByQualName.
+func (cr *CrossRepoResolver) cachedGetNodeByQualName(qualName string) *graph.Node {
+	if qualName == "" {
+		return nil
+	}
+	if cr.nodesByQualName != nil {
+		if n, ok := cr.nodesByQualName[qualName]; ok {
+			return n
+		}
+	}
+	return cr.graph.GetNodeByQualName(qualName)
+}
+
 func (cr *CrossRepoResolver) resolveEdge(e *graph.Edge, stats *CrossRepoStats, batch *[]graph.EdgeReindex) {
 	oldTo := e.To
 	target := strings.TrimPrefix(e.To, unresolvedPrefix)
@@ -420,7 +622,7 @@ func (cr *CrossRepoResolver) resolveEdge(e *graph.Edge, stats *CrossRepoStats, b
 
 // callerRepoPrefix returns the RepoPrefix of the node that owns the edge's From field.
 func (cr *CrossRepoResolver) callerRepoPrefix(e *graph.Edge) string {
-	fromNode := cr.graph.GetNode(e.From)
+	fromNode := cr.cachedGetNode(e.From)
 	if fromNode != nil {
 		return fromNode.RepoPrefix
 	}
@@ -428,7 +630,7 @@ func (cr *CrossRepoResolver) callerRepoPrefix(e *graph.Edge) string {
 }
 
 func (cr *CrossRepoResolver) resolveFunctionCall(e *graph.Edge, funcName string, stats *CrossRepoStats) {
-	candidates := cr.graph.FindNodesByName(funcName)
+	candidates := cr.cachedFindNodesByName(funcName)
 	if len(candidates) == 0 {
 		stats.Unresolved++
 		return
@@ -487,7 +689,7 @@ func (cr *CrossRepoResolver) resolveImport(e *graph.Edge, importPath string, sta
 	importPath, npmAliased := rewriteNpmAliasImport(cr.npmAlias, e.FilePath, importPath)
 
 	// Look for a package node with matching qualified name.
-	node := cr.graph.GetNodeByQualName(importPath)
+	node := cr.cachedGetNodeByQualName(importPath)
 	if node != nil {
 		// Workspace boundary check: if the candidate is in a
 		// different workspace, allow only when an explicit
@@ -617,7 +819,7 @@ func (cr *CrossRepoResolver) resolveImport(e *graph.Edge, importPath string, sta
 	// package node itself. See Resolver.resolveImport.
 	if npmAliased {
 		if pkg := npmPackagePrefix(importPath); pkg != "" {
-			if node := cr.graph.GetNodeByQualName(pkg); node != nil &&
+			if node := cr.cachedGetNodeByQualName(pkg); node != nil &&
 				cr.crossWorkspaceEligible(callerWS, candidateWorkspaceID(node), pkg) {
 				e.To = node.ID
 				if node.RepoPrefix != callerRepo {
@@ -637,7 +839,7 @@ func (cr *CrossRepoResolver) resolveImport(e *graph.Edge, importPath string, sta
 }
 
 func (cr *CrossRepoResolver) resolveMethodCall(e *graph.Edge, methodName string, stats *CrossRepoStats) {
-	candidates := cr.graph.FindNodesByName(methodName)
+	candidates := cr.cachedFindNodesByName(methodName)
 	if len(candidates) == 0 {
 		stats.Unresolved++
 		return

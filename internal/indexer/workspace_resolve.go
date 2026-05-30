@@ -278,6 +278,7 @@ func (mi *MultiIndexer) RunGlobalResolve() {
 		return
 	}
 	cr := resolver.NewCrossRepo(mi.graph)
+	cr.SetLogger(mi.logger)
 	cr.SetCrossWorkspaceDepLookup(mi.crossWorkspaceLookup())
 	cr.SetNpmAliasResolver(mi.npmAliasResolver())
 	cr.SetWorkspaceMembership(mi.workspaceMembershipResolver())
