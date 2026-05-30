@@ -83,6 +83,14 @@ type Store interface {
 	GetNode(id string) *Node
 	GetNodeByQualName(qualName string) *Node
 
+	// GetNodesByQualNames returns a map qualName→*Node (first match per
+	// qual_name) for the whole batch — the qual-name twin of
+	// FindNodesByNames. It pre-warms the resolver's import resolution:
+	// qual_name is unindexed on the ladybug backend, so the per-edge
+	// GetNodeByQualName in resolveImport is a full node scan per import
+	// edge; one batched IN-scan collapses that to a single query.
+	GetNodesByQualNames(qualNames []string) map[string]*Node
+
 	// --- Name + scope queries --------------------------------------
 
 	FindNodesByName(name string) []*Node
@@ -460,6 +468,7 @@ type VectorItem struct {
 	NodeID string
 	Vec    []float32
 }
+
 // VectorHit is a single ANN search result: the matched node ID
 // plus its distance to the query vector under the backend's
 // metric (cosine by default in Ladybug). LOWER distance = more
@@ -534,12 +543,12 @@ type VectorSearcher interface {
 // graph predicate (Ladybug supports per-table predicates of the
 // form 'n.kind = "function"').
 type PageRankOpts struct {
-	NodeKinds      []NodeKind
-	EdgeKinds      []EdgeKind
-	DampingFactor  float64
-	MaxIterations  int
-	Tolerance      float64
-	Limit          int // 0 = return every ranked node
+	NodeKinds     []NodeKind
+	EdgeKinds     []EdgeKind
+	DampingFactor float64
+	MaxIterations int
+	Tolerance     float64
+	Limit         int // 0 = return every ranked node
 }
 
 // PageRankHit is one row of the PageRank output: the node ID plus

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/zzet/gortex/internal/graph"
 )
@@ -281,7 +282,36 @@ func (s *Store) copyBulkLocked(nodes []*graph.Node, edges []*graph.Edge) error {
 		// tabs, so TSV sidesteps the quoting problem entirely.
 		copyQ := fmt.Sprintf("COPY Node FROM '%s' (HEADER=false, DELIM='\t')", escapeCypherStringLit(nodesPath))
 		if err := s.runCopyPooled(copyQ); err != nil {
-			return fmt.Errorf("copy nodes: %w", err)
+			if !isNonEmptyNodeCopyErr(err) {
+				return fmt.Errorf("copy nodes: %w", err)
+			}
+			// Kuzu rejects COPY into a non-empty primary-key node table
+			// unless its PK hash index is currently materialised — and
+			// that depends on auto-checkpoint timing, so on a fresh
+			// store every per-repo drain after the first fails here
+			// (only the first repo, COPYing into the empty table,
+			// persisted). The bulk path used to fall back to per-row
+			// MERGEs for the non-empty case; that was dropped on the
+			// assumption per-repo-prefixed stub IDs removed all PK
+			// collisions — true for collisions, but it overlooked this
+			// empty-table precondition. Re-load via LOAD FROM ... MERGE:
+			// a DML write with no empty-table precondition, one
+			// statement, no per-row Go round-trip. Mirrors the
+			// SymbolFTS re-bulk. CAST the two INT64 columns; the rest
+			// are STRING. column0..11 are the positional names Ladybug
+			// assigns under header=false, matching writeNodesTSV order.
+			mergeQ := fmt.Sprintf(
+				"LOAD FROM '%s' (header=false, delim='\\t') "+
+					"MERGE (n:Node {id: column0}) "+
+					"SET n.kind = column1, n.name = column2, n.qual_name = column3, "+
+					"n.file_path = column4, n.start_line = CAST(column5 AS INT64), "+
+					"n.end_line = CAST(column6 AS INT64), n.language = column7, "+
+					"n.repo_prefix = column8, n.workspace_id = column9, "+
+					"n.project_id = column10, n.meta = column11",
+				escapeCypherStringLit(nodesPath))
+			if err := s.runCopyPooled(mergeQ); err != nil {
+				return fmt.Errorf("load nodes (merge fallback after non-empty copy): %w", err)
+			}
 		}
 	}
 
@@ -297,6 +327,16 @@ func (s *Store) copyBulkLocked(nodes []*graph.Node, edges []*graph.Edge) error {
 	}
 
 	return nil
+}
+
+// isNonEmptyNodeCopyErr reports whether err is Kuzu's rejection of a
+// COPY into a non-empty primary-key node table whose hash index isn't
+// materialised. The string is verbatim from liblbug 0.17.0; it is the
+// one error the COPY→MERGE fallback in copyBulkLocked recovers from
+// (any other COPY failure is propagated). Coupled to the engine
+// message by necessity — liblbug exposes no typed error for it.
+func isNonEmptyNodeCopyErr(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "non-empty primary-key node table")
 }
 
 // runCopyPooled runs a parameter-less COPY query. Holds writeMu
@@ -426,6 +466,183 @@ func writeEdgesTSV(path string, edges []*graph.Edge) error {
 				}
 			}
 			if _, err := bw.WriteString(f); err != nil {
+				return err
+			}
+		}
+		if err := bw.WriteByte('\n'); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// reindexEdgesBulk applies a resolver reindex batch with three
+// file-driven statements instead of the per-edge DELETE+upsert loop:
+//
+//  1. MERGE-stub every distinct endpoint node (caller + resolved target),
+//     parity with upsertEdgeLocked's mergeStubNodeLocked so a resolution
+//     to a not-yet-materialised target node isn't silently dropped, and
+//     so COPY (which requires both rel endpoints to exist) can't fail.
+//  2. COPY the resolved edges into the rel table — a STREAMING bulk load.
+//     The earlier LOAD ... MATCH ... MERGE form materialised the whole
+//     80k MATCH+join in the buffer pool and OOMed at cold-start scale;
+//     COPY streams. newEdges is de-duped by identity first since COPY
+//     appends (rel tables have no primary key, so it never rejects).
+//  3. DELETE the old stub edges by their exact identity (LOAD-driven).
+//
+// The LOAD/COPY forms (file scans), NOT UNWIND, are what sidestep the
+// "unordered_map::at: key not found" C++ panic that forced ReindexEdges
+// onto the per-edge loop in the first place. All three run under one
+// writeMu hold.
+//
+// Returns false on any failure so ReindexEdges falls back to the per-edge
+// loop; a partial bulk apply is safe to re-drive per-edge because the
+// per-edge upsert MERGEs idempotently over any COPY-inserted rows and the
+// DELETE is keyed on the stub's exact identity.
+func (s *Store) reindexEdgesBulk(changed []graph.EdgeReindex) (ok bool) {
+	dir, err := os.MkdirTemp("", "gortex-reindex-*")
+	if err != nil {
+		return false
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+
+	endpoints := make(map[string]struct{}, len(changed)*2)
+	newEdges := make([]*graph.Edge, 0, len(changed))
+	// COPY appends (no MERGE-style dedup), so de-dup the resolved edges
+	// by identity (from,to,kind,file,line) before writing the file —
+	// guards against a batch that resolves two stubs at the same call
+	// site to the same target emitting a duplicate rel.
+	seen := make(map[string]struct{}, len(changed))
+	for _, r := range changed {
+		if r.Edge.From != "" {
+			endpoints[r.Edge.From] = struct{}{}
+		}
+		if r.Edge.To != "" {
+			endpoints[r.Edge.To] = struct{}{}
+		}
+		key := r.Edge.From + "\x00" + r.Edge.To + "\x00" + string(r.Edge.Kind) + "\x00" + r.Edge.FilePath + "\x00" + strconv.Itoa(r.Edge.Line)
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		newEdges = append(newEdges, r.Edge)
+	}
+
+	endpointsPath := filepath.Join(dir, "endpoints.csv")
+	if err := writeIDsTSV(endpointsPath, endpoints); err != nil {
+		return false
+	}
+	newPath := filepath.Join(dir, "new_edges.csv")
+	if err := writeEdgesTSV(newPath, newEdges); err != nil {
+		return false
+	}
+	keysPath := filepath.Join(dir, "old_keys.csv")
+	if err := writeReindexDeleteKeysTSV(keysPath, changed); err != nil {
+		return false
+	}
+
+	stubQ := fmt.Sprintf(
+		"LOAD FROM '%s' (header=false, delim='\t') "+
+			"MERGE (n:Node {id: column0}) "+
+			"ON CREATE SET n.kind='', n.name='', n.qual_name='', n.file_path='', "+
+			"n.start_line=0, n.end_line=0, n.language='', n.repo_prefix='', "+
+			"n.workspace_id='', n.project_id='', n.meta=''",
+		escapeCypherStringLit(endpointsPath))
+	// Insert via COPY, not LOAD ... MATCH ... MERGE: COPY streams the file
+	// into the rel table, whereas MERGE materialises the entire MATCH+join
+	// in the buffer pool and OOMs at cold-start scale ("Buffer manager
+	// exception: the buffer pool is full" on an 80k batch). The stub-merge
+	// above guarantees both endpoints exist (COPY into a rel needs them),
+	// and newEdges is de-duped by identity, so an append-only COPY is
+	// correct here. COPY into a non-empty rel table appends (rel tables
+	// have no primary key — the non-empty-COPY rejection is node-only).
+	copyQ := fmt.Sprintf("COPY Edge FROM '%s' (HEADER=false, DELIM='\t')", escapeCypherStringLit(newPath))
+	delQ := fmt.Sprintf(
+		"LOAD FROM '%s' (header=false, delim='\t') "+
+			"MATCH (a:Node {id: column0})-[e:Edge {kind: column1, file_path: column2, line: CAST(column3 AS INT64)}]->(b:Node {id: column4}) "+
+			"DELETE e",
+		escapeCypherStringLit(keysPath))
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	// Order matters: stub endpoints and insert resolved edges before
+	// deleting the stub rows. Insert-then-delete keeps the resolved edge
+	// distinct from the deleted one (different To) at every step. Each
+	// step is timed + logged independently so a slow or failing step is
+	// visible (no `||` short-circuit hiding which ran).
+	steps := [...]struct {
+		label string
+		query string
+	}{
+		{"stub-merge", stubQ},
+		{"copy-insert", copyQ},
+		{"delete", delQ},
+	}
+	for _, st := range steps {
+		t0 := time.Now()
+		res, release, err := s.executeOrQuery(st.query, nil)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[REINDEX-BULK] %s FAILED (edges=%d, %s): %v\n",
+				st.label, len(changed), time.Since(t0).Round(time.Millisecond), err)
+			return false
+		}
+		if res != nil {
+			res.Close()
+		}
+		release()
+	}
+	s.writeGen.Add(1)
+	return true
+}
+
+// writeIDsTSV writes one sanitised node id per line — the endpoint set
+// the bulk reindex MERGE-stubs before inserting rels.
+func writeIDsTSV(path string, ids map[string]struct{}) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	bw := bufio.NewWriterSize(f, 1<<20)
+	defer func() { _ = bw.Flush() }()
+	for id := range ids {
+		if _, err := bw.WriteString(sanitizeTSV(id)); err != nil {
+			return err
+		}
+		if err := bw.WriteByte('\n'); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// writeReindexDeleteKeysTSV writes the identity of each stale stub edge to
+// delete: from, kind, file_path, line, oldTo (the row that still points at
+// the pre-resolution target).
+func writeReindexDeleteKeysTSV(path string, batch []graph.EdgeReindex) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	bw := bufio.NewWriterSize(f, 1<<20)
+	defer func() { _ = bw.Flush() }()
+	for _, r := range batch {
+		e := r.Edge
+		fields := [5]string{
+			sanitizeTSV(e.From),
+			sanitizeTSV(string(e.Kind)),
+			sanitizeTSV(e.FilePath),
+			strconv.Itoa(e.Line),
+			sanitizeTSV(r.OldTo),
+		}
+		for i, fld := range fields {
+			if i > 0 {
+				if err := bw.WriteByte('\t'); err != nil {
+					return err
+				}
+			}
+			if _, err := bw.WriteString(fld); err != nil {
 				return err
 			}
 		}

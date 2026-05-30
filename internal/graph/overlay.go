@@ -390,6 +390,27 @@ func (v *OverlaidView) GetNodeByQualName(qualName string) *Node {
 	return n
 }
 
+// GetNodesByQualNames resolves each name through GetNodeByQualName so the
+// overlay's layer-first / shadowed-file filtering applies — an inherited
+// base batch would bypass the overlay. Per-name is fine: an interactive
+// overlay's working set is small (the batch form exists for the
+// cold-warmup scale on the base store, not here). Returns only hits.
+func (v *OverlaidView) GetNodesByQualNames(qualNames []string) map[string]*Node {
+	out := make(map[string]*Node, len(qualNames))
+	for _, q := range qualNames {
+		if q == "" {
+			continue
+		}
+		if _, done := out[q]; done {
+			continue
+		}
+		if n := v.GetNodeByQualName(q); n != nil {
+			out[q] = n
+		}
+	}
+	return out
+}
+
 // FindNodesByName merges base hits (filtered to drop nodes in
 // overlaid files unless the overlay re-emitted them) with overlay
 // hits. Order is overlay-first, then base — callers that picked

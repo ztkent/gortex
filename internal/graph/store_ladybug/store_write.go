@@ -493,35 +493,53 @@ DELETE e`
 	s.upsertEdgeLocked(e)
 }
 
-// ReindexEdges UNWIND-batches the delete-old + insert-new pattern:
-// one MATCH-DELETE for the old-To rows, then the standard
-// UNWIND-based edge insert for the new-To rows. Both use chunked
-// statements so a 10k-row resolver pass fires ~4 Cypher Execs
-// instead of ~10k.
+// reindexBulkThreshold is the batch size at or above which ReindexEdges
+// routes through the file-driven bulk path (reindexEdgesBulk) instead of
+// the per-edge DELETE+upsert loop. An incremental single-file re-resolve
+// touches a handful of edges, where the per-edge loop is cheaper than
+// staging temp files; a cold-start global resolve rewrites tens of
+// thousands at once, where the per-edge loop serializes ~2 prepared Cypher
+// statements per edge through writeMu — the multi-minute cold-warmup tail
+// this threshold exists to cut.
+const reindexBulkThreshold = 256
+
+// ReindexEdges applies a resolver reindex batch: for each entry, delete
+// the stale edge (the row still pointing at OldTo) and upsert the rewritten
+// edge (Edge.To now resolved). Large batches go through reindexEdgesBulk
+// (three file-driven LOAD-FROM statements); small batches use the per-edge
+// loop. Both produce the same graph — see reindexEdgesBulk for why the
+// per-edge form can't simply be UNWIND-batched.
 func (s *Store) ReindexEdges(batch []graph.EdgeReindex) {
 	if len(batch) == 0 {
 		return
 	}
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
+	changed := make([]graph.EdgeReindex, 0, len(batch))
+	for _, r := range batch {
+		if r.Edge == nil || r.OldTo == r.Edge.To {
+			continue
+		}
+		changed = append(changed, r)
+	}
+	if len(changed) == 0 {
+		return
+	}
+	// Bulk path for large batches; on any failure it returns false and we
+	// fall through to the per-edge loop, so a resolver pass never silently
+	// drops resolutions.
+	if len(changed) >= reindexBulkThreshold && s.reindexEdgesBulk(changed) {
+		return
+	}
 	// Per-call ReindexEdge loop instead of the Kuzu-style UNWIND
 	// double-pass. Ladybug's UNWIND-MATCH-DELETE-then-UNWIND-MERGE
 	// pattern triggers the same "unordered_map::at: key not found"
 	// C++ panic as AddBatch's UNWIND-MERGE. The per-call form's
 	// explicit DELETE/MATCH/MERGE sequence sidesteps the engine bug.
-	// Bulk indexing routes through the BulkLoader COPY path so the
-	// resolver hot path doesn't pay this loop's cost on cold start.
-	mutated := false
-	for _, r := range batch {
-		if r.Edge == nil || r.OldTo == r.Edge.To {
-			continue
-		}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	for _, r := range changed {
 		s.reindexEdgeLocked(r.Edge, r.OldTo)
-		mutated = true
 	}
-	if mutated {
-		s.writeGen.Add(1)
-	}
+	s.writeGen.Add(1)
 }
 
 // RemoveEdge deletes every edge between (from, to) with the given

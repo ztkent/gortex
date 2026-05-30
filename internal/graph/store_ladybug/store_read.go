@@ -37,6 +37,35 @@ func (s *Store) GetNodeByQualName(qualName string) *graph.Node {
 	return rowToNode(rows[0])
 }
 
+// GetNodesByQualNames batches GetNodeByQualName into a single IN-scan.
+// qual_name is unindexed, so the per-edge GetNodeByQualName resolveImport
+// fires is a full node scan per import edge — the cold-warmup compute
+// storm. This collapses the whole import set to one scan; the resolver
+// pre-warms it once per pass and serves cachedGetNodeByQualName from the
+// result (plus an authoritative negative for queried-but-absent names).
+func (s *Store) GetNodesByQualNames(qualNames []string) map[string]*graph.Node {
+	if len(qualNames) == 0 {
+		return nil
+	}
+	uniq := dedupeNonEmpty(qualNames)
+	if len(uniq) == 0 {
+		return nil
+	}
+	const q = `MATCH (n:Node) WHERE n.qual_name IN $q RETURN ` + nodeReturnCols
+	rows := s.querySelect(q, map[string]any{"q": stringSliceToAny(uniq)})
+	out := make(map[string]*graph.Node, len(uniq))
+	for _, r := range rows {
+		n := rowToNode(r)
+		if n == nil || n.QualName == "" {
+			continue
+		}
+		if _, ok := out[n.QualName]; !ok {
+			out[n.QualName] = n // first match per qual_name (GetNodeByQualName uses LIMIT 1)
+		}
+	}
+	return out
+}
+
 // FindNodesByName returns every node whose Name matches.
 //
 // The predicate is expressed as an outer `WHERE n.name = $name`

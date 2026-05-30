@@ -1751,6 +1751,33 @@ func (g *Graph) GetNodeByQualName(qualName string) *Node {
 	return nil
 }
 
+// GetNodesByQualNames is the batch form of GetNodeByQualName — returns
+// only the qual_names that have a node (an absent key means "no node").
+// The in-memory byQual index makes each lookup O(1); the method exists
+// for Store-interface parity with the ladybug backend, where it collapses
+// N per-edge qual_name scans into a single IN-scan.
+func (g *Graph) GetNodesByQualNames(qualNames []string) map[string]*Node {
+	out := make(map[string]*Node, len(qualNames))
+	for _, q := range qualNames {
+		if q == "" {
+			continue
+		}
+		if _, done := out[q]; done {
+			continue
+		}
+		for _, s := range g.shards {
+			s.mu.RLock()
+			n, ok := s.byQual[q]
+			s.mu.RUnlock()
+			if ok {
+				out[q] = n
+				break
+			}
+		}
+	}
+	return out
+}
+
 // FindNodesByName returns all nodes matching the short name.
 //
 // Implementation walks every shard's byName bucket. The two-pass shape
@@ -2989,10 +3016,10 @@ func (g *Graph) ClassHierarchyTraverse(
 		return nil
 	}
 	type queued struct {
-		id         string
-		path       []string
-		edgeKinds  []EdgeKind
-		hops       int
+		id        string
+		path      []string
+		edgeKinds []EdgeKind
+		hops      int
 	}
 	visited := map[string]struct{}{seedID: {}}
 	queue := []queued{{id: seedID, path: nil, edgeKinds: nil, hops: 0}}
@@ -3231,4 +3258,3 @@ func (g *Graph) NodeDegreeByKinds(kinds []NodeKind, pathPrefix string) []NodeDeg
 	}
 	return out
 }
-
