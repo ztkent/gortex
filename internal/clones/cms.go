@@ -89,6 +89,27 @@ func (c *CMS) Add(x uint64) {
 	}
 }
 
+// Decrement decreases the counters for x by one across every hash row,
+// flooring each at 0: a counter already at 0 is left untouched. It is
+// the inverse of Add for incremental maintenance — when a body leaves
+// the corpus its shingle hashes are decremented so the boilerplate
+// estimate tracks the live set instead of growing monotonically.
+//
+// Decrementing a key that was never added is a no-op (every row sits
+// at 0 already, or sits at some other key's count that this row shares
+// — flooring at 0 keeps those undamaged). Because hash collisions can
+// leave a row's counter above this key's true frequency, Count stays an
+// upper bound after Decrement just as it is after Add; decrement never
+// makes Count drop below the true count.
+func (c *CMS) Decrement(x uint64) {
+	for i := 0; i < c.depth; i++ {
+		idx := cmsHash(x, c.seeds[i]) & c.mask
+		if c.counts[i][idx] > 0 {
+			c.counts[i][idx]--
+		}
+	}
+}
+
 // Count returns the minimum across all hash rows — the canonical CMS
 // frequency estimate. The result is an upper bound on the true count.
 func (c *CMS) Count(x uint64) uint32 {

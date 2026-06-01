@@ -91,6 +91,86 @@ func (ix *Index) Add(id string, sig Signature) {
 	}
 }
 
+// Remove deletes an item from the index, undoing a prior Add of the
+// same ID. If the ID was never added (no signature recorded) the call
+// is a no-op. For each band it recomputes the bucket key from the
+// stored signature, drops the ID from that bucket's member slice, and
+// removes the bucket entry entirely once it is empty so the band map
+// does not accumulate dead keys. The signature is then forgotten.
+//
+// Add(id, sig) followed by Remove(id) returns the index to a state in
+// which id sits in no band bucket and contributes no candidate — the
+// invariant the incremental maintenance path relies on when a body is
+// re-shingled or deleted.
+func (ix *Index) Remove(id string) {
+	sig, ok := ix.sigs[id]
+	if !ok {
+		return
+	}
+	for b := range Bands {
+		key := bandKey(b, sig)
+		ids := ix.bands[b][key]
+		// Drop the first occurrence of id; Add banks each ID once per
+		// band, so a single removal clears the membership.
+		for i, v := range ids {
+			if v == id {
+				ids = append(ids[:i], ids[i+1:]...)
+				break
+			}
+		}
+		if len(ids) == 0 {
+			delete(ix.bands[b], key)
+		} else {
+			ix.bands[b][key] = ids
+		}
+	}
+	delete(ix.sigs, id)
+}
+
+// QueryCandidates returns the candidate set for a single item: every
+// other ID that shares at least one band bucket with id, in canonical
+// sorted order. It is the per-item analogue of EmitCandidatesTo — the
+// pairs (id, c) for every c in the result are exactly the candidate
+// pairs EmitCandidatesTo would emit that touch id.
+//
+// id itself is excluded, results are deduplicated across bands, and
+// buckets larger than maxBucketSize are skipped using the identical cap
+// EmitCandidatesTo applies — so a candidate dropped by the batch fan-out
+// cap is also dropped here, keeping the maintained query and the batch
+// walk in lock-step. An id with no recorded signature yields nil.
+func (ix *Index) QueryCandidates(id string) []string {
+	sig, ok := ix.sigs[id]
+	if !ok {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	for b := range Bands {
+		key := bandKey(b, sig)
+		ids := ix.bands[b][key]
+		if len(ids) < 2 {
+			continue
+		}
+		if len(ids) > maxBucketSize {
+			continue
+		}
+		for _, v := range ids {
+			if v == id {
+				continue
+			}
+			seen[v] = struct{}{}
+		}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(seen))
+	for v := range seen {
+		out = append(out, v)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // bandKey hashes the Rows MinHash slots of band b into a bucket key.
 // The band index is folded into the hash so identical row values in
 // different bands cannot collide into the same logical bucket.
