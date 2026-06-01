@@ -85,4 +85,17 @@ CREATE TABLE IF NOT EXISTS vectors (
     dims    INTEGER NOT NULL,
     vec     BLOB NOT NULL
 ) WITHOUT ROWID;
+
+-- symbol_fts is the FTS5 full-text index over pre-tokenised symbol
+-- names. It replaces the multi-GB in-heap Bleve/BM25 index with an
+-- on-disk inverted index the SymbolSearcher / SymbolBundleSearcher
+-- query through. A standard (NOT contentless) FTS5 table so we can
+-- DELETE individual rows by node_id without an external content
+-- shadow. node_id is the join key back to nodes.id; repo_prefix is
+-- carried UNINDEXED so per-repo staleness wipes (DELETE … WHERE
+-- repo_prefix = ?) hit a literal column without a separate b-tree.
+-- Only "tokens" is indexed for matching. IF NOT EXISTS makes this
+-- idempotent on every Open, so an existing .sqlite gains the vtable
+-- on its next open + reindex.
+CREATE VIRTUAL TABLE IF NOT EXISTS symbol_fts USING fts5(node_id UNINDEXED, repo_prefix UNINDEXED, tokens);
 `
