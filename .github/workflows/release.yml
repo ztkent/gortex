@@ -210,8 +210,8 @@ jobs:
 
   # Windows is built on a NATIVE windows runner: the CGo tree-sitter
   # bindings need a real C/C++ toolchain (mingw-w64 ships on PATH there),
-  # and goreleaser-cross targets unix only. This job builds the .exe,
-  # bundles the mingw C/C++ runtime DLLs it links dynamically, zips,
+  # and goreleaser-cross targets unix only. This job builds a statically
+  # linked, self-contained .exe (no runtime DLLs to ship), zips it,
   # cosign-signs, and appends the zip to the release the `release` job
   # already created.
   release-windows:
@@ -231,54 +231,49 @@ jobs:
         with:
           cosign-release: v2.4.1
 
-      - name: Build gortex.exe
+      - name: Build gortex.exe (static mingw runtime)
         shell: bash
         env:
           CGO_ENABLED: "1"
         run: |
           set -euo pipefail
           VER="${GITHUB_REF#refs/tags/}"
-          go build -ldflags "-s -w -X main.version=${VER} -X main.commit=$(git rev-parse --short HEAD) -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o gortex.exe ./cmd/gortex/
+          # -extldflags=-static folds the mingw C/C++ runtime (libstdc++,
+          # libgcc, libwinpthread) into the .exe so it ships as a single
+          # self-contained binary — nothing to bundle alongside. The C++
+          # stdlib is in the link at all because some tree-sitter grammars
+          # carry C++ external scanners (e.g. go-sitter-forest norg); static
+          # linking just puts it inside the .exe instead of a DLL.
+          go build \
+            -ldflags "-s -w -X main.version=${VER} -X main.commit=$(git rev-parse --short HEAD) -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ) -extldflags=-static" \
+            -o gortex.exe ./cmd/gortex/
 
-      - name: Stage exe + runtime DLLs
+      - name: Verify gortex.exe is self-contained
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p stage
-          cp gortex.exe stage/
-
-          # A missing runtime DLL must FAIL the release, never ship a
-          # zip whose .exe can't start. `gcc -print-file-name` echoes the
-          # bare name (exit 0) when it can't find the file, and the mingw
-          # runtime DLLs live in the toolchain's bin/ dir (not the lib/
-          # dir -print-file-name searches), so resolve via bin/ and assert
-          # an absolute, existing path.
-          find_dll() {
-            local name="$1" hit
-            for base in \
-              "$(dirname "$(command -v gcc 2>/dev/null || true)")" \
-              "$(dirname "$(command -v x86_64-w64-mingw32-gcc 2>/dev/null || true)")" \
-              /c/mingw64/bin /c/msys64/mingw64/bin /c/ProgramData/mingw64/mingw64/bin; do
-              [ -n "$base" ] && [ -f "$base/$name" ] && { echo "$base/$name"; return 0; }
-            done
-            hit="$(find /c/mingw64 /c/msys64 -name "$name" 2>/dev/null | head -1 || true)"
-            [ -n "$hit" ] && { echo "$hit"; return 0; }
-            return 1
-          }
-          # mingw C/C++ runtime the .exe links dynamically. libstdc++ is
-          # required (NOT a ladybug leftover): several bundled tree-sitter
-          # grammars ship C++ external scanners — e.g. go-sitter-forest's
-          # norg/scanner.cc — so the cgo build pulls in g++ and the .exe
-          # depends on libstdc++-6.dll. Dropping it breaks startup.
-          for lib in libstdc++-6.dll libgcc_s_seh-1.dll libwinpthread-1.dll; do
-            p="$(find_dll "$lib")" || { echo "FATAL: mingw runtime $lib not found"; exit 1; }
-            cp "$p" stage/; echo "bundled $lib  <- $p"
+          # The static link must leave no dependency on a mingw runtime DLL;
+          # a partially static .exe would fail to start where that DLL is
+          # absent. If objdump is available, fail the release on any leaked
+          # mingw runtime import.
+          objdump=""
+          for cand in objdump x86_64-w64-mingw32-objdump; do
+            command -v "$cand" >/dev/null 2>&1 && { objdump="$cand"; break; }
           done
-          ls -la stage/
+          if [ -n "$objdump" ]; then
+            echo "imported DLLs:"; "$objdump" -p gortex.exe | grep -i 'DLL Name' || true
+            if "$objdump" -p gortex.exe | grep -iqE 'libstdc\+\+|libgcc_s|libwinpthread'; then
+              echo "FATAL: gortex.exe still imports a mingw runtime DLL — static link incomplete"
+              exit 1
+            fi
+            echo "ok: no mingw runtime DLL imports"
+          else
+            echo "WARN: objdump not found; skipping self-containment check"
+          fi
 
       - name: Zip (gortex_windows_amd64.zip)
         shell: pwsh
-        run: Compress-Archive -Path stage/* -DestinationPath gortex_windows_amd64.zip -Force
+        run: Compress-Archive -Path gortex.exe -DestinationPath gortex_windows_amd64.zip -Force
 
       - name: Sign + upload to release
         shell: bash
