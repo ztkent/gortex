@@ -1,9 +1,11 @@
 package main
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/spf13/cobra"
+	"github.com/zzet/gortex/internal/platform"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -17,6 +19,17 @@ var (
 var rootCmd = &cobra.Command{
 	Use:   "gortex",
 	Short: "Code intelligence engine — indexes repos into a queryable knowledge graph",
+	// Runs before every subcommand (cobra walks to the nearest
+	// PersistentPreRun; no subcommand defines its own). Fold any state
+	// left by older versions in the split ~/.config / ~/.cache / flat
+	// ~/.gortex layout into the unified ~/.gortex tree before a command
+	// opens the store or reads config. Best-effort + idempotent, so it's
+	// cheap on every run and silent after the first.
+	PersistentPreRun: func(cmd *cobra.Command, args []string) {
+		platform.MigrateToUnifiedHome(func(format string, a ...any) {
+			fmt.Fprintf(os.Stderr, format+"\n", a...)
+		})
+	},
 }
 
 func init() {

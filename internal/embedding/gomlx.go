@@ -91,7 +91,7 @@ func (p *GoMLXProvider) Close() error {
 }
 
 func ensureGoMLXModel() (string, error) {
-	dest := filepath.Join(platform.CacheDir(), "models")
+	dest := platform.ModelsDir()
 	modelDir := filepath.Join(dest, "sentence-transformers_all-MiniLM-L6-v2")
 
 	if _, err := os.Stat(filepath.Join(modelDir, "tokenizer.json")); err == nil {

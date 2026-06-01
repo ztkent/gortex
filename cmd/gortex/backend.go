@@ -9,6 +9,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/platform"
 )
 
 // openBackend constructs the graph.Store the daemon will run
@@ -43,17 +44,14 @@ func openBackend(name, path string, bufferPoolMB uint64, logger *zap.Logger) (gr
 }
 
 // resolveBackendPath turns an empty --backend-path into a default
-// at ~/.gortex/<filename>. Otherwise expands ~ and returns the
+// under the unified store directory (~/.gortex/store/<filename>, or the
+// XDG_DATA_HOME equivalent). Otherwise expands ~ and returns the
 // absolute path. Creates the parent directory if missing — the
 // disk-backed stores expect the parent dir to exist.
 func resolveBackendPath(in, filename string) (string, error) {
 	in = strings.TrimSpace(in)
 	if in == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("resolve home dir: %w", err)
-		}
-		in = filepath.Join(home, ".gortex", filename)
+		in = filepath.Join(platform.StoreDir(), filename)
 	} else if strings.HasPrefix(in, "~/") {
 		home, err := os.UserHomeDir()
 		if err != nil {

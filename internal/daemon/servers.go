@@ -77,7 +77,7 @@ func ServersConfigPath() string {
 			return filepath.Join(os.TempDir(), "gortex-servers.toml")
 		}
 	}
-	return filepath.Join(platform.LegacyConfigDir(), "servers.toml")
+	return filepath.Join(platform.ConfigDir(), "servers.toml")
 }
 
 // LoadServersConfig reads and validates ~/.gortex/servers.toml. A

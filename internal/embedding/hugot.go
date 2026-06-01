@@ -171,7 +171,7 @@ func (p *HugotProvider) Close() error {
 // variants and the downloader refuses to guess. The cache layout
 // mirrors Hugot's own convention: `<cache>/<org>_<model-name>/…`.
 func ensureHugotModel(spec HugotVariant) (string, error) {
-	dest := filepath.Join(platform.CacheDir(), "models")
+	dest := platform.ModelsDir()
 	modelDir := filepath.Join(dest, hfCacheDirName(spec.RepoID))
 
 	tokenizerReady := false

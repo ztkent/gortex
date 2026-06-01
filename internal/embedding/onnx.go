@@ -282,10 +282,8 @@ func (p *ONNXProvider) wordPieceTokenize(word string) []int64 {
 // --- helpers ---
 
 func findONNXModelDir() string {
-	home, _ := os.UserHomeDir()
 	candidates := []string{
-		filepath.Join(platform.CacheDir(), "models", "gte-small"),
-		filepath.Join(home, ".gortex", "models", "gte-small"),
+		filepath.Join(platform.ModelsDir(), "gte-small"),
 		"/tmp/gte-small",
 	}
 	for _, dir := range candidates {

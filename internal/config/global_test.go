@@ -17,7 +17,7 @@ import (
 // where DefaultGlobalConfigPath cached its result with sync.Once. Whichever
 // caller fired first pinned the path for the rest of the process — any
 // test that later set HOME via t.Setenv silently kept writing into the
-// developer's real ~/.config/gortex/config.yaml. The function must
+// developer's real ~/.gortex/config.yaml. The function must
 // re-resolve HOME on every call.
 func TestDefaultGlobalConfigPath_HonorsHomeChange(t *testing.T) {
 	// Pin XDG_CONFIG_HOME empty: when it is set in the ambient
@@ -28,7 +28,7 @@ func TestDefaultGlobalConfigPath_HonorsHomeChange(t *testing.T) {
 	homeA := t.TempDir()
 	t.Setenv("HOME", homeA)
 	gotA := DefaultGlobalConfigPath()
-	wantA := filepath.Join(homeA, ".config", "gortex", "config.yaml")
+	wantA := filepath.Join(homeA, ".gortex", "config.yaml")
 	if gotA != wantA {
 		t.Fatalf("first call: got %s, want %s", gotA, wantA)
 	}
@@ -36,7 +36,7 @@ func TestDefaultGlobalConfigPath_HonorsHomeChange(t *testing.T) {
 	homeB := t.TempDir()
 	t.Setenv("HOME", homeB)
 	gotB := DefaultGlobalConfigPath()
-	wantB := filepath.Join(homeB, ".config", "gortex", "config.yaml")
+	wantB := filepath.Join(homeB, ".gortex", "config.yaml")
 	if gotB != wantB {
 		t.Fatalf("after HOME change: got %s, want %s — path appears cached", gotB, wantB)
 	}
@@ -44,16 +44,15 @@ func TestDefaultGlobalConfigPath_HonorsHomeChange(t *testing.T) {
 
 // TestDefaultGlobalConfigPath_HonorsXDGConfigHome verifies the global
 // config path is routed through the XDG resolver: an absolute
-// $XDG_CONFIG_HOME relocates it, while an unset variable keeps the
-// historical $HOME/.config/gortex location so existing installs are
-// not orphaned.
+// $XDG_CONFIG_HOME relocates it, while an unset variable uses the
+// unified $HOME/.gortex location.
 func TestDefaultGlobalConfigPath_HonorsXDGConfigHome(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
 	// Unset: historical default.
 	t.Setenv("XDG_CONFIG_HOME", "")
-	wantUnset := filepath.Join(home, ".config", "gortex", "config.yaml")
+	wantUnset := filepath.Join(home, ".gortex", "config.yaml")
 	if got := DefaultGlobalConfigPath(); got != wantUnset {
 		t.Fatalf("XDG_CONFIG_HOME unset: got %s, want %s", got, wantUnset)
 	}

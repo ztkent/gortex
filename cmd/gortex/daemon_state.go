@@ -501,9 +501,9 @@ func buildDaemonState(logger *zap.Logger) (*daemonState, error) {
 	// Daemon mode has no single repo to anchor a per-repo notebook
 	// against, but the agent still wants persistence across daemon
 	// restarts and shared visibility across sessions. Fall back to a
-	// global notebook under the legacy data dir; CLI mode keeps the
+	// global notebook under the unified data dir; CLI mode keeps the
 	// per-repo .gortex/notebook/ path wired in cmd/gortex/mcp.go.
-	srv.InitNotebook(filepath.Join(platform.LegacyDataDir(), "notebook-cache"))
+	srv.InitNotebook(filepath.Join(platform.DataDir(), "notebook-cache"))
 	srv.InitCombo("", "", gortexmcp.ModeAI)
 	srv.InitFrecency("", "", gortexmcp.ModeAI)
 

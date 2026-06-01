@@ -287,7 +287,7 @@ func onnxSizeMB(spec embedding.HugotVariant) float64 {
 			break
 		}
 	}
-	modelDir := filepath.Join(platform.CacheDir(), "models", cacheDir)
+	modelDir := filepath.Join(platform.ModelsDir(), cacheDir)
 	candidates := []string{
 		filepath.Join(modelDir, spec.OnnxFile),
 		filepath.Join(modelDir, filepath.Base(spec.OnnxFile)),
