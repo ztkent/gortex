@@ -49,33 +49,38 @@ func TestEnrichGraph_StampsSymbolAndFile(t *testing.T) {
 		t.Error("HeadSHA should be set")
 	}
 
-	// File summary present.
-	fileNode := g.GetNode("main.go")
-	fileChurn, ok := fileNode.Meta["churn"].(map[string]any)
-	if !ok {
-		t.Fatalf("file Meta[churn] missing: %+v", fileNode.Meta)
-	}
-	if cc, _ := fileChurn["commit_count"].(int); cc != 3 {
-		t.Errorf("file commit_count = %v, want 3", fileChurn["commit_count"])
-	}
-	if _, ok := fileChurn["churn_rate"].(float64); !ok {
-		t.Errorf("file churn_rate missing or not float: %T %v", fileChurn["churn_rate"], fileChurn["churn_rate"])
-	}
-	// Provenance present.
-	if _, ok := fileNode.Meta["churn_meta"].(map[string]any); !ok {
-		t.Errorf("file churn_meta missing: %+v", fileNode.Meta)
+	// Churn now persists in the typed sidecar (change A), not Node.Meta.
+	byID := map[string]graph.ChurnEnrichment{}
+	for _, e := range g.ChurnRows("") {
+		byID[e.NodeID] = e
 	}
 
-	// Per-symbol churn.
-	sym := g.GetNode("main.go::Hello")
-	symChurn, ok := sym.Meta["churn"].(map[string]any)
+	fileChurn, ok := byID["main.go"]
 	if !ok {
-		t.Fatalf("symbol Meta[churn] missing: %+v", sym.Meta)
+		t.Fatalf("file churn row missing from sidecar; rows=%+v", byID)
 	}
-	if cc, _ := symChurn["commit_count"].(int); cc < 1 {
-		t.Errorf("symbol commit_count = %v, want >= 1", symChurn["commit_count"])
+	if fileChurn.CommitCount != 3 {
+		t.Errorf("file commit_count = %d, want 3", fileChurn.CommitCount)
 	}
-	if _, ok := symChurn["last_author"].(string); !ok {
+	if fileChurn.ChurnRate == 0 {
+		t.Errorf("file churn_rate missing")
+	}
+	if fileChurn.HeadSHA == "" || fileChurn.Branch == "" {
+		t.Errorf("file churn provenance (head_sha/branch) missing: %+v", fileChurn)
+	}
+	// Meta must NOT carry churn anymore — it moved to the sidecar.
+	if _, present := g.GetNode("main.go").Meta["churn"]; present {
+		t.Errorf("churn must not remain in Node.Meta after sidecar migration")
+	}
+
+	symChurn, ok := byID["main.go::Hello"]
+	if !ok {
+		t.Fatalf("symbol churn row missing from sidecar")
+	}
+	if symChurn.CommitCount < 1 {
+		t.Errorf("symbol commit_count = %d, want >= 1", symChurn.CommitCount)
+	}
+	if symChurn.LastAuthor == "" {
 		t.Errorf("symbol last_author missing: %+v", symChurn)
 	}
 }

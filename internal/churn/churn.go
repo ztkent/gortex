@@ -123,6 +123,8 @@ func EnrichGraph(ctx context.Context, g graph.Store, repoRoot string, opts Optio
 	}
 
 	res := Result{Branch: opts.Branch, HeadSHA: headSHA}
+	churnWriter, useChurnSidecar := g.(graph.ChurnEnrichmentWriter)
+	var churnRows []graph.ChurnEnrichment
 	for filePath, b := range byPath {
 		if err := ctx.Err(); err != nil {
 			return res, err
@@ -143,7 +145,13 @@ func EnrichGraph(ctx context.Context, g graph.Store, repoRoot string, opts Optio
 		// File summary: aggregate across all commits.
 		if b.file != nil {
 			stampFileChurn(b.file, commits, headSHA, opts.Branch, now)
-			g.AddNode(b.file)
+			if useChurnSidecar {
+				churnRows = append(churnRows, churnEnrichmentFromNode(b.file))
+				delete(b.file.Meta, "churn")
+				delete(b.file.Meta, "churn_meta")
+			} else {
+				g.AddNode(b.file)
+			}
 			res.Files++
 		}
 
@@ -156,11 +164,33 @@ func EnrichGraph(ctx context.Context, g graph.Store, repoRoot string, opts Optio
 		// (shallow clones, signed-off cherry-picks).
 		for _, s := range b.symbols {
 			if stampSymbolChurn(s, blameLines, commits, now) {
-				g.AddNode(s)
+				if useChurnSidecar {
+					churnRows = append(churnRows, churnEnrichmentFromNode(s))
+					delete(s.Meta, "churn")
+				} else {
+					g.AddNode(s)
+				}
 				res.Symbols++
 			}
 		}
 	}
+	// Sidecar persist (change A): when the backend implements
+	// ChurnEnrichmentWriter, churn rides in the typed churn_enrichment
+	// table instead of nodes.meta, so the node hot path stops gob-
+	// encoding it and get_churn_rate reads via an index. Grouped by
+	// repo prefix since BulkSetChurn stamps one prefix per call.
+	if useChurnSidecar && len(churnRows) > 0 {
+		byPrefix := map[string][]graph.ChurnEnrichment{}
+		for _, r := range churnRows {
+			byPrefix[r.RepoPrefix] = append(byPrefix[r.RepoPrefix], r)
+		}
+		for prefix, rr := range byPrefix {
+			if err := churnWriter.BulkSetChurn(prefix, rr); err != nil {
+				return res, fmt.Errorf("churn: persist sidecar: %w", err)
+			}
+		}
+	}
+
 	return res, nil
 }
 
@@ -204,6 +234,33 @@ func fileCommits(repoRoot, branch, relPath string) ([]commitRecord, error) {
 		})
 	}
 	return records, scanner.Err()
+}
+
+// churnEnrichmentFromNode projects the freshly-stamped Meta["churn"] /
+// Meta["churn_meta"] payload into a typed ChurnEnrichment row for the
+// sidecar. The stamp functions write int/float64 directly (no JSON
+// widening at this point), so the type assertions are exact.
+func churnEnrichmentFromNode(n *graph.Node) graph.ChurnEnrichment {
+	e := graph.ChurnEnrichment{NodeID: n.ID, RepoPrefix: n.RepoPrefix}
+	if m, ok := n.Meta["churn"].(map[string]any); ok {
+		if v, ok := m["commit_count"].(int); ok {
+			e.CommitCount = v
+		}
+		if v, ok := m["age_days"].(int); ok {
+			e.AgeDays = v
+		}
+		if v, ok := m["churn_rate"].(float64); ok {
+			e.ChurnRate = v
+		}
+		e.LastAuthor, _ = m["last_author"].(string)
+		e.LastCommitAt, _ = m["last_commit_at"].(string)
+	}
+	if m, ok := n.Meta["churn_meta"].(map[string]any); ok {
+		e.HeadSHA, _ = m["head_sha"].(string)
+		e.Branch, _ = m["branch"].(string)
+		e.ComputedAt, _ = m["computed_at"].(string)
+	}
+	return e
 }
 
 // stampFileChurn writes the file-level summary onto n.Meta["churn"]

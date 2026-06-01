@@ -478,6 +478,10 @@ type Graph struct {
 	// store keeps it live so the conformance suite exercises both.
 	cloneShinglesMu sync.Mutex
 	cloneShingles   map[string]cloneShingleEntry
+
+	// churnEnrich is the in-memory churn-enrichment sidecar (change A).
+	churnEnrichMu sync.Mutex
+	churnEnrich   map[string]ChurnEnrichment
 }
 
 // cloneShingleEntry is one in-memory clone_shingles row: the owning
@@ -491,8 +495,10 @@ type cloneShingleEntry struct {
 // optional per-symbol clone-shingle persistence capabilities, so the
 // conformance suite exercises the same code path against both backends.
 var (
-	_ CloneShingleWriter = (*Graph)(nil)
-	_ CloneShingleReader = (*Graph)(nil)
+	_ CloneShingleWriter    = (*Graph)(nil)
+	_ CloneShingleReader    = (*Graph)(nil)
+	_ ChurnEnrichmentWriter = (*Graph)(nil)
+	_ ChurnEnrichmentReader = (*Graph)(nil)
 )
 
 // New creates an empty graph.
@@ -583,6 +589,54 @@ func (g *Graph) LoadCloneShingles(repoPrefix string) (map[string][]uint64, error
 		out[id] = cp
 	}
 	return out, nil
+}
+
+// BulkSetChurn is the in-memory ChurnEnrichmentWriter. ChurnEnrichment
+// is a flat value type, so a map store needs no deep copy.
+func (g *Graph) BulkSetChurn(repoPrefix string, rows []ChurnEnrichment) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	g.churnEnrichMu.Lock()
+	defer g.churnEnrichMu.Unlock()
+	if g.churnEnrich == nil {
+		g.churnEnrich = make(map[string]ChurnEnrichment, len(rows))
+	}
+	for _, r := range rows {
+		r.RepoPrefix = repoPrefix
+		g.churnEnrich[r.NodeID] = r
+	}
+	return nil
+}
+
+// DeleteChurn is the in-memory ChurnEnrichmentWriter delete side.
+func (g *Graph) DeleteChurn(nodeIDs []string) error {
+	if len(nodeIDs) == 0 {
+		return nil
+	}
+	g.churnEnrichMu.Lock()
+	defer g.churnEnrichMu.Unlock()
+	for _, id := range nodeIDs {
+		if id != "" {
+			delete(g.churnEnrich, id)
+		}
+	}
+	return nil
+}
+
+// ChurnRows is the in-memory ChurnEnrichmentReader. An empty repoPrefix
+// returns all rows across repos.
+func (g *Graph) ChurnRows(repoPrefix string) []ChurnEnrichment {
+	g.churnEnrichMu.Lock()
+	defer g.churnEnrichMu.Unlock()
+	out := make([]ChurnEnrichment, 0, len(g.churnEnrich))
+	for _, r := range g.churnEnrich {
+		if repoPrefix != "" && r.RepoPrefix != repoPrefix {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
 }
 
 // EdgesByKind yields every edge whose Kind matches. In-memory

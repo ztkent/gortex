@@ -8,6 +8,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/query"
 )
 
 // registerChurnRateTool wires get_churn_rate — a pure graph scan over
@@ -63,29 +64,77 @@ func (s *Server) handleGetChurnRate(ctx context.Context, req mcp.CallToolRequest
 		allowed = nil
 	}
 
-	scoped := s.scopedNodes(ctx)
 	rows := make([]churnRow, 0, 64)
 	seenFiles := map[string]struct{}{}
 	sawMeta := false
-	for _, n := range scoped {
-		if allowed != nil {
-			if _, ok := allowed[n.Kind]; !ok {
-				continue
+
+	usedSidecar := false
+	if reader, ok := s.graph.(graph.ChurnEnrichmentReader); ok {
+		// Sidecar fast-path (change A): read the typed churn rows via an
+		// index over the (small) enriched set, then resolve their nodes
+		// in one batch — instead of scanning AllNodes and gob-decoding
+		// every meta blob to peek at Meta["churn"].
+		if enrich := reader.ChurnRows(""); len(enrich) > 0 {
+			usedSidecar = true
+			sawMeta = true
+			ids := make([]string, 0, len(enrich))
+			for _, e := range enrich {
+				ids = append(ids, e.NodeID)
+			}
+			nodes := s.graph.GetNodesByIDs(ids)
+			sessWS, _, bound := s.sessionScope(ctx)
+			var opts query.QueryOptions
+			if bound {
+				opts = query.QueryOptions{WorkspaceID: sessWS}
+			}
+			for _, e := range enrich {
+				n := nodes[e.NodeID]
+				if n == nil {
+					continue
+				}
+				if bound && !opts.ScopeAllows(n) {
+					continue
+				}
+				if allowed != nil {
+					if _, ok := allowed[n.Kind]; !ok {
+						continue
+					}
+				}
+				if pathPrefix != "" && !strings.HasPrefix(n.FilePath, pathPrefix) {
+					continue
+				}
+				if e.CommitCount < minCommits {
+					continue
+				}
+				rows = append(rows, churnRowFromEnrichment(n, e))
+				seenFiles[n.FilePath] = struct{}{}
 			}
 		}
-		if pathPrefix != "" && !strings.HasPrefix(n.FilePath, pathPrefix) {
-			continue
+	}
+	if !usedSidecar {
+		// Fallback: no sidecar rows yet (un-migrated DB, recompute-on-
+		// next-enrich) or a backend without the capability — read
+		// Meta["churn"] off a full AllNodes scan.
+		for _, n := range s.scopedNodes(ctx) {
+			if allowed != nil {
+				if _, ok := allowed[n.Kind]; !ok {
+					continue
+				}
+			}
+			if pathPrefix != "" && !strings.HasPrefix(n.FilePath, pathPrefix) {
+				continue
+			}
+			row, ok := churnRowFromMeta(n)
+			if !ok {
+				continue
+			}
+			sawMeta = true
+			if row.CommitCount < minCommits {
+				continue
+			}
+			rows = append(rows, row)
+			seenFiles[n.FilePath] = struct{}{}
 		}
-		row, ok := churnRowFromMeta(n)
-		if !ok {
-			continue
-		}
-		sawMeta = true
-		if row.CommitCount < minCommits {
-			continue
-		}
-		rows = append(rows, row)
-		seenFiles[n.FilePath] = struct{}{}
 	}
 
 	if !sawMeta {
@@ -133,6 +182,24 @@ func (s *Server) handleGetChurnRate(ctx context.Context, req mcp.CallToolRequest
 		"sort_by":       sortBy,
 		"min_commits":   minCommits,
 	})
+}
+
+// churnRowFromEnrichment builds a response row from a node + its typed
+// sidecar churn enrichment (change A read path).
+func churnRowFromEnrichment(n *graph.Node, e graph.ChurnEnrichment) churnRow {
+	endLine := n.EndLine
+	if endLine == 0 {
+		endLine = n.StartLine
+	}
+	return churnRow{
+		ID: n.ID, Name: n.Name, File: n.FilePath,
+		StartLine: n.StartLine, EndLine: endLine,
+		CommitCount:  e.CommitCount,
+		AgeDays:      e.AgeDays,
+		ChurnRate:    e.ChurnRate,
+		LastAuthor:   e.LastAuthor,
+		LastCommitAt: e.LastCommitAt,
+	}
 }
 
 // churnRowFromMeta projects a node's meta.churn payload into the

@@ -959,6 +959,39 @@ type CloneShingleReader interface {
 	LoadCloneShingles(repoPrefix string) (map[string][]uint64, error)
 }
 
+// ChurnEnrichment is one node's git-churn enrichment, moved out of
+// nodes.meta into a typed sidecar (change A). Maps 1:1 to the payload
+// internal/churn.EnrichGraph used to stamp on Meta["churn"]/["churn_meta"].
+// HeadSHA/Branch/ComputedAt are file-level only (empty for symbols).
+type ChurnEnrichment struct {
+	NodeID       string
+	RepoPrefix   string
+	CommitCount  int
+	AgeDays      int
+	ChurnRate    float64
+	LastAuthor   string
+	LastCommitAt string // RFC3339
+	HeadSHA      string
+	Branch       string
+	ComputedAt   string // RFC3339
+}
+
+// ChurnEnrichmentWriter is an optional capability backends MAY implement
+// to persist git-churn enrichment in a typed sidecar instead of the
+// node meta blob. When absent the enricher falls back to stamping
+// Node.Meta (legacy path).
+type ChurnEnrichmentWriter interface {
+	BulkSetChurn(repoPrefix string, rows []ChurnEnrichment) error
+	DeleteChurn(nodeIDs []string) error
+}
+
+// ChurnEnrichmentReader is the read side. ChurnRows returns every churn
+// row for repoPrefix; an EMPTY repoPrefix returns ALL rows across repos
+// (the cross-repo read get_churn_rate uses, then scope-filters per node).
+type ChurnEnrichmentReader interface {
+	ChurnRows(repoPrefix string) []ChurnEnrichment
+}
+
 // EdgesByKindsScanner is an optional capability backends MAY
 // implement to stream every edge whose Kind is in the supplied set,
 // in a single backend round-trip. The fallback iterates AllEdges()

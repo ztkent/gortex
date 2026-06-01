@@ -210,3 +210,37 @@ func TestChurnRate_TolerantMetaTypes(t *testing.T) {
 	assert.EqualValues(t, 3, row["age_days"])
 	assert.InDelta(t, 2.33, row["churn_rate"].(float64), 0.001)
 }
+
+// TestChurnRate_SidecarReadPath proves the change-A primary path:
+// churn populated in the typed sidecar (BulkSetChurn) — with NO
+// Meta["churn"] on the nodes — is surfaced by get_churn_rate via the
+// ChurnEnrichmentReader index read, not the AllNodes Meta scan.
+func TestChurnRate_SidecarReadPath(t *testing.T) {
+	g := graph.New()
+	g.AddNode(&graph.Node{ID: "foo.go::a", Kind: graph.KindFunction, Name: "a", FilePath: "foo.go", StartLine: 1, EndLine: 2})
+	g.AddNode(&graph.Node{ID: "foo.go::b", Kind: graph.KindFunction, Name: "b", FilePath: "foo.go", StartLine: 3, EndLine: 4})
+	require.NoError(t, g.BulkSetChurn("", []graph.ChurnEnrichment{
+		{NodeID: "foo.go::a", CommitCount: 7, ChurnRate: 3.0, LastAuthor: "a@x"},
+		{NodeID: "foo.go::b", CommitCount: 2, ChurnRate: 0.5, LastAuthor: "b@x"},
+	}))
+	s := &Server{
+		graph:      g,
+		session:    newSessionState(),
+		tokenStats: &tokenStats{},
+		symHistory: &symbolHistory{entries: make(map[string][]SymbolModification)},
+		sessions:   newSessionMap(),
+		toolScopes: newScopeRegistry(),
+	}
+
+	out := callChurnHandler(t, s, map[string]any{"sort_by": "commit_count"})
+	symbols, _ := out["symbols"].([]any)
+	require.Len(t, symbols, 2, "both sidecar rows must surface")
+	first, _ := symbols[0].(map[string]any)
+	assert.Equal(t, "foo.go::a", first["symbol_id"], "sort_by commit_count: a (7) before b (2)")
+	assert.EqualValues(t, 7, first["commit_count"])
+	assert.Equal(t, "a@x", first["last_author"])
+
+	out2 := callChurnHandler(t, s, map[string]any{"min_commits": 5})
+	syms2, _ := out2["symbols"].([]any)
+	require.Len(t, syms2, 1, "min_commits=5 keeps only a")
+}

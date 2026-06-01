@@ -98,6 +98,7 @@ func RunConformance(t *testing.T, factory Factory) {
 	t.Run("FileEditingContext", func(t *testing.T) { testFileEditingContext(t, factory) })
 	t.Run("NodeDegreeByKinds", func(t *testing.T) { testNodeDegreeByKinds(t, factory) })
 	t.Run("CloneShingleSidecar", func(t *testing.T) { testCloneShingleSidecar(t, factory) })
+	t.Run("ChurnEnrichmentSidecar", func(t *testing.T) { testChurnEnrichmentSidecar(t, factory) })
 }
 
 // -- fixture helpers ---------------------------------------------------
@@ -3399,5 +3400,91 @@ func testCloneShingleSidecar(t *testing.T, factory Factory) {
 	}
 	if len(bRows) != 1 || !eqShingles(bRows["c.go::Qux"], []uint64{5, 6}) {
 		t.Fatalf("LoadCloneShingles(repoB) = %v, want {c.go::Qux:[5 6]}", bRows)
+	}
+}
+
+// testChurnEnrichmentSidecar mirrors the clone-shingle sidecar
+// conformance for the churn enrichment capability (change A): write,
+// read-all vs read-by-prefix, idempotent overwrite, per-repo isolation,
+// and delete.
+func testChurnEnrichmentSidecar(t *testing.T, factory Factory) {
+	t.Helper()
+	s := factory(t)
+	w, ok := s.(graph.ChurnEnrichmentWriter)
+	if !ok {
+		t.Skip("backend does not implement graph.ChurnEnrichmentWriter")
+	}
+	r, ok := s.(graph.ChurnEnrichmentReader)
+	if !ok {
+		t.Skip("backend implements ChurnEnrichmentWriter but not ChurnEnrichmentReader")
+	}
+
+	// Empty store + empty input are no-ops.
+	if got := r.ChurnRows("repoA"); len(got) != 0 {
+		t.Fatalf("ChurnRows(empty store) = %v, want empty", got)
+	}
+	if err := w.BulkSetChurn("repoA", nil); err != nil {
+		t.Fatalf("BulkSetChurn(nil): %v", err)
+	}
+
+	rowsA := []graph.ChurnEnrichment{
+		{NodeID: "a.go", CommitCount: 5, AgeDays: 30, ChurnRate: 1.5, LastAuthor: "x@y", LastCommitAt: "2026-01-01T00:00:00Z", HeadSHA: "abc", Branch: "main", ComputedAt: "2026-06-01T00:00:00Z"},
+		{NodeID: "a.go::Foo", CommitCount: 2, AgeDays: 10, ChurnRate: 0.2, LastAuthor: "z@y", LastCommitAt: "2026-02-01T00:00:00Z"},
+	}
+	rowsB := []graph.ChurnEnrichment{
+		{NodeID: "b.go::Bar", CommitCount: 9, AgeDays: 90, ChurnRate: 0.1, LastAuthor: "q@y"},
+	}
+	if err := w.BulkSetChurn("repoA", rowsA); err != nil {
+		t.Fatalf("BulkSetChurn(repoA): %v", err)
+	}
+	if err := w.BulkSetChurn("repoB", rowsB); err != nil {
+		t.Fatalf("BulkSetChurn(repoB): %v", err)
+	}
+
+	// Per-repo read isolation.
+	if got := r.ChurnRows("repoA"); len(got) != 2 {
+		t.Fatalf("ChurnRows(repoA) len = %d, want 2", len(got))
+	}
+	if got := r.ChurnRows("repoB"); len(got) != 1 {
+		t.Fatalf("ChurnRows(repoB) len = %d, want 1", len(got))
+	}
+	// Empty prefix returns ALL rows across repos.
+	all := r.ChurnRows("")
+	if len(all) != 3 {
+		t.Fatalf("ChurnRows(\"\") len = %d, want 3 (all repos)", len(all))
+	}
+
+	// Field round-trip + repo_prefix stamping.
+	byID := map[string]graph.ChurnEnrichment{}
+	for _, e := range all {
+		byID[e.NodeID] = e
+	}
+	foo := byID["a.go"]
+	if foo.RepoPrefix != "repoA" || foo.CommitCount != 5 || foo.ChurnRate != 1.5 ||
+		foo.LastAuthor != "x@y" || foo.LastCommitAt != "2026-01-01T00:00:00Z" ||
+		foo.HeadSHA != "abc" || foo.Branch != "main" {
+		t.Fatalf("round-trip mismatch for a.go: %+v", foo)
+	}
+
+	// Idempotent overwrite (INSERT OR REPLACE on node_id).
+	rowsA[0].CommitCount = 99
+	if err := w.BulkSetChurn("repoA", rowsA[:1]); err != nil {
+		t.Fatalf("BulkSetChurn(overwrite): %v", err)
+	}
+	for _, e := range r.ChurnRows("repoA") {
+		if e.NodeID == "a.go" && e.CommitCount != 99 {
+			t.Fatalf("overwrite failed: a.go commit_count = %d, want 99", e.CommitCount)
+		}
+	}
+
+	// Delete.
+	if err := w.DeleteChurn([]string{"a.go", "a.go::Foo"}); err != nil {
+		t.Fatalf("DeleteChurn: %v", err)
+	}
+	if got := r.ChurnRows("repoA"); len(got) != 0 {
+		t.Fatalf("ChurnRows(repoA) after delete = %d, want 0", len(got))
+	}
+	if got := r.ChurnRows("repoB"); len(got) != 1 {
+		t.Fatalf("DeleteChurn must not touch repoB: len = %d, want 1", len(got))
 	}
 }

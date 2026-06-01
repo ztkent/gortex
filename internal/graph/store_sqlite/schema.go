@@ -101,6 +101,27 @@ CREATE TABLE IF NOT EXISTS vectors (
     vec     BLOB NOT NULL
 ) WITHOUT ROWID;
 
+-- churn_enrichment is the per-node git-churn sidecar (change A: move
+-- enrichment OUT of nodes.meta so the node hot path stops gob-encoding
+-- rarely-read data and get_churn_rate does an indexed read instead of an
+-- AllNodes+gob scan). One typed row per enriched file/function/method
+-- node, keyed by node_id (join key back to nodes.id); repo_prefix scopes
+-- per-repo reseeds/wipes. head_sha/branch/computed_at are file-level only
+-- (empty for symbols). WITHOUT ROWID: the PK index IS the table.
+CREATE TABLE IF NOT EXISTS churn_enrichment (
+    node_id        TEXT PRIMARY KEY,
+    repo_prefix    TEXT NOT NULL DEFAULT '',
+    commit_count   INTEGER NOT NULL DEFAULT 0,
+    age_days       INTEGER NOT NULL DEFAULT 0,
+    churn_rate     REAL NOT NULL DEFAULT 0,
+    last_author    TEXT NOT NULL DEFAULT '',
+    last_commit_at TEXT NOT NULL DEFAULT '',
+    head_sha       TEXT NOT NULL DEFAULT '',
+    branch         TEXT NOT NULL DEFAULT '',
+    computed_at    TEXT NOT NULL DEFAULT ''
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS churn_by_repo ON churn_enrichment(repo_prefix) WHERE repo_prefix <> '';
+
 -- symbol_fts is the FTS5 full-text index over pre-tokenised symbol
 -- names. It replaces the multi-GB in-heap Bleve/BM25 index with an
 -- on-disk inverted index the SymbolSearcher / SymbolBundleSearcher
