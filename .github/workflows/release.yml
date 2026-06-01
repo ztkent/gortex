@@ -98,7 +98,6 @@ jobs:
             -w /go/src/gortex \
             -e GITHUB_TOKEN \
             -e HOMEBREW_TAP_TOKEN \
-            -e SCOOP_BUCKET_TOKEN \
             ghcr.io/goreleaser/goreleaser-cross:v1.26 \
             release --clean
         env:
@@ -106,10 +105,9 @@ jobs:
           # Personal access token with `repo` scope on zzet/homebrew-tap.
           # GITHUB_TOKEN can only push to the source repo, not the tap.
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          # Same story for the Scoop bucket — a PAT with `repo` scope on
-          # gortexhq/scoop-bucket. Required for the `scoops` block in
-          # .goreleaser.yml to push the Windows manifest.
-          SCOOP_BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+          # (SCOOP_BUCKET_TOKEN is consumed by the release-windows job's
+          # "Publish Scoop manifest" step, not here — goreleaser builds no
+          # windows artifact, so it has no scoop manifest to push.)
 
       # goreleaser-cross runs as root inside the container, so everything
       # in dist/ is owned by root:root on the host. The subsequent cosign
@@ -303,6 +301,67 @@ jobs:
           if ! grep -q "gortex_windows_amd64.zip" checksums.txt; then
             printf '%s  gortex_windows_amd64.zip\n' "$sha" >> checksums.txt
             gh release upload "$TAG" checksums.txt --clobber
+          fi
+
+      - name: Publish Scoop manifest
+        # Push a refreshed `gortex` manifest to gortexhq/scoop-bucket so
+        # `scoop install gortex` resolves this release. SCOOP_BUCKET_TOKEN is
+        # a PAT with `repo` scope on that bucket (GITHUB_TOKEN can only push
+        # to the source repo). Non-blocking + self-skipping: a bucket hiccup
+        # must not fail a release whose binary already shipped, and a
+        # token-less fork just skips it.
+        continue-on-error: true
+        shell: bash
+        env:
+          SCOOP_BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SCOOP_BUCKET_TOKEN:-}" ]; then
+            echo "SCOOP_BUCKET_TOKEN not set; skipping scoop manifest publish"
+            exit 0
+          fi
+          TAG="${GITHUB_REF#refs/tags/}"
+          VER="${TAG#v}"
+          URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/gortex_windows_amd64.zip"
+          SHA="$(sha256sum gortex_windows_amd64.zip | awk '{print $1}')"
+
+          # Build the manifest with jq so escaping + validity are guaranteed.
+          # `bin` shims gortex.exe; checkver/autoupdate let scoop's tooling
+          # track future releases (the $version token is literal on purpose).
+          jq -n \
+            --arg version "$VER" \
+            --arg url "$URL" \
+            --arg hash "$SHA" \
+            --arg homepage "https://github.com/${GITHUB_REPOSITORY}" \
+            --arg autourl "https://github.com/${GITHUB_REPOSITORY}/releases/download/v\$version/gortex_windows_amd64.zip" \
+            '{
+               version: $version,
+               description: "Code intelligence engine that indexes repositories into an in-memory knowledge graph.",
+               homepage: $homepage,
+               license: "Apache-2.0",
+               architecture: { "64bit": { url: $url, hash: $hash } },
+               bin: "gortex.exe",
+               checkver: "github",
+               autoupdate: { architecture: { "64bit": { url: $autourl } } }
+             }' > gortex.json
+
+          # Token in the clone URL — GitHub Actions masks the secret in logs.
+          git clone "https://x-access-token:${SCOOP_BUCKET_TOKEN}@github.com/gortexhq/scoop-bucket.git" scoop-bucket
+          cd scoop-bucket
+          # Honour the bucket's layout: scoop reads manifests from the repo
+          # root or a bucket/ subdir. Update in place if one exists, else use
+          # the conventional bucket/ subdir.
+          if [ -f gortex.json ]; then dest="gortex.json"; else mkdir -p bucket; dest="bucket/gortex.json"; fi
+          cp ../gortex.json "$dest"
+          git add "$dest"
+          if git diff --cached --quiet; then
+            echo "scoop manifest already current for ${VER}"
+          else
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "gortex: ${VER}"
+            git push
+            echo "published scoop manifest ${VER} -> $dest"
           fi
 
   # SLSA-3 provenance via the OpenSSF reusable workflow. This runs in a

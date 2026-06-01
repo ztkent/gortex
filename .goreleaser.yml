@@ -133,8 +133,8 @@ homebrew_casks:
       executable: gortex
       shell_parameter_format: cobra
 
-# NOTE: the Scoop manifest is intentionally NOT generated here. Windows is
-# built by the separate `release-windows` job (native runner) and isn't an
-# artifact of this goreleaser-cross run, so goreleaser has no windows zip to
-# point a scoop manifest at. Re-add a scoop manifest (pointing at the windows
-# job's zip) as a follow-up once the windows release path is settled.
+# NOTE: goreleaser does NOT generate the Scoop manifest — windows is built by
+# the separate `release-windows` job (native runner) and isn't an artifact of
+# this goreleaser-cross run, so goreleaser has no windows zip to point at. That
+# job publishes the manifest to gortexhq/scoop-bucket itself (see its "Publish
+# Scoop manifest" step in release.yml).
