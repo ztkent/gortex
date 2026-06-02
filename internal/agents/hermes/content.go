@@ -1,9 +1,12 @@
 package hermes
 
 import (
+	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/zzet/gortex/internal/agents"
+	"github.com/zzet/gortex/internal/agents/claudecode"
 	yaml "gopkg.in/yaml.v3"
 )
 
@@ -171,3 +174,127 @@ For list-shaped responses (` + "`search_symbols`" + `, ` + "`find_usages`" + `, 
 
 After edits, call ` + "`verify_change`" + ` (broken callers + interface implementors, cross-repo) and ` + "`get_test_targets`" + ` (the tests that cover what you touched) before declaring the task done.
 `
+
+// RoutingSkills returns the per-task routing skills, keyed by the
+// directory under ~/.hermes/skills/. They mirror Claude Code's curated
+// user-level skill set so a Hermes user gets the same task-routing
+// surface — explore / impact / debug / refactor / rename / safe-edit /
+// add-test / pr-review / … — that `gortex install` gives Claude Code.
+//
+// The bodies are the single source of truth in
+// internal/agents/claudecode (reused verbatim so the two agents never
+// drift) re-wrapped with Hermes frontmatter. Hermes also turns every
+// installed skill into a `/skill-name` slash command, so the
+// `/gortex-explore`-style cross-references in the bodies resolve to the
+// sibling skills installed here.
+//
+// gortex-guide is excluded: the native master `gortex` skill
+// (SkillBody) already fills the guide role, and shipping both would be
+// a redundant entry in Hermes' skill picker.
+func RoutingSkills() map[string]string {
+	out := make(map[string]string, len(claudecode.GlobalSkills))
+	for name, claudeBody := range claudecode.GlobalSkills {
+		if name == "gortex-guide" {
+			continue
+		}
+		out[name] = hermesSkillFromClaude(name, claudeBody)
+	}
+	return out
+}
+
+// RoutingSkillNames returns the routing skill directory names, sorted,
+// for a stable Plan / install report and deterministic tests.
+func RoutingSkillNames() []string {
+	skills := RoutingSkills()
+	names := make([]string, 0, len(skills))
+	for name := range skills {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// hermesSkillFromClaude re-frames one Claude Code skill as a Hermes
+// skill: it keeps the body verbatim and swaps the Claude frontmatter
+// (name + description) for Hermes frontmatter (name + description +
+// version + metadata.hermes.{tags,category}).
+func hermesSkillFromClaude(name, claudeContent string) string {
+	desc := claudeFrontmatterField(claudeContent, "description")
+	body := stripClaudeFrontmatter(claudeContent)
+	tags, category := routingSkillTaxonomy(name)
+
+	var b strings.Builder
+	b.WriteString("---\n")
+	b.WriteString("name: " + name + "\n")
+	if desc != "" {
+		b.WriteString("description: " + desc + "\n")
+	}
+	b.WriteString("version: 1.0.0\n")
+	b.WriteString("metadata:\n")
+	b.WriteString("  hermes:\n")
+	b.WriteString("    tags: [" + strings.Join(tags, ", ") + "]\n")
+	b.WriteString("    category: " + category + "\n")
+	b.WriteString("---\n")
+	b.WriteString(body)
+	return b.String()
+}
+
+// stripClaudeFrontmatter drops the leading `---`-fenced YAML block from
+// a Claude skill body, returning just the markdown. The skill bodies
+// always start with `---\n`; the first `\n---\n` after it closes the
+// frontmatter.
+func stripClaudeFrontmatter(s string) string {
+	const open = "---\n"
+	if !strings.HasPrefix(s, open) {
+		return s
+	}
+	rest := s[len(open):]
+	if _, after, found := strings.Cut(rest, "\n---\n"); found {
+		return after
+	}
+	return s
+}
+
+// claudeFrontmatterField extracts a single-line scalar field from the
+// leading frontmatter block, value verbatim (quotes and inner escapes
+// preserved — the Claude descriptions are already valid YAML double-
+// quoted scalars). Returns "" when the field is absent.
+func claudeFrontmatterField(s, field string) string {
+	const open = "---\n"
+	if !strings.HasPrefix(s, open) {
+		return ""
+	}
+	block := s[len(open):]
+	if before, _, found := strings.Cut(block, "\n---\n"); found {
+		block = before
+	}
+	prefix := field + ":"
+	for line := range strings.SplitSeq(block, "\n") {
+		if rest, ok := strings.CutPrefix(line, prefix); ok {
+			return strings.TrimSpace(rest)
+		}
+	}
+	return ""
+}
+
+// routingSkillTaxonomy assigns Hermes discovery tags + a category to a
+// routing skill from its name. The per-skill topic tag (the name minus
+// the `gortex-` prefix) plus a broad category make the skill findable
+// in Hermes' skills_list without hand-maintaining a table per skill.
+func routingSkillTaxonomy(name string) (tags []string, category string) {
+	topic := strings.TrimPrefix(name, "gortex-")
+	category = "code-intelligence"
+	switch topic {
+	case "explore", "onboarding", "cross-repo-usage", "dataflow-trace":
+		category = "navigation"
+	case "impact", "co-change", "architecture-review", "quality-audit", "pr-review", "episode-replay":
+		category = "analysis"
+	case "debug", "incident-investigation":
+		category = "debugging"
+	case "refactor", "rename", "extract-function", "safe-edit", "fix-all":
+		category = "refactoring"
+	case "add-test":
+		category = "testing"
+	}
+	return []string{"code-intelligence", "mcp", topic}, category
+}

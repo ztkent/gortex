@@ -74,7 +74,10 @@ func (a *Adapter) Plan(env agents.Env) (*agents.Plan, error) {
 	for _, p := range profileConfigPaths(env.Home) {
 		files = append(files, agents.FileAction{Path: p, Action: agents.ActionWouldMerge, Keys: []string{"mcp_servers"}})
 	}
-	files = append(files, agents.FileAction{Path: skillPath(env.Home), Action: agents.ActionWouldCreate})
+	files = append(files, agents.FileAction{Path: skillPath(env.Home, SkillName), Action: agents.ActionWouldCreate})
+	for _, name := range RoutingSkillNames() {
+		files = append(files, agents.FileAction{Path: skillPath(env.Home, name), Action: agents.ActionWouldCreate})
+	}
 	return &agents.Plan{Files: files}, nil
 }
 
@@ -114,13 +117,25 @@ func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, 
 		res.Files = append(res.Files, profileAction)
 	}
 
-	// 3. User-level skill — teach the agent to prefer gortex tools.
-	//    Skipped when it already exists so user edits survive.
-	skillAction, err := agents.WriteIfNotExists(env.Stderr, skillPath(env.Home), SkillBody, opts)
+	// 3. User-level skills — the master `gortex` guide plus the
+	//    per-task routing playbooks (explore / impact / refactor / …),
+	//    mirroring the Claude Code user-level skill set. Each is skipped
+	//    when it already exists so user edits survive a re-install.
+	masterAction, err := agents.WriteIfNotExists(env.Stderr, skillPath(env.Home, SkillName), SkillBody, opts)
 	if err != nil {
 		return res, fmt.Errorf("hermes skill: %w", err)
 	}
-	res.Files = append(res.Files, skillAction)
+	res.Files = append(res.Files, masterAction)
+
+	routing := RoutingSkills()
+	for _, name := range RoutingSkillNames() {
+		action, rerr := agents.WriteIfNotExists(env.Stderr, skillPath(env.Home, name), routing[name], opts)
+		if rerr != nil {
+			internalutil.Warnf(env.Stderr, "hermes skill %s: %v", name, rerr)
+			continue
+		}
+		res.Files = append(res.Files, action)
+	}
 
 	res.Configured = true
 	return res, nil
@@ -152,9 +167,9 @@ func hermesDir(home string) string { return filepath.Join(home, ".hermes") }
 // globalConfigPath is ~/.hermes/config.yaml.
 func globalConfigPath(home string) string { return filepath.Join(hermesDir(home), "config.yaml") }
 
-// skillPath is ~/.hermes/skills/gortex/SKILL.md.
-func skillPath(home string) string {
-	return filepath.Join(hermesDir(home), "skills", SkillName, "SKILL.md")
+// skillPath is ~/.hermes/skills/<name>/SKILL.md.
+func skillPath(home, name string) string {
+	return filepath.Join(hermesDir(home), "skills", name, "SKILL.md")
 }
 
 // profileConfigPaths returns the config.yaml of every existing Hermes

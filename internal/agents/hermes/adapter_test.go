@@ -9,7 +9,25 @@ import (
 
 	"github.com/zzet/gortex/internal/agents"
 	"github.com/zzet/gortex/internal/agents/agentstest"
+	yaml "gopkg.in/yaml.v3"
 )
+
+// frontmatterOf returns the YAML frontmatter block of a SKILL.md
+// (between the opening `---` and the next `---`), failing the test
+// when the body isn't frontmatter-fenced.
+func frontmatterOf(t *testing.T, name, body string) string {
+	t.Helper()
+	const open = "---\n"
+	if !strings.HasPrefix(body, open) {
+		t.Fatalf("%s: SKILL.md does not start with frontmatter:\n%s", name, body)
+	}
+	rest := body[len(open):]
+	fm, _, found := strings.Cut(rest, "\n---\n")
+	if !found {
+		t.Fatalf("%s: unterminated frontmatter", name)
+	}
+	return fm
+}
 
 // seedHermesHome creates an empty ~/.hermes so Detect() passes without
 // depending on a `hermes` binary being on the test machine's PATH.
@@ -61,7 +79,7 @@ func TestHermesApplyWritesGlobalConfigAndSkill(t *testing.T) {
 	}
 
 	// Skill present, with Hermes frontmatter.
-	skill, err := os.ReadFile(skillPath(env.Home))
+	skill, err := os.ReadFile(skillPath(env.Home, SkillName))
 	if err != nil {
 		t.Fatalf("skill missing: %v", err)
 	}
@@ -72,6 +90,72 @@ func TestHermesApplyWritesGlobalConfigAndSkill(t *testing.T) {
 	}
 
 	agentstest.AssertIdempotent(t, a, env)
+}
+
+// TestHermesInstallsRoutingSkills covers the Claude Code parity skill
+// set: every routing playbook is installed with valid Hermes
+// frontmatter, and gortex-guide is excluded in favour of the native
+// master `gortex` skill.
+func TestHermesInstallsRoutingSkills(t *testing.T) {
+	env, _ := agentstest.NewEnv(t)
+	seedHermesHome(t, env.Home)
+	a := New()
+
+	if _, err := a.Apply(env, agents.ApplyOpts{}); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	names := RoutingSkillNames()
+	if len(names) == 0 {
+		t.Fatal("no routing skills derived")
+	}
+	for _, name := range names {
+		if name == "gortex-guide" {
+			t.Errorf("gortex-guide should be excluded (native master covers it)")
+		}
+		p := skillPath(env.Home, name)
+		data, err := os.ReadFile(p)
+		if err != nil {
+			t.Errorf("routing skill %s missing: %v", name, err)
+			continue
+		}
+		// The frontmatter block must be valid YAML with the Hermes
+		// fields Hermes needs to discover and route the skill — Hermes
+		// silently ignores a skill whose frontmatter won't parse.
+		fm := frontmatterOf(t, name, string(data))
+		var meta struct {
+			Name        string `yaml:"name"`
+			Description string `yaml:"description"`
+			Version     string `yaml:"version"`
+			Metadata    struct {
+				Hermes struct {
+					Tags     []string `yaml:"tags"`
+					Category string   `yaml:"category"`
+				} `yaml:"hermes"`
+			} `yaml:"metadata"`
+		}
+		if err := yaml.Unmarshal([]byte(fm), &meta); err != nil {
+			t.Errorf("%s: frontmatter is not valid YAML: %v\n%s", name, err, fm)
+			continue
+		}
+		if meta.Name != name {
+			t.Errorf("%s: frontmatter name = %q", name, meta.Name)
+		}
+		if meta.Description == "" || meta.Version == "" || meta.Metadata.Hermes.Category == "" || len(meta.Metadata.Hermes.Tags) == 0 {
+			t.Errorf("%s: incomplete Hermes frontmatter: %+v", name, meta)
+		}
+	}
+
+	// A couple of representative routing skills must be present.
+	for _, want := range []string{"gortex-explore", "gortex-impact", "gortex-pr-review"} {
+		if _, err := os.Stat(skillPath(env.Home, want)); err != nil {
+			t.Errorf("expected routing skill %s: %v", want, err)
+		}
+	}
+	// The excluded guide must not be installed under its own name.
+	if _, err := os.Stat(skillPath(env.Home, "gortex-guide")); err == nil {
+		t.Error("gortex-guide should not be installed")
+	}
 }
 
 // TestHermesUpsertsEveryProfileConfig covers the "extra" robustness:
@@ -229,7 +313,7 @@ func TestHermesDryRunWritesNothing(t *testing.T) {
 	if _, err := os.Stat(globalConfigPath(env.Home)); !os.IsNotExist(err) {
 		t.Error("dry-run wrote the global config")
 	}
-	if _, err := os.Stat(skillPath(env.Home)); !os.IsNotExist(err) {
+	if _, err := os.Stat(skillPath(env.Home, SkillName)); !os.IsNotExist(err) {
 		t.Error("dry-run wrote the skill")
 	}
 }
