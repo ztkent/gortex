@@ -15,33 +15,54 @@ import (
 	"github.com/zzet/gortex/internal/persistence"
 )
 
+// maxNotesCap is the soft ceiling on stored notes per repo scope.
+// Trimming honours pinned notes: the oldest non-pinned notes are shed
+// first. Matches the prior gob.gz cap.
+const maxNotesCap = 5000
+
 // notesManager owns the session-memory side-store: thread-safe note
-// CRUD with gob+gzip persistence. Mirrors the lifecycle of
-// feedbackManager — one per server, init-once, cache-dir-or-noop.
+// CRUD backed by the SQLite sidecar DB. Mirrors the lifecycle of
+// feedbackManager — one per server, init-once, sidecar-or-noop.
 //
-// Notes are written into the same per-repo cache directory as
-// feedback / combo / frecency. When dir is empty the manager
-// operates in-memory only (test fixtures, single-shot CLI calls).
+// The in-memory slice + scorers are unchanged from the gob.gz era;
+// only the persistence layer changed: rows load into the slice on
+// construction and each mutation writes its row(s) to the sidecar.
+// When sidecar is nil the manager operates in-memory only (test
+// fixtures, single-shot CLI calls with no cache dir).
 type notesManager struct {
-	mu    sync.Mutex
-	store persistence.NoteStore
-	dir   string
+	mu      sync.Mutex
+	store   persistence.NoteStore
+	sidecar *persistence.SidecarStore
+	repoKey string
 }
 
 // newNotesManager constructs a manager, lazily loading any existing
-// notes from disk. Empty cacheDir/repoPath yields a no-disk manager
-// — useful for tests and for the daemon path that wires per-session
-// state without a stable repo path.
+// notes from the sidecar. Empty cacheDir/repoPath yields a no-disk
+// manager. The sidecar lives at <cacheDir>/sidecar.sqlite; any legacy
+// notes.gob.gz under the per-repo cache subdir is imported once, then
+// renamed to *.bak.
 func newNotesManager(cacheDir, repoPath string) *notesManager {
 	if cacheDir == "" || repoPath == "" {
 		return &notesManager{}
 	}
-	dir := persistence.NotesDir(cacheDir, repoPath)
-	nm := &notesManager{dir: dir}
+	sidecar, err := persistence.OpenSidecar(persistence.DefaultSidecarPath(cacheDir))
+	if err != nil || sidecar == nil {
+		return &notesManager{}
+	}
+	return newNotesManagerFromSidecar(sidecar, persistence.RepoCacheKey(repoPath), persistence.NotesDir(cacheDir, repoPath))
+}
 
-	loaded, err := persistence.LoadNotes(dir)
-	if err == nil && loaded != nil {
-		nm.store = *loaded
+// newNotesManagerFromSidecar builds a notes manager bound to an
+// already-open sidecar + repo key, importing legacyDir/notes.gob.gz
+// once. Used by the daemon path where the sidecar is opened once and
+// shared across managers.
+func newNotesManagerFromSidecar(sidecar *persistence.SidecarStore, repoKey, legacyDir string) *notesManager {
+	nm := &notesManager{sidecar: sidecar, repoKey: repoKey}
+	if sidecar != nil {
+		_ = sidecar.MigrateLegacyNotes(repoKey, legacyDir)
+		if rows, err := sidecar.LoadNotesRows(repoKey); err == nil {
+			nm.store.Entries = rows
+		}
 	}
 	return nm
 }
@@ -82,9 +103,10 @@ func (nm *notesManager) Save(entry persistence.NoteEntry) (string, error) {
 	entry.Tags = dedupeStrings(normaliseTags(entry.Tags))
 
 	nm.store.Entries = append(nm.store.Entries, entry)
-	if err := nm.flushLocked(); err != nil {
+	if err := nm.persistLocked(entry); err != nil {
 		return entry.ID, err
 	}
+	nm.trimLocked()
 	return entry.ID, nil
 }
 
@@ -114,7 +136,7 @@ func (nm *notesManager) Update(id string, body *string, tags []string, pinned *b
 	}
 	e.UpdatedAt = time.Now().UTC()
 	nm.store.Entries[idx] = e
-	if err := nm.flushLocked(); err != nil {
+	if err := nm.persistLocked(e); err != nil {
 		return e, err
 	}
 	return e, nil
@@ -131,7 +153,10 @@ func (nm *notesManager) Delete(id string) error {
 		return nil
 	}
 	nm.store.Entries = append(nm.store.Entries[:idx], nm.store.Entries[idx+1:]...)
-	return nm.flushLocked()
+	if nm.sidecar == nil {
+		return nil
+	}
+	return nm.sidecar.DeleteNote(nm.repoKey, id)
 }
 
 // Get returns a single note by ID, or (zero, false) when not found.
@@ -220,11 +245,28 @@ func (nm *notesManager) findLocked(id string) int {
 	return -1
 }
 
-func (nm *notesManager) flushLocked() error {
-	if nm.dir == "" {
+// persistLocked writes a single note row to the sidecar. No-op for an
+// in-memory-only manager. Callers hold nm.mu.
+func (nm *notesManager) persistLocked(e persistence.NoteEntry) error {
+	if nm.sidecar == nil {
 		return nil
 	}
-	return persistence.SaveNotes(nm.dir, &nm.store)
+	return nm.sidecar.UpsertNote(nm.repoKey, e)
+}
+
+// trimLocked enforces the soft cap (maxNotesCap) via a bounded DELETE
+// on the sidecar, then reconciles the in-memory slice so it stays in
+// sync. No-op when under cap or in-memory-only. Callers hold nm.mu.
+func (nm *notesManager) trimLocked() {
+	if nm.sidecar == nil || len(nm.store.Entries) <= maxNotesCap {
+		return
+	}
+	if err := nm.sidecar.TrimNotes(nm.repoKey, maxNotesCap); err != nil {
+		return
+	}
+	if rows, err := nm.sidecar.LoadNotesRows(nm.repoKey); err == nil {
+		nm.store.Entries = rows
+	}
 }
 
 // distillResult is the structured digest returned by DistillSession.

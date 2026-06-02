@@ -410,17 +410,27 @@ func runMCP(cmd *cobra.Command, args []string) error {
 		srv.SetLSPDiagnosticsBroadcasting()
 	}
 
+	// Resolve the side-store cache dir. When --cache-dir is unset, fall
+	// back to the shared cache dir so notes / memories / notebooks still
+	// persist via the sidecar DB (the side-stores are independent of the
+	// graph backend, so they persist even under --backend memory).
+	sideStoreCacheDir := mcpCacheDir
+	if sideStoreCacheDir == "" {
+		sideStoreCacheDir = platform.CacheDir()
+	}
+
 	// Initialize feedback persistence for cross-session context learning.
 	srv.InitFeedback(mcpCacheDir, mcpIndex)
 	// Notes: per-repo session memory store backing save_note /
-	// query_notes / distill_session. Persisted alongside feedback so
-	// notes survive daemon restarts and compactions.
-	srv.InitNotes(mcpCacheDir, mcpIndex)
+	// query_notes / distill_session. Persisted in the sidecar DB so
+	// notes survive daemon restarts and compactions, independent of the
+	// graph backend.
+	srv.InitNotes(sideStoreCacheDir, mcpIndex)
 	// Memories: cross-session development-memory store backing
 	// store_memory / query_memories / surface_memories. Shares the
-	// per-repo cache directory with notes; entries are workspace-wide
-	// and durable across sessions, compounding team knowledge.
-	srv.InitMemories(mcpCacheDir, mcpIndex)
+	// sidecar DB with notes; entries are workspace-wide and durable
+	// across sessions, compounding team knowledge.
+	srv.InitMemories(sideStoreCacheDir, mcpIndex)
 	// Notebook: repository-local persistent notebook at
 	// <repo>/.gortex/notebook/. Entries are committed alongside the
 	// repo so they're visible in PR reviews and travel with the

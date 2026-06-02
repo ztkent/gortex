@@ -14,6 +14,11 @@ import (
 	"github.com/zzet/gortex/internal/persistence"
 )
 
+// maxMemoriesCap is the soft ceiling on stored memories per repo
+// scope. Trimming honours pinned + high-importance memories. Matches
+// the prior gob.gz cap.
+const maxMemoriesCap = 10000
+
 // memoryManager owns the cross-session development-memory store.
 // It mirrors notesManager structurally (same persistence + filter
 // shape) but its entries have no SessionID — every memory is
@@ -21,28 +26,44 @@ import (
 // compounds the longer a team uses Gortex.
 //
 // Memories live alongside the graph as a separate, persistent
-// side-store written into the same per-repo cache directory as
-// notes / feedback / combo / frecency. Empty dir yields an
-// in-memory-only manager (test fixtures, single-shot CLI calls).
+// side-store backed by the SQLite sidecar DB. The in-memory slice +
+// scorers are unchanged from the gob.gz era; only the persistence
+// layer changed. A nil sidecar yields an in-memory-only manager
+// (test fixtures, single-shot CLI calls).
 type memoryManager struct {
-	mu    sync.Mutex
-	store persistence.MemoryStore
-	dir   string
+	mu      sync.Mutex
+	store   persistence.MemoryStore
+	sidecar *persistence.SidecarStore
+	repoKey string
 }
 
-// newMemoryManager constructs a manager, lazily loading any
-// existing memories from disk. Empty cacheDir/repoPath yields a
-// no-disk manager.
+// newMemoryManager constructs a manager, lazily loading any existing
+// memories from the sidecar. Empty cacheDir/repoPath yields a no-disk
+// manager. The sidecar lives at <cacheDir>/sidecar.sqlite; any legacy
+// memories.gob.gz under the per-repo cache subdir is imported once,
+// then renamed to *.bak.
 func newMemoryManager(cacheDir, repoPath string) *memoryManager {
 	if cacheDir == "" || repoPath == "" {
 		return &memoryManager{}
 	}
-	dir := persistence.MemoriesDir(cacheDir, repoPath)
-	mm := &memoryManager{dir: dir}
+	sidecar, err := persistence.OpenSidecar(persistence.DefaultSidecarPath(cacheDir))
+	if err != nil || sidecar == nil {
+		return &memoryManager{}
+	}
+	return newMemoryManagerFromSidecar(sidecar, persistence.RepoCacheKey(repoPath), persistence.MemoriesDir(cacheDir, repoPath))
+}
 
-	loaded, err := persistence.LoadMemories(dir)
-	if err == nil && loaded != nil {
-		mm.store = *loaded
+// newMemoryManagerFromSidecar builds a memory manager bound to an
+// already-open sidecar + repo key, importing legacyDir/memories.gob.gz
+// once. Used by the daemon path where the sidecar is opened once and
+// shared across managers.
+func newMemoryManagerFromSidecar(sidecar *persistence.SidecarStore, repoKey, legacyDir string) *memoryManager {
+	mm := &memoryManager{sidecar: sidecar, repoKey: repoKey}
+	if sidecar != nil {
+		_ = sidecar.MigrateLegacyMemories(repoKey, legacyDir)
+		if rows, err := sidecar.LoadMemoriesRows(repoKey); err == nil {
+			mm.store.Entries = rows
+		}
 	}
 	return mm
 }
@@ -120,9 +141,10 @@ func (mm *memoryManager) Save(entry persistence.MemoryEntry) (string, error) {
 	}
 
 	mm.store.Entries = append(mm.store.Entries, entry)
-	if err := mm.flushLocked(); err != nil {
+	if err := mm.persistLocked(entry); err != nil {
 		return entry.ID, err
 	}
+	mm.trimLocked()
 	return entry.ID, nil
 }
 
@@ -175,7 +197,7 @@ func (mm *memoryManager) Update(id string, patch MemoryPatch) (persistence.Memor
 	}
 	e.UpdatedAt = time.Now().UTC()
 	mm.store.Entries[idx] = e
-	if err := mm.flushLocked(); err != nil {
+	if err := mm.persistLocked(e); err != nil {
 		return e, err
 	}
 	return e, nil
@@ -191,7 +213,10 @@ func (mm *memoryManager) Delete(id string) error {
 		return nil
 	}
 	mm.store.Entries = append(mm.store.Entries[:idx], mm.store.Entries[idx+1:]...)
-	return mm.flushLocked()
+	if mm.sidecar == nil {
+		return nil
+	}
+	return mm.sidecar.DeleteMemory(mm.repoKey, id)
 }
 
 // Get returns a single memory by ID, or (zero, false) when not found.
@@ -215,7 +240,6 @@ func (mm *memoryManager) MarkAccessed(ids []string) {
 	mm.mu.Lock()
 	defer mm.mu.Unlock()
 	now := time.Now().UTC()
-	touched := false
 	for _, id := range ids {
 		idx := mm.findLocked(id)
 		if idx < 0 {
@@ -223,10 +247,7 @@ func (mm *memoryManager) MarkAccessed(ids []string) {
 		}
 		mm.store.Entries[idx].AccessCount++
 		mm.store.Entries[idx].LastAccessed = now
-		touched = true
-	}
-	if touched {
-		_ = mm.flushLocked()
+		_ = mm.persistLocked(mm.store.Entries[idx])
 	}
 }
 
@@ -324,11 +345,28 @@ func (mm *memoryManager) findLocked(id string) int {
 	return -1
 }
 
-func (mm *memoryManager) flushLocked() error {
-	if mm.dir == "" {
+// persistLocked writes a single memory row to the sidecar. No-op for
+// an in-memory-only manager. Callers hold mm.mu.
+func (mm *memoryManager) persistLocked(e persistence.MemoryEntry) error {
+	if mm.sidecar == nil {
 		return nil
 	}
-	return persistence.SaveMemories(mm.dir, &mm.store)
+	return mm.sidecar.UpsertMemory(mm.repoKey, e)
+}
+
+// trimLocked enforces the soft cap (maxMemoriesCap) via the two-pass
+// bounded DELETE on the sidecar, then reconciles the in-memory slice.
+// No-op when under cap or in-memory-only. Callers hold mm.mu.
+func (mm *memoryManager) trimLocked() {
+	if mm.sidecar == nil || len(mm.store.Entries) <= maxMemoriesCap {
+		return
+	}
+	if err := mm.sidecar.TrimMemories(mm.repoKey, maxMemoriesCap); err != nil {
+		return
+	}
+	if rows, err := mm.sidecar.LoadMemoriesRows(mm.repoKey); err == nil {
+		mm.store.Entries = rows
+	}
 }
 
 // ---------------------------------------------------------------------------

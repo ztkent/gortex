@@ -496,13 +496,19 @@ func buildDaemonState(logger *zap.Logger) (*daemonState, error) {
 		srv.SetLSPDiagnosticsBroadcasting()
 	}
 	srv.InitFeedback("", "")
-	srv.InitNotes("", "")
-	srv.InitMemories("", "")
-	// Daemon mode has no single repo to anchor a per-repo notebook
-	// against, but the agent still wants persistence across daemon
-	// restarts and shared visibility across sessions. Fall back to a
-	// global notebook under the unified data dir; CLI mode keeps the
-	// per-repo .gortex/notebook/ path wired in cmd/gortex/mcp.go.
+	// Daemon mode has no single repo to anchor the per-repo side-stores
+	// against, but notes/memories must still persist across daemon
+	// restarts and compactions (they are independent of the graph
+	// backend). Wire them to the shared sidecar DB under the data dir
+	// with a stable "daemon" partition key; per-call WorkspaceID /
+	// SessionID filtering keeps repos' notes distinct at query time.
+	// The per-repo `gortex mcp` subprocess persists under its own
+	// cache dir (cmd/gortex/mcp.go).
+	srv.InitNotes(platform.DataDir(), "daemon")
+	srv.InitMemories(platform.DataDir(), "daemon")
+	// Notebook: a global notebook under the data dir so entries survive
+	// daemon restarts and are shared across sessions; CLI mode keeps the
+	// per-repo .gortex/ path wired in cmd/gortex/mcp.go.
 	srv.InitNotebook(filepath.Join(platform.DataDir(), "notebook-cache"))
 	srv.InitCombo("", "", gortexmcp.ModeAI)
 	srv.InitFrecency("", "", gortexmcp.ModeAI)
