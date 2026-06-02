@@ -1317,6 +1317,16 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 	rctx := s.buildRerankContext(ctx, q)
 	scope.RerankContext = rctx
 
+	// Corpus selection: `code` (default) keeps only code symbols,
+	// `docs` keeps only prose-section (KindDoc) nodes, `all` keeps
+	// both. Parsed BEFORE the fetch so the docs corpus can drive its
+	// own retrieval channel (below) rather than relying purely on a
+	// post-filter over the single code-shaped fetch.
+	corpus, corpusErr := parseCorpus(req)
+	if corpusErr != nil {
+		return mcp.NewToolResultError(corpusErr.Error()), nil
+	}
+
 	var nodes []*graph.Node
 	var primaryCount int
 	if len(expandedTerms) > 0 {
@@ -1327,6 +1337,20 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 		timings.BM25PrimaryMS += time.Since(bm25Start).Milliseconds()
 		primaryCount = len(nodes)
 	}
+
+	// Docs retrieval channel: when the corpus admits prose, the single
+	// code-shaped fetch above is not enough -- a relevant doc section
+	// can rank just past fetchLimit behind code symbols that share the
+	// query's tokens and never enter the candidate pool at all, so the
+	// corpus post-filter has nothing to keep. Issue a parallel,
+	// wider-limit fetch and merge in its KindDoc hits before the
+	// corpus filter runs, so prose competes on its own terms. The
+	// merge dedupes by node ID; ranking among the merged set is settled
+	// by the rerank pass downstream.
+	if corpus.includesDocs() {
+		nodes = s.mergeDocChannel(ctx, q, nodes, fetchLimit, scope, timings)
+	}
+
 	candsAfterGather := len(nodes)
 	mergedCount := len(nodes) // pre-filter; comparable to primaryCount
 
@@ -1345,13 +1369,6 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 		kindArg = fq.Kind
 	}
 	pathFilter := s.resolvePathFilter(req, fq)
-	// Corpus selection: `code` (default) keeps only code symbols,
-	// `docs` keeps only prose-section (KindDoc) nodes, `all` keeps
-	// both.
-	corpus, corpusErr := parseCorpus(req)
-	if corpusErr != nil {
-		return mcp.NewToolResultError(corpusErr.Error()), nil
-	}
 
 	// applyAllPostFilters runs the full post-search filter sequence
 	// (repo / kind / lang+path clauses / sub-path scope / corpus) over
