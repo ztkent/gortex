@@ -148,6 +148,43 @@ func TestResolveHookCommand(t *testing.T) {
 		got := ResolveHookCommand(io.Discard)
 		assert.Equal(t, "gortex hook", got, "fallback to bare name keeps init working in sandboxes")
 	})
+
+	t.Run("commandNeverContainsBackslash", func(t *testing.T) {
+		dir := t.TempDir()
+		fake := filepath.Join(dir, "gortex")
+		require.NoError(t, os.WriteFile(fake, []byte("#!/bin/sh\nexit 0\n"), 0o755))
+		t.Setenv("PATH", dir)
+
+		got := ResolveHookCommand(io.Discard)
+		assert.NotContains(t, got, "\\",
+			"baked hook command must use forward slashes — Git Bash on Windows mangles backslash paths")
+	})
+}
+
+// TestShellSafeHookBinary pins the Windows-path fix: a resolved binary
+// path with backslashes (as exec.LookPath returns on Windows) must be
+// rewritten to forward slashes so Claude Code's shell-run hook does not
+// swallow the separators. Runs on every platform because the helper is
+// a pure string transform.
+func TestShellSafeHookBinary(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"windowsAbsolute", `C:\Users\Borislav\AppData\Local\Programs\gortex\gortex.exe`, "C:/Users/Borislav/AppData/Local/Programs/gortex/gortex.exe"},
+		{"windowsMixed", `C:\Users\me/gortex.exe`, "C:/Users/me/gortex.exe"},
+		{"unixAbsolute", "/opt/homebrew/bin/gortex", "/opt/homebrew/bin/gortex"},
+		{"bareName", "gortex", "gortex"},
+		{"forwardSlashesUnchanged", "C:/Users/me/gortex.exe", "C:/Users/me/gortex.exe"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := shellSafeHookBinary(tc.in)
+			assert.Equal(t, tc.want, got)
+			assert.NotContains(t, got, "\\", "result must be free of backslashes")
+		})
+	}
 }
 
 func makeHookEntry(matcher, command string) map[string]any {

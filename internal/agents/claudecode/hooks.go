@@ -86,7 +86,7 @@ func hookCommandWithMode(base, mode string) string {
 // environment differs between Claude Code and a terminal.
 func ResolveHookCommand(w io.Writer) string {
 	if path, err := exec.LookPath("gortex"); err == nil {
-		return path + " hook"
+		return shellSafeHookBinary(path) + " hook"
 	}
 	if w != nil {
 		_, _ = fmt.Fprintln(w,
@@ -94,6 +94,21 @@ func ResolveHookCommand(w io.Writer) string {
 				"writing bare \"gortex hook\" into settings — install gortex to PATH for a stable hook command")
 	}
 	return "gortex hook"
+}
+
+// shellSafeHookBinary normalizes a resolved binary path into a form
+// safe to embed in a shell-executed hook command. Claude Code runs
+// hooks through a shell; on Windows that shell is Git Bash, which
+// treats backslashes as escape characters — a native path like
+// C:\Users\me\gortex.exe is mangled to C:Usersmegortex.exe (\U, \m, …
+// swallowed) and the hook fails with "command not found". Forward
+// slashes survive: Git Bash maps C:/Users/... back to a native path
+// when it spawns the .exe. The replacement is unconditional rather
+// than Windows-guarded — any backslash in an unquoted shell command is
+// a bug regardless of OS, and a real Unix binary path never contains
+// one as a separator.
+func shellSafeHookBinary(path string) string {
+	return strings.ReplaceAll(path, "\\", "/")
 }
 
 // HookCommandPathIsEphemeral reports whether cmd's binary path lives
