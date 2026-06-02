@@ -76,13 +76,54 @@ type Decl struct {
 	EndRow   int
 }
 
+// Fidelity is the per-declaration verdict the elider acts on: keep the
+// whole declaration verbatim, compress its body to a stub, or omit the
+// declaration entirely behind a one-line marker.
+type Fidelity int
+
+const (
+	// FidelityCompress replaces the declaration's body with a stub —
+	// the default, identical to the legacy compress behaviour.
+	FidelityCompress Fidelity = iota
+	// FidelityFull leaves the whole declaration (signature + body)
+	// verbatim. Equivalent to a Keep predicate returning true.
+	FidelityFull
+	// FidelityOmit removes the whole declaration — signature and body
+	// both — and leaves a single-line `// <name> omitted` marker in
+	// its place.
+	FidelityOmit
+)
+
 // Options tunes CompressWith. The zero value elides every body, which
 // is exactly what the bare Compress entry point does.
 type Options struct {
 	// Keep, when non-nil, is consulted once per elidable declaration.
 	// Returning true leaves that declaration's body verbatim; every
 	// other body is still stubbed. A nil Keep elides everything.
+	//
+	// Keep is retained for back-compat and composes with Decide: a
+	// Keep that returns true forces FidelityFull regardless of what
+	// Decide would have returned.
 	Keep func(Decl) bool
+	// Decide, when non-nil, returns the per-declaration fidelity
+	// verdict (full / compress / omit). It generalises the binary
+	// Keep into a three-way choice. A nil Decide means "compress
+	// every body" (the legacy behaviour). Keep is layered on top:
+	// when Keep(d) is true the verdict is forced to FidelityFull.
+	Decide func(Decl) Fidelity
+}
+
+// verdict resolves the effective fidelity for a declaration, folding
+// the legacy Keep predicate over the Decide function. Keep wins when
+// it fires (back-compat: a kept declaration is always full).
+func (o Options) verdict(d Decl) Fidelity {
+	if o.Keep != nil && o.Keep(d) {
+		return FidelityFull
+	}
+	if o.Decide != nil {
+		return o.Decide(d)
+	}
+	return FidelityCompress
 }
 
 // KeepLineRanges builds a Keep predicate that retains any declaration
@@ -670,25 +711,39 @@ func collectRanges(root *sitter.Node, spec *languageSpec, src []byte, opts Optio
 			}
 			if eligible {
 				if body := spec.findBody(node); body != nil {
-					// A Keep predicate can pin this declaration's body
-					// to its verbatim source; the whole subtree is then
-					// left intact — no stub, no recursion.
-					if opts.Keep != nil && opts.Keep(Decl{
-						Name:     declName(node, src),
+					name := declName(node, src)
+					switch opts.verdict(Decl{
+						Name:     name,
 						Kind:     kind,
 						StartRow: int(node.StartPoint().Row),
 						EndRow:   int(node.EndPoint().Row),
 					}) {
+					case FidelityFull:
+						// Keep this declaration's whole subtree verbatim —
+						// no stub, no recursion.
 						return
+					case FidelityOmit:
+						// Drop the whole declaration (signature + body)
+						// behind a one-line marker. The span is the whole
+						// node, not just its body. No recursion — the
+						// invariants (ascending, non-overlapping ranges;
+						// no descent into a removed subtree) hold.
+						out = append(out, elideRange{
+							startByte: node.StartByte(),
+							endByte:   node.EndByte(),
+							stub:      omitMarker(spec.style, name),
+						})
+						return
+					default: // FidelityCompress
+						stub, lineCount := renderStub(spec.style, body, src)
+						_ = lineCount
+						out = append(out, elideRange{
+							startByte: body.StartByte(),
+							endByte:   body.EndByte(),
+							stub:      stub,
+						})
+						return // do not recurse into elided body
 					}
-					stub, lineCount := renderStub(spec.style, body, src)
-					_ = lineCount
-					out = append(out, elideRange{
-						startByte: body.StartByte(),
-						endByte:   body.EndByte(),
-						stub:      stub,
-					})
-					return // do not recurse into elided body
 				}
 			}
 		}
@@ -699,6 +754,22 @@ func collectRanges(root *sitter.Node, spec *languageSpec, src []byte, opts Optio
 	}
 	walk(root)
 	return out
+}
+
+// omitMarker renders the one-line placeholder that stands in for a
+// whole declaration removed under FidelityOmit. The comment prefix
+// follows the language's line-comment syntax so the result still
+// parses as a comment in the host language.
+func omitMarker(style stubStyle, name string) string {
+	prefix := "//"
+	switch style {
+	case stubPython, stubRuby, stubElixir:
+		prefix = "#"
+	}
+	if name == "" {
+		return prefix + " declaration omitted"
+	}
+	return fmt.Sprintf("%s %s omitted", prefix, name)
 }
 
 func renderStub(style stubStyle, body *sitter.Node, src []byte) (string, int) {

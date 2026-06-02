@@ -647,7 +647,8 @@ func (s *Server) handleReadFile(ctx context.Context, req mcp.CallToolRequest) (*
 			symbols = sg.Nodes
 		}
 		keepPred, resolved := resolveKeepPredicate(req.GetString("keep", ""), symbols)
-		if out, eerr := elide.CompressWith(content, language, elide.Options{Keep: keepPred}); eerr == nil && len(out) != len(content) {
+		decide := fidelityDecideForPath(parseFidelityGlobs(req.GetString("fidelity_globs", "")), relPath)
+		if out, eerr := elide.CompressWith(content, language, elide.Options{Keep: keepPred, Decide: decide}); eerr == nil && len(out) != len(content) {
 			content = out
 			bodiesElided = true
 			keptSymbols = resolved

@@ -30,6 +30,7 @@ func (s *Server) registerCodingTools() {
 			mcp.WithString("if_none_match", mcp.Description("ETag from a previous response — returns not_modified if content unchanged")),
 			mcp.WithBoolean("compress_bodies", mcp.Description("Also return a source_compressed view of the whole file with every function/method body replaced by a `{ /* N lines elided */ }` stub. Signatures, imports, types, and comments are preserved verbatim. Roughly 60-70% fewer tokens than raw source. Composable with format:\"gcx\". Default: false.")),
 			mcp.WithString("keep", mcp.Description("Comma-separated symbol names, IDs, or node kinds (function / method / type) whose bodies stay verbatim when compress_bodies is set — every other body in the file is still stubbed. Use to keep the symbols you are about to edit at full source while compressing the rest. Ignored unless compress_bodies is true.")),
+			mcp.WithString("fidelity_globs", mcp.Description(fidelityGlobsParamDescription)),
 		),
 		s.handleGetEditingContext,
 	)
@@ -125,6 +126,7 @@ func (s *Server) registerCodingTools() {
 			mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path, or repo-prefixed / repo-root-relative path")),
 			mcp.WithBoolean("compress_bodies", mcp.Description("Replace function/method bodies with elided stubs (default: false)")),
 			mcp.WithString("keep", mcp.Description("Comma-separated symbol names, IDs, or node kinds whose bodies stay verbatim when compress_bodies is set — every other body in the file is still stubbed. Ignored unless compress_bodies is true.")),
+			mcp.WithString("fidelity_globs", mcp.Description(fidelityGlobsParamDescription)),
 			mcp.WithNumber("max_lines", mcp.Description("When the file exceeds this many lines, collapse runs of leaf statements inside function bodies into `… N lines elided …` markers while keeping declarations and the control-flow skeleton. Falls back to a plain head cut for non-code files. Omit or 0 to disable.")),
 			mcp.WithNumber("max_bytes", mcp.Description("Cap the marshaled response at this many bytes; truncation flag rides on the response. Omit for no cap.")),
 			mcp.WithString("if_none_match", mcp.Description("ETag from a previous response — returns not_modified if content unchanged")),
@@ -506,7 +508,8 @@ func (s *Server) handleGetEditingContext(ctx context.Context, req mcp.CallToolRe
 				keepNodes := s.editingContextSymbolNodes(fp, out.Defines)
 				keepPred, resolved := resolveKeepPredicate(req.GetString("keep", ""), keepNodes)
 				keptSymbols = resolved
-				if compressed, cerr := elide.CompressWith(fileBytes, language, elide.Options{Keep: keepPred}); cerr == nil {
+				decide := fidelityDecideForPath(parseFidelityGlobs(req.GetString("fidelity_globs", "")), fp)
+				if compressed, cerr := elide.CompressWith(fileBytes, language, elide.Options{Keep: keepPred, Decide: decide}); cerr == nil {
 					sourceCompressed = string(compressed)
 				}
 			}
