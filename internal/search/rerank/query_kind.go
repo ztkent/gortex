@@ -414,6 +414,42 @@ func ClassWeightMultiplier(c QueryClass, signal string) float64 {
 	}
 }
 
+// proseWeightTable is the per-signal multiplier applied on top of the
+// class / α weighting when Context.ProseMode is set — a documentation
+// (prose-section) query. It mirrors the shape of classWeightTable /
+// ClassWeightMultiplier but lives on its own lever, independent of
+// Alpha, so a docs query gets BOTH its query-shape blend and this
+// prose profile.
+//
+// The profile lifts the two signals that actually discriminate prose
+// (bm25 and semantic — a prose section has body text and an embedding,
+// little else) and zeroes the code-structural signals that are
+// meaningless for a KindDoc node: api_signature and type_signature
+// (a prose section has no signature) and definition_bias (no
+// definition keyword to match). A signal absent from the table keeps
+// its weight unchanged (multiplier 1.0), so the structural / session
+// signals that still make sense for prose (recency, feedback,
+// file_coherence) are untouched.
+var proseWeightTable = map[string]float64{
+	SignalBM25:           1.25,
+	SignalSemantic:       1.30,
+	SignalAPISignature:   0.0,
+	SignalTypeSignature:  0.0,
+	SignalDefinitionBias: 0.0,
+}
+
+// proseWeightMultiplier returns the prose-profile multiplier for a
+// signal. Signals not in proseWeightTable return 1.0 (unchanged).
+// Applied by Pipeline.Rerank only when Context.ProseMode is set, and
+// composed multiplicatively with the class / α multiplier so the two
+// levers stay independent.
+func proseWeightMultiplier(signal string) float64 {
+	if m, ok := proseWeightTable[signal]; ok {
+		return m
+	}
+	return 1.0
+}
+
 // continuousClassMultiplier is the continuous analogue of
 // ClassWeightMultiplier: it maps a continuous α (as produced by
 // AlphaForContinuous) onto the bm25 / semantic weight multipliers,

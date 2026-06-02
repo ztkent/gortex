@@ -36,6 +36,20 @@ type Context struct {
 	// unaffected.
 	Alpha float64
 
+	// ProseMode tunes the rerank for a documentation query -- one that
+	// searches the prose-section (KindDoc) corpus. When set,
+	// Pipeline.Rerank applies the proseWeightTable on top of the
+	// per-signal weights: it lifts the bm25 and semantic channels
+	// (the only signals that score prose well) and suppresses the
+	// code-structural signals (api_signature / type_signature /
+	// definition_bias) that are meaningless for a prose section with
+	// no call graph, no signature, and no definition keyword. The
+	// adjustment is INDEPENDENT of the Alpha / class lever -- it
+	// multiplies whatever class-scaled weight those produce -- so a
+	// docs query still gets its query-shape blend AND the prose
+	// profile. The zero value is off; every code query is unaffected.
+	ProseMode bool
+
 	// CommunityOf maps a node ID to its detected community ID. When
 	// nil, the community signal contributes 0.
 	CommunityOf func(nodeID string) string

@@ -133,6 +133,14 @@ func (p *Pipeline) Rerank(query string, cands []*Candidate, ctx *Context) []*Can
 			} else {
 				classMult = ClassWeightMultiplier(ctx.QueryClass, sig.Name())
 			}
+			// Prose profile rides on its own lever, composed
+			// multiplicatively with the class / α multiplier so a docs
+			// query keeps its query-shape blend while the structural
+			// code-only signals are suppressed for the prose corpus.
+			// 1.0 (no-op) for every code query.
+			if ctx.ProseMode {
+				classMult *= proseWeightMultiplier(sig.Name())
+			}
 			total += w * classMult * raw
 		}
 		c.Score = total

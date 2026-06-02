@@ -23,6 +23,14 @@ import (
 // doc, so the BM25 index holds both code symbols and prose-section
 // nodes.
 func corpusTestServer(t *testing.T) *Server {
+	return corpusTestServerProse(t, true)
+}
+
+// corpusTestServerProse builds the corpus harness with the
+// prose-indexing toggle set explicitly, so a test can verify the
+// search.index_prose gate keeps KindDoc nodes out of the search index
+// when disabled.
+func corpusTestServerProse(t *testing.T, indexProse bool) *Server {
 	t.Helper()
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "server.go"),
@@ -37,6 +45,7 @@ func corpusTestServer(t *testing.T) *Server {
 	reg := parser.NewRegistry()
 	languages.RegisterAll(reg)
 	cfg := config.Default()
+	cfg.Index.IndexProse = indexProse
 	idx := indexer.New(g, reg, cfg.Index, zap.NewNop())
 	_, err := idx.Index(dir)
 	require.NoError(t, err)
@@ -118,6 +127,36 @@ func TestSearchSymbols_CorpusRanking(t *testing.T) {
 		"the prose query should rank the Troubleshooting section first; got %q", top)
 	// A doc result surfaces a section snippet, not a signature.
 	require.NotEmpty(t, docs[0]["section"], "a doc result should carry a section snippet")
+}
+
+// TestSearchSymbols_IndexProseDisabledGate confirms the
+// search.index_prose toggle is a live gate: when prose indexing is
+// off, KindDoc prose-section nodes are kept out of the search index
+// entirely, so corpus:docs returns nothing even via the docs channel.
+func TestSearchSymbols_IndexProseDisabledGate(t *testing.T) {
+	// Prose ON (the default) -> the section is searchable.
+	on := corpusSearch(t, corpusTestServerProse(t, true),
+		map[string]any{"query": "kubernetes deploy", "corpus": "docs"})
+	require.NotEmpty(t, on, "with index_prose on, the prose section must be searchable")
+
+	// Prose OFF -> the same query under corpus:docs returns nothing,
+	// because the KindDoc node never entered the search index.
+	off := corpusSearch(t, corpusTestServerProse(t, false),
+		map[string]any{"query": "kubernetes deploy", "corpus": "docs"})
+	require.Empty(t, off, "with index_prose off, no prose section may be searchable")
+}
+
+// TestSearchSymbols_CorpusDocsProseRanking exercises the prose-tuned
+// rerank path: a docs-only query runs with ProseMode engaged and still
+// ranks the right section. This is a smoke test that the ProseMode
+// wiring in the handler does not break docs ranking.
+func TestSearchSymbols_CorpusDocsProseRanking(t *testing.T) {
+	srv := corpusTestServer(t)
+	docs := corpusSearch(t, srv, map[string]any{"query": "logs request timeout", "corpus": "docs"})
+	require.NotEmpty(t, docs)
+	top, _ := docs[0]["name"].(string)
+	require.Contains(t, top, "Troubleshooting",
+		"prose-tuned rerank should still rank the Troubleshooting section first; got %q", top)
 }
 
 // TestSearchSymbols_CorpusInvalid confirms an unrecognised corpus

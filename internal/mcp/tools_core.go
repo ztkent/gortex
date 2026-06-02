@@ -1478,6 +1478,15 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 		if !qcPinned && !isSoup {
 			rctx.Alpha = rerank.AlphaForContinuous(q)
 		}
+		// Prose-tuned reranking: a docs-only query scores prose-section
+		// nodes that have no call graph, signature, or definition
+		// keyword, so suppress the code-structural signals and lift the
+		// text + semantic channels. corpusAll still mixes code, so the
+		// prose profile engages only for the docs-only corpus where
+		// every candidate is a prose section.
+		if corpus == corpusDocs {
+			rctx.ProseMode = true
+		}
 	}
 	candsAfterFilter := len(nodes)
 	// Capture the post-filter candidate ID set so we can ask the rctx
