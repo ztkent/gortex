@@ -224,6 +224,152 @@ func TestEmbedAllChunks_SerialForNonConcurrentEmbedder(t *testing.T) {
 		"an embedder without Concurrent() must be driven serially (peak in-flight 1)")
 }
 
+// TestEmbedAllChunks_ConcurrencyCapIsBinding proves the configured cap
+// is the *binding* constraint, not merely an upper bound that the
+// workload happens to stay under. A barrier embedder blocks each call
+// until exactly `cap` calls are simultaneously in flight, then releases
+// them; if the pool ran fewer than `cap` workers the barrier would
+// deadlock (the test would time out), and if it ran more the peak would
+// exceed the cap. Reaching the barrier and observing peak == cap proves
+// the pool saturates to precisely the configured width.
+func TestEmbedAllChunks_ConcurrencyCapIsBinding(t *testing.T) {
+	const cap = 3
+	emb := &barrierEmbedder{target: cap, reached: make(chan struct{})}
+	idx := newPoolTestIndexer(t, emb, cap)
+
+	// Enough batches that the pool must reuse workers — more batches
+	// than the cap guarantees the barrier is hit by the first wave.
+	texts := makeTexts(30) // batch 2 → 15 batches
+	done := make(chan error, 1)
+	go func() {
+		_, err := idx.embedAllChunks(texts, 2, passthroughEmbedFn(idx))
+		done <- err
+	}()
+
+	select {
+	case <-emb.reached:
+		// The barrier opened only because `cap` calls were in flight at
+		// once — the pool genuinely ran `cap` workers in parallel.
+	case <-time.After(5 * time.Second):
+		t.Fatal("pool never reached the concurrency cap — fewer than cap workers ran (deadlock)")
+	}
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("embedAllChunks did not finish after the barrier opened")
+	}
+
+	if got := emb.peakInFlight(); got != cap {
+		t.Fatalf("peak in-flight = %d, want exactly the cap %d", got, cap)
+	}
+}
+
+// TestEmbedAllChunks_ZeroCapUsesDefault asserts that a zero configured
+// cap falls back to the built-in default — proving the
+// SetEmbeddingAPIConcurrency(0) path resolves to defaultEmbedAPIConcurrency
+// rather than serializing or panicking.
+func TestEmbedAllChunks_ZeroCapUsesDefault(t *testing.T) {
+	emb := &poolEmbedder{delay: 10 * time.Millisecond}
+	idx := newPoolTestIndexer(t, emb, 0) // 0 → default (4)
+
+	// More batches than the default so the pool can saturate it.
+	texts := makeTexts(40) // batch 2 → 20 batches
+	vectors, err := idx.embedAllChunks(texts, 2, passthroughEmbedFn(idx))
+	require.NoError(t, err)
+	require.Len(t, vectors, len(texts))
+
+	assert.LessOrEqual(t, emb.peak, defaultEmbedAPIConcurrency,
+		"zero cap must fall back to the default (%d), peak was %d", defaultEmbedAPIConcurrency, emb.peak)
+	assert.Greater(t, emb.peak, 1,
+		"zero cap must still parallelize via the default, not serialize")
+}
+
+// TestSetEmbeddingAPIConcurrency_FlowsToPool asserts the setter wires
+// the field the pool actually reads — the production path is
+// cfg.Embedding.APIConcurrency → SetEmbeddingAPIConcurrency → the pool
+// cap. A cap of 1 must force the serial-equivalent path (peak 1) even
+// for a Concurrent() embedder, proving the setter, not the embedder,
+// decides the width.
+func TestSetEmbeddingAPIConcurrency_FlowsToPool(t *testing.T) {
+	emb := &poolEmbedder{delay: 5 * time.Millisecond}
+	idx := newPoolTestIndexer(t, emb, 1) // cap 1 → no overlap
+
+	vectors, err := idx.embedAllChunks(makeTexts(20), 2, passthroughEmbedFn(idx))
+	require.NoError(t, err)
+	require.Len(t, vectors, 20)
+	assert.Equal(t, 1, emb.peak,
+		"a cap of 1 must serialize even a Concurrent() embedder (peak in-flight 1)")
+}
+
+// barrierEmbedder is a Concurrent() embedder that blocks every call on a
+// shared barrier until `target` calls are simultaneously in flight, then
+// releases them all. It is the deterministic way to prove the pool runs
+// exactly `target` workers at once: if fewer run, the barrier never
+// opens and the test deadlocks.
+type barrierEmbedder struct {
+	target    int
+	mu        sync.Mutex
+	inFlight  int
+	peak      int
+	released  bool
+	reached   chan struct{}
+	closeOnce sync.Once
+}
+
+func (b *barrierEmbedder) Concurrent() bool { return true }
+func (b *barrierEmbedder) Dimensions() int  { return 3 }
+func (b *barrierEmbedder) Close() error     { return nil }
+
+func (b *barrierEmbedder) peakInFlight() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.peak
+}
+
+func (b *barrierEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
+	out, err := b.EmbedBatch(ctx, []string{text})
+	if err != nil {
+		return nil, err
+	}
+	return out[0], nil
+}
+
+func (b *barrierEmbedder) EmbedBatch(_ context.Context, texts []string) ([][]float32, error) {
+	b.mu.Lock()
+	b.inFlight++
+	if b.inFlight > b.peak {
+		b.peak = b.inFlight
+	}
+	if b.inFlight >= b.target {
+		b.released = true
+		b.closeOnce.Do(func() { close(b.reached) })
+	}
+	b.mu.Unlock()
+
+	// Spin until the barrier has opened so the cap-many callers overlap.
+	for {
+		b.mu.Lock()
+		released := b.released
+		b.mu.Unlock()
+		if released {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	b.mu.Lock()
+	b.inFlight--
+	b.mu.Unlock()
+
+	out := make([][]float32, len(texts))
+	for i, txt := range texts {
+		out[i] = []float32{textToScalar(txt), 0, 0}
+	}
+	return out, nil
+}
+
 // serialOnlyEmbedder is a fake embedder that does NOT implement
 // Concurrent(), modelling an in-process transformer backend.
 type serialOnlyEmbedder struct {
