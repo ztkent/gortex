@@ -212,6 +212,7 @@ func emitUninstallSummary(w io.Writer, removed int, failures []string, totalPres
 		_, _ = fmt.Fprintln(w, "Note: CLAUDE.md was not modified — remove the Gortex block manually if needed.")
 		_, _ = fmt.Fprintln(w, "Note: .kiro/steering/ files with 'gortex-' prefix were removed. Other .kiro/ files were preserved.")
 		_, _ = fmt.Fprintln(w, "Note: Antigravity KIs are global and were not removed. Manually delete ~/.gemini/antigravity/knowledge/gortex-workflow if desired.")
+		_, _ = fmt.Fprintln(w, "Note: Hermes config is global and was not removed. Manually delete the gortex entry in ~/.hermes/config.yaml (+ profiles) and ~/.hermes/skills/gortex if desired.")
 		return
 	}
 
@@ -236,5 +237,6 @@ func emitUninstallSummary(w io.Writer, removed int, failures []string, totalPres
 	_, _ = fmt.Fprintln(w, "       "+progress.StyleHint.Render("·")+"  "+progress.StyleVal.Render("CLAUDE.md — remove the Gortex block manually if needed"))
 	_, _ = fmt.Fprintln(w, "       "+progress.StyleHint.Render("·")+"  "+progress.StyleVal.Render(".kiro/ files without the 'gortex-' prefix"))
 	_, _ = fmt.Fprintln(w, "       "+progress.StyleHint.Render("·")+"  "+progress.StyleVal.Render("~/.gemini/antigravity/knowledge/gortex-workflow (global)"))
+	_, _ = fmt.Fprintln(w, "       "+progress.StyleHint.Render("·")+"  "+progress.StyleVal.Render("~/.hermes/ config.yaml + skills (global)"))
 	_, _ = fmt.Fprintln(w)
 }

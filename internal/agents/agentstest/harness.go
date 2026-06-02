@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/zzet/gortex/internal/agents"
+	yaml "gopkg.in/yaml.v3"
 )
 
 // NewEnv returns an Env pointed at a temporary Root and Home.
@@ -125,6 +126,37 @@ func WriteJSON(t *testing.T, path string, obj map[string]any) {
 		t.Fatalf("mkdir: %v", err)
 	}
 	data, err := json.MarshalIndent(obj, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+}
+
+// ReadYAML parses a YAML file into a map — the YAML cousin of
+// ReadJSON for adapters whose config lives in YAML (Hermes, Aider).
+func ReadYAML(t *testing.T, path string) map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	var out map[string]any
+	if err := yaml.Unmarshal(data, &out); err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	return out
+}
+
+// WriteYAML writes obj to path as YAML — for seeding "pre-populated"
+// scenarios in merge tests.
+func WriteYAML(t *testing.T, path string, obj map[string]any) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	data, err := yaml.Marshal(obj)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
