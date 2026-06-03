@@ -1,6 +1,8 @@
 package languages
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/zzet/gortex/internal/graph"
@@ -346,6 +348,16 @@ func TestSplitTSUnionType(t *testing.T) {
 		{": User | null | undefined", []string{"User", "null", "undefined"}},
 		{"Map<string, User | null>", []string{"Map<string, User | null>"}}, // top-level only
 		{"Promise<User> | Error", []string{"Promise<User>", "Error"}},
+		// Intersection types split too — each component is a type the
+		// value simultaneously satisfies.
+		{"Props & RefAttributes", []string{"Props", "RefAttributes"}},
+		{"A & B | C", []string{"A", "B", "C"}},
+		{"Map<A & B, C>", []string{"Map<A & B, C>"}}, // intersection nested in generic stays whole
+		// Arrow function return types: the `>` in `=>` must not underflow
+		// depth and defeat the later top-level `|` split.
+		{"(x: number) => string | null", []string{"(x: number) => string", "null"}},
+		// Empty / stray-delimiter members are dropped, not emitted blank.
+		{"User |", []string{"User"}},
 	}
 	for _, c := range cases {
 		got := splitTSUnionType(c.in)
@@ -353,6 +365,25 @@ func TestSplitTSUnionType(t *testing.T) {
 			t.Errorf("splitTSUnionType(%q) = %v, want %v", c.in, got, c.want)
 		}
 	}
+
+	// Overflow guard: a pathological branch count past maxTSUnionMembers
+	// is treated as opaque — the splitter returns nil so no per-branch
+	// EdgeReturns flood the graph.
+	t.Run("overflow_guard", func(t *testing.T) {
+		members := make([]string, 0, maxTSUnionMembers+5)
+		for i := range maxTSUnionMembers + 5 {
+			members = append(members, fmt.Sprintf("'lit%d'", i))
+		}
+		big := strings.Join(members, " | ")
+		if got := splitTSUnionType(big); got != nil {
+			t.Errorf("splitTSUnionType(<%d-member union>) = %v, want nil (overflow)", len(members), got)
+		}
+		// Exactly at the cap is still split.
+		atCap := strings.Join(members[:maxTSUnionMembers], " | ")
+		if got := splitTSUnionType(atCap); len(got) != maxTSUnionMembers {
+			t.Errorf("splitTSUnionType(<%d-member union>) = %d parts, want %d", maxTSUnionMembers, len(got), maxTSUnionMembers)
+		}
+	})
 }
 
 func sliceEq(a, b []string) bool {

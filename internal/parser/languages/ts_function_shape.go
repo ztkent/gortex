@@ -586,8 +586,27 @@ func canonicalizeTSTypeRef(t string) string {
 	return t
 }
 
+// maxTSUnionMembers caps how many top-level union/intersection branches
+// splitTSUnionType returns. The TypeScript LSP and type-printer can
+// synthesise pathological type-texts — a 200-member string-literal union,
+// a distributive conditional type expanded over a large enum — where
+// emitting one EdgeReturns per branch produces dozens of noise edges to
+// ad-hoc literal types no traversal benefits from. Past this many
+// top-level branches the type is treated as opaque overflow:
+// splitTSUnionType returns nil so the caller emits no per-branch edges.
+// 16 comfortably covers real discriminated unions, which rarely exceed a
+// handful of variants.
+const maxTSUnionMembers = 16
+
 // splitTSUnionType splits a TypeScript type string at top-level `|`
-// boundaries (respecting <…>, (…), {…} nesting).
+// (union) and `&` (intersection) boundaries, respecting <…>, (…), {…},
+// […] nesting. A union member is a type the value may be at runtime; an
+// intersection member is a type the value simultaneously satisfies —
+// both are useful EdgeReturns targets, so both delimiters split (without
+// splitting, an intersection like `A & B` would mangle into a single
+// bogus `A & B` reference). Returns nil when the branch count exceeds
+// maxTSUnionMembers (the overflow guard) so a synthesised literal blob
+// never floods the graph.
 func splitTSUnionType(t string) []string {
 	t = strings.TrimSpace(t)
 	if t == "" {
@@ -598,24 +617,38 @@ func splitTSUnionType(t string) []string {
 	depth := 0
 	parts := []string{}
 	cur := strings.Builder{}
+	flush := func() {
+		if s := strings.TrimSpace(cur.String()); s != "" {
+			parts = append(parts, s)
+		}
+		cur.Reset()
+	}
 	for i := 0; i < len(t); i++ {
 		c := t[i]
 		switch c {
 		case '<', '(', '{', '[':
 			depth++
 		case '>', ')', '}', ']':
-			depth--
-		case '|':
+			// Guard against underflow on `=>` (arrow function types) and
+			// other stray closers — an unbalanced `>` must not drop depth
+			// below zero, or a later top-level `|` would never split.
+			if depth > 0 {
+				depth--
+			}
+		case '|', '&':
 			if depth == 0 {
-				parts = append(parts, strings.TrimSpace(cur.String()))
-				cur.Reset()
+				flush()
+				if len(parts) > maxTSUnionMembers {
+					return nil
+				}
 				continue
 			}
 		}
 		cur.WriteByte(c)
 	}
-	if cur.Len() > 0 {
-		parts = append(parts, strings.TrimSpace(cur.String()))
+	flush()
+	if len(parts) > maxTSUnionMembers {
+		return nil
 	}
 	return parts
 }
