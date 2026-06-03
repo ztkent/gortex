@@ -858,6 +858,7 @@ func NewServer(engine *query.Engine, g graph.Store, idx *indexer.Indexer, watche
 	s.registerGraphCompletionTool()
 	s.registerWikiTools()
 	s.registerWalkGraphTool()
+	s.registerContextClosureTool()
 	s.registerGraphQueryTool()
 	s.registerNavTool()
 	s.registerFindDeclarationTool()

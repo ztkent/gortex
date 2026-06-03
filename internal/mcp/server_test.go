@@ -109,6 +109,7 @@ func findAndCallHandler(srv *Server, name string, ctx context.Context, req mcpli
 		"flow_between":          srv.handleFlowBetween,
 		"taint_paths":           srv.handleTaintPaths,
 		"walk_graph":            srv.handleWalkGraph,
+		"context_closure":       srv.handleContextClosure,
 		"graph_query":           srv.handleGraphQuery,
 		"nav":                   srv.handleNav,
 		"find_declaration":      srv.handleFindDeclaration,
