@@ -826,6 +826,9 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 	// rewires any convention-derived EdgeModelsTable to the literal.
 	rewireORMTableNameOverrides(root, src, result)
 
+	// WebSocket upgrade handlers → real-time endpoint edges.
+	emitGoWebSocketEdges(src, filePath, result)
+
 	return result, nil
 }
 

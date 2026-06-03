@@ -410,6 +410,8 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 			pubsubEvents = append(pubsubEvents, ev)
 		}
 	}
+	// WebSocket / EventSource real-time client channels.
+	pubsubEvents = append(pubsubEvents, detectJSRealtimeEvents(src)...)
 	emitPubsubEvents(pubsubEvents,
 		func(line int) string { return findEnclosingFunc(funcRanges, line) },
 		filePath, "typescript", result)
