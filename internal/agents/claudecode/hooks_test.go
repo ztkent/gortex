@@ -350,6 +350,35 @@ func TestRewriteGortexHookMode_IgnoresNonGortexEntries(t *testing.T) {
 		"non-Gortex entries must NOT be touched even when we're rewriting")
 }
 
+// TestUpgradeGortexMatcher_RewritesPreviousCurrent verifies the
+// migration path: an existing install pinned to the previous canonical
+// matcher (no MCP read tools) upgrades in place so the read-discipline
+// nudge starts firing without the user touching settings.json.
+func TestUpgradeGortexMatcher_RewritesPreviousCurrent(t *testing.T) {
+	hooks := map[string]any{
+		"PreToolUse": []any{makeHookEntry("Read|Grep|Glob|Task|Bash|Edit|Write", "/opt/gortex hook")},
+	}
+	assert.True(t, upgradeGortexMatcher(hooks), "previous-current matcher should upgrade")
+	got := hooks["PreToolUse"].([]any)[0].(map[string]any)["matcher"].(string)
+	assert.Equal(t, CurrentPreToolUseMatcher, got)
+	assert.Contains(t, got, "mcp__gortex__read_file",
+		"upgraded matcher must include the gortex read tools")
+}
+
+func TestUpgradeGortexMatcher_NoOpOnCurrent(t *testing.T) {
+	hooks := map[string]any{
+		"PreToolUse": []any{makeHookEntry(CurrentPreToolUseMatcher, "/opt/gortex hook")},
+	}
+	assert.False(t, upgradeGortexMatcher(hooks), "already-current matcher must not be rewritten")
+}
+
+func TestUpgradeGortexMatcher_IgnoresNonGortexEntries(t *testing.T) {
+	hooks := map[string]any{
+		"PreToolUse": []any{makeHookEntry("Read|Grep|Glob|Task|Bash|Edit|Write", "/usr/bin/other thing")},
+	}
+	assert.False(t, upgradeGortexMatcher(hooks), "a non-Gortex entry must not be upgraded")
+}
+
 // ---------------------------------------------------------------------------
 // InstallHookWithMode — end-to-end: deny → enrich → deny round-trip
 // ---------------------------------------------------------------------------

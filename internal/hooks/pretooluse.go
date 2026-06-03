@@ -93,13 +93,19 @@ func runPreToolUse(data []byte, gortexPort int, mode Mode) {
 	// switch and the other modes' logic so a gortex tool is never
 	// processed further.
 	if isGortexMCP && isPermissivePermissionMode(input.PermissionMode) {
-		emitPreToolUse(HookOutput{
-			HookSpecificOutput: &HookSpecificOutput{
-				HookEventName:            "PreToolUse",
-				PermissionDecision:       "allow",
-				PermissionDecisionReason: "[Gortex] auto-approved: Gortex MCP graph tool under a permissive permission mode.",
-			},
-		})
+		hso := &HookSpecificOutput{
+			HookEventName:            "PreToolUse",
+			PermissionDecision:       "allow",
+			PermissionDecisionReason: "[Gortex] auto-approved: Gortex MCP graph tool under a permissive permission mode.",
+		}
+		// The read-discipline nudge still rides along as soft context —
+		// a permissive permission mode means low friction, not "stop
+		// reminding me my full-body read is expensive". Never a hard
+		// deny here: auto-approve has already promised to allow the call.
+		if adv := gortexReadNudge(input.ToolName, input.ToolInput); adv != "" {
+			hso.AdditionalContext = adv
+		}
+		emitPreToolUse(HookOutput{HookSpecificOutput: hso})
 		return
 	}
 
@@ -294,6 +300,8 @@ func enrich(input HookInput, port int) enrichResult {
 		return enrichEdit(input.ToolInput, port)
 	case "Write":
 		return enrichWrite(input.ToolInput, port)
+	case gortexReadFileTool, gortexEditingContextTool:
+		return enrichGortexRead(input.ToolName, input.ToolInput)
 	default:
 		return enrichResult{}
 	}
@@ -679,8 +687,14 @@ const editBlockingEnvVar = "GORTEX_HOOK_BLOCK_EDIT"
 // redirect is on. Anything besides empty/"0"/"false"/"no"/"off"
 // enables.
 func editBlockingEnabled() bool {
-	v := strings.TrimSpace(strings.ToLower(os.Getenv(editBlockingEnvVar)))
-	switch v {
+	return envGateEnabled(editBlockingEnvVar)
+}
+
+// envGateEnabled reports whether a boolean env-var gate is on. Empty,
+// "0", "false", "no", and "off" are off; anything else is on. Shared by
+// the Edit/Write and force-compress gates so they read identically.
+func envGateEnabled(name string) bool {
+	switch strings.TrimSpace(strings.ToLower(os.Getenv(name))) {
 	case "", "0", "false", "no", "off":
 		return false
 	default:

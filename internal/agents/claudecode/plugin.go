@@ -80,12 +80,15 @@ const pluginMCPJSON = `{
 //   - Forward stdin / stderr / argv unchanged so all today's
 //     `gortex hook` event-dispatcher logic in internal/hooks/dispatch.go
 //     keeps working byte-for-byte.
+//
+// The %s is filled with CurrentPreToolUseMatcher at emit time so the
+// marketplace plugin and the `gortex init` settings.json never drift.
 const pluginHooksJSON = `{
   "description": "Gortex graph-aware hooks: PreToolUse routing, PreCompact orientation, post-task diagnostics, SessionStart cold briefing.",
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Read|Grep|Glob|Task|Bash|Edit|Write",
+        "matcher": "%s",
         "hooks": [
           {
             "type": "command",
@@ -322,7 +325,7 @@ func EmitPluginBundle(spec PluginBundleSpec) ([]string, error) {
 	}
 
 	// 8. hooks/hooks.json + hooks-handlers/gortex-hook.sh
-	if err := write("hooks/hooks.json", []byte(pluginHooksJSON), 0o644); err != nil {
+	if err := write("hooks/hooks.json", fmt.Appendf(nil, pluginHooksJSON, CurrentPreToolUseMatcher), 0o644); err != nil {
 		return nil, err
 	}
 	if err := write("hooks-handlers/gortex-hook.sh", []byte(pluginHookHandler), 0o755); err != nil {

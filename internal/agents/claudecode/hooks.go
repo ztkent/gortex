@@ -16,12 +16,17 @@ import (
 
 // CurrentPreToolUseMatcher is the canonical matcher pattern we bake
 // into Claude Code's PreToolUse hook. Older versions used
-// "Read|Grep", "Read|Grep|Glob", "Read|Grep|Glob|Task", or
-// "Read|Grep|Glob|Task|Bash"; upgradeGortexMatcher rewrites those in
-// place. Edit and Write are included so the hook can redirect
-// whole-file rewrites of indexed source to the Gortex MCP edit
-// tools (gated by GORTEX_HOOK_BLOCK_EDIT in the hook itself).
-const CurrentPreToolUseMatcher = "Read|Grep|Glob|Task|Bash|Edit|Write"
+// "Read|Grep", "Read|Grep|Glob", "Read|Grep|Glob|Task",
+// "Read|Grep|Glob|Task|Bash", or "Read|Grep|Glob|Task|Bash|Edit|Write";
+// upgradeGortexMatcher rewrites those in place. Edit and Write are
+// included so the hook can redirect whole-file rewrites of indexed
+// source to the Gortex MCP edit tools (gated by GORTEX_HOOK_BLOCK_EDIT
+// in the hook itself). The two mcp__gortex__ read tools are included so
+// the hook can also nudge a full-body read_file / get_editing_context
+// toward compress_bodies / search_text — the one gap that fires once
+// the agent is already inside a Gortex tool (gated by
+// GORTEX_HOOK_FORCE_COMPRESS for the hard-deny posture).
+const CurrentPreToolUseMatcher = "Read|Grep|Glob|Task|Bash|Edit|Write|mcp__gortex__read_file|mcp__gortex__get_editing_context"
 
 // CurrentPostToolUseMatcher names the tools whose response the
 // PostToolUse hook augments. Only the read-shaped tools have an obvious
@@ -195,10 +200,11 @@ func upgradeGortexMatcher(hooks map[string]any) bool {
 		return false
 	}
 	legacyMatchers := map[string]bool{
-		"Read|Grep":                true,
-		"Read|Grep|Glob":           true,
-		"Read|Grep|Glob|Task":      true,
-		"Read|Grep|Glob|Task|Bash": true,
+		"Read|Grep":                           true,
+		"Read|Grep|Glob":                      true,
+		"Read|Grep|Glob|Task":                 true,
+		"Read|Grep|Glob|Task|Bash":            true,
+		"Read|Grep|Glob|Task|Bash|Edit|Write": true,
 	}
 	upgraded := false
 	for _, h := range pre {
