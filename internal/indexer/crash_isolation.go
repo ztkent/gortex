@@ -45,7 +45,10 @@ func (idx *Indexer) newParsePool(workers int) (*crashpool.Pool, error) {
 		cfg.RequestTimeout = time.Duration(ms) * time.Millisecond
 	}
 	if env := customGrammarEnv(idx.config.Grammars); env != "" {
-		cfg.Env = []string{env}
+		cfg.Env = append(cfg.Env, env)
+	}
+	if env := extractorPluginEnv(idx.config.ExtractorPlugins); env != "" {
+		cfg.Env = append(cfg.Env, env)
 	}
 	return crashpool.NewPool(cfg)
 }
@@ -73,6 +76,22 @@ func customGrammarEnv(specs []config.GrammarSpec) string {
 		return ""
 	}
 	return "GORTEX_CUSTOM_GRAMMARS=" + string(data)
+}
+
+// extractorPluginEnv encodes the configured subprocess extractor
+// plugins into the GORTEX_EXTRACTOR_PLUGINS environment entry a
+// crash-isolation worker reads at startup, so the worker resolves the
+// same plugin languages as the parent. Returns "" when none are
+// configured.
+func extractorPluginEnv(specs []config.ExtractorPluginSpec) string {
+	if len(specs) == 0 {
+		return ""
+	}
+	data, err := json.Marshal(specs)
+	if err != nil {
+		return ""
+	}
+	return "GORTEX_EXTRACTOR_PLUGINS=" + string(data)
 }
 
 // sharedParsePool returns the long-lived crash-isolation pool and the

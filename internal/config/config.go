@@ -548,6 +548,15 @@ type IndexConfig struct {
 	// path-shaped string literal. Empty by default. Configured under
 	// `index.http_client_aliases` in .gortex.yaml.
 	HTTPClientAliases []string `mapstructure:"http_client_aliases" yaml:"http_client_aliases,omitempty"`
+	// ExtractorPlugins registers external post-parse extractor passes —
+	// the "add a custom extractor without forking Gortex" entry point.
+	// Each spec names a language + file extensions and an external
+	// command; matching files are piped (content on stdin,
+	// GORTEX_FILE_PATH in the env) to that command, which emits a JSON
+	// document of nodes and edges that Gortex folds into the graph. See
+	// ExtractorPluginSpec. Empty by default. Configured under
+	// `index.extractor_plugins` in .gortex.yaml.
+	ExtractorPlugins []ExtractorPluginSpec `mapstructure:"extractor_plugins" yaml:"extractor_plugins,omitempty"`
 }
 
 // GrammarSpec declares a user-supplied tree-sitter grammar to load at
@@ -592,6 +601,38 @@ type TransformRule struct {
 	AsLanguage string `mapstructure:"as_language" yaml:"as_language,omitempty"`
 	// TimeoutMillis bounds the transform subprocess; 0 uses a default.
 	TimeoutMillis int `mapstructure:"timeout_millis" yaml:"timeout_millis,omitempty"`
+}
+
+// ExtractorPluginSpec declares an external post-parse extractor pass —
+// the config-driven SPI for adding a custom extractor without forking
+// Gortex. Files whose extension matches are piped (content on stdin,
+// GORTEX_FILE_PATH carrying the path in the env) to the command, which
+// must emit a JSON document of the shape:
+//
+//	{"nodes":[{"id","kind","name","file_path","start_line","end_line",
+//	           "language","meta":{...}}],
+//	 "edges":[{"from","to","kind","file_path","line","meta":{...}}]}
+//
+// Each node whose Kind is a valid graph node kind becomes a graph.Node;
+// each edge becomes a graph.Edge. The owning file node is always
+// emitted. A non-zero exit, malformed JSON, or a timeout degrades to
+// just the file node (the index never fails). A language or extension
+// that collides with a built-in extractor is skipped — built-ins win.
+type ExtractorPluginSpec struct {
+	// Language is the name the extractor registers under. A name that
+	// collides with a built-in extractor is skipped.
+	Language string `mapstructure:"language" yaml:"language"`
+	// Extensions are the file extensions (leading dot) the plugin
+	// claims, e.g. [".foo"]. An extension already claimed by a built-in
+	// extractor is skipped.
+	Extensions []string `mapstructure:"extensions" yaml:"extensions"`
+	// Command is the plugin program (argv[0]). The file content is
+	// written to its stdin; GORTEX_FILE_PATH names the file in the env.
+	Command string `mapstructure:"command" yaml:"command"`
+	// Args are the trailing arguments passed to Command.
+	Args []string `mapstructure:"args" yaml:"args,omitempty"`
+	// TimeoutMs bounds the plugin subprocess; 0 uses a default.
+	TimeoutMs int `mapstructure:"timeout_ms" yaml:"timeout_ms,omitempty"`
 }
 
 // CoverageConfig collects the per-domain coverage extraction gates.
