@@ -1330,7 +1330,7 @@ func stripConfigArtifacts(result *parser.ExtractionResult) {
 	stripped := make(map[string]struct{})
 	keptNodes := result.Nodes[:0]
 	for _, n := range result.Nodes {
-		if n.Kind == graph.KindConfigKey && !isInfraOriginConfigKey(n) {
+		if n.Kind == graph.KindConfigKey && !isInfraOriginConfigKey(n) && !isDocFrontmatterConfigKey(n) {
 			stripped[n.ID] = struct{}{}
 			continue
 		}
@@ -1361,6 +1361,24 @@ func isInfraOriginConfigKey(n *graph.Node) bool {
 	}
 	origin, _ := n.Meta["origin"].(string)
 	return origin == "k8s" || origin == "dockerfile"
+}
+
+// isDocFrontmatterConfigKey reports whether a KindConfigKey node is a
+// document's frontmatter metadata (Quarto .qmd, …) rather than code /
+// infra configuration. These keys ride with the document / prose ingest,
+// which is independent of the `configs` coverage domain, so they survive
+// the strip the same way infra-origin keys do — keeping a .qmd's declared
+// title / format / params searchable by default. Add new frontmatter
+// sources to the switch as prose extractors gain frontmatter support.
+func isDocFrontmatterConfigKey(n *graph.Node) bool {
+	if n == nil || n.Kind != graph.KindConfigKey || n.Meta == nil {
+		return false
+	}
+	switch src, _ := n.Meta["source"].(string); src {
+	case "quarto_frontmatter":
+		return true
+	}
+	return false
 }
 
 // stripFlagArtifacts drops KindFlag nodes and EdgeTogglesFlag
