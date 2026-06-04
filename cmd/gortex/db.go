@@ -63,6 +63,6 @@ func runDBSchema(cmd *cobra.Command, _ []string) error {
 	for _, c := range ls.Columns {
 		tables[c.Schema+"."+c.Table] = struct{}{}
 	}
-	fmt.Fprintf(cmd.ErrOrStderr(), "wrote schema for %d tables to %s\n", len(tables), dbOut)
+	_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "wrote schema for %d tables to %s\n", len(tables), dbOut)
 	return nil
 }

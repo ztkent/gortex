@@ -64,16 +64,6 @@ var ansibleTaskDirectives = map[string]bool{
 	"with_flattened": true, "with_inventory_hostnames": true,
 }
 
-// ansiblePlayKeys are play-level keys that are never tasks/handlers but
-// confirm (alongside `hosts:`) that a sequence item is a play.
-var ansiblePlayKeys = map[string]bool{
-	"hosts": true, "roles": true, "tasks": true, "pre_tasks": true,
-	"post_tasks": true, "handlers": true, "vars": true, "vars_files": true,
-	"gather_facts": true, "become": true, "remote_user": true,
-	"import_playbook": true, "ansible.builtin.import_playbook": true,
-	"serial": true, "strategy": true, "any_errors_fatal": true,
-}
-
 // extractAnsibleYAML detects and extracts an Ansible playbook or tasks /
 // handlers file. Returns true when the file was recognised as Ansible
 // (so the YAML extractor skips its generic top-level-keys fallback),
