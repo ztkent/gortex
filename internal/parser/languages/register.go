@@ -29,6 +29,11 @@ func RegisterAll(reg *parser.Registry) {
 	reg.Register(NewDockerfileExtractor())
 	reg.Register(NewCSharpExtractor())
 	reg.Register(NewXAMLExtractor())
+	// .NET solution / project files — build-graph ingestion (.sln
+	// project grouping, .csproj/.fsproj/.vbproj ProjectReference +
+	// PackageReference). Registered before registerForestLanguages so
+	// it owns .csproj/.sln over any generic forest XML grammar.
+	reg.Register(NewDotNetProjectExtractor())
 	// MyBatis and Spring both share the .xml extension with the generic
 	// XML extractor; they are registered before registerForestLanguages
 	// (which re-claims .xml for "xml" as the default) and routed only for
