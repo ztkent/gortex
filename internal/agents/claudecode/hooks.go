@@ -148,7 +148,7 @@ func HookCommandPathIsEphemeral(cmd string) bool {
 // entries whose path is healthy are also left alone.
 func healStaleHookCommands(hooks map[string]any, newCommand string) int {
 	healed := 0
-	for _, event := range []string{"PreToolUse", "PreCompact", "Stop", "SessionStart"} {
+	for _, event := range []string{"PreToolUse", "PreCompact", "Stop", "SessionStart", "UserPromptSubmit"} {
 		list, ok := hooks[event].([]any)
 		if !ok {
 			continue
@@ -303,7 +303,7 @@ func commandInvokesGortexHook(cmd string) bool {
 // rewritten entries.
 func rewriteGortexHookMode(hooks map[string]any, newCommand string) int {
 	rewritten := 0
-	for _, event := range []string{"PreToolUse", "PostToolUse", "PreCompact", "Stop", "SessionStart"} {
+	for _, event := range []string{"PreToolUse", "PostToolUse", "PreCompact", "Stop", "SessionStart", "UserPromptSubmit"} {
 		list, ok := hooks[event].([]any)
 		if !ok {
 			continue
@@ -443,7 +443,8 @@ func InstallHookWithMode(w io.Writer, settingsPath string, mode string, opts age
 		dedupGortexEntries(hooks, "PreCompact") +
 		dedupGortexEntries(hooks, "PostToolUse") +
 		dedupGortexEntries(hooks, "Stop") +
-		dedupGortexEntries(hooks, "SessionStart")
+		dedupGortexEntries(hooks, "SessionStart") +
+		dedupGortexEntries(hooks, "UserPromptSubmit")
 
 	// PostToolUse is only present when mode=enrich. Removing it on a
 	// switch to any other posture keeps settings.json clean — agents
@@ -457,6 +458,7 @@ func InstallHookWithMode(w io.Writer, settingsPath string, mode string, opts age
 	preCompactInstalled := hasGortexHookEntry(hooks, "PreCompact")
 	stopInstalled := hasGortexHookEntry(hooks, "Stop")
 	sessionStartInstalled := hasGortexHookEntry(hooks, "SessionStart")
+	userPromptSubmitInstalled := hasGortexHookEntry(hooks, "UserPromptSubmit")
 	postToolUseInstalled := hasGortexHookEntry(hooks, "PostToolUse")
 
 	if !preToolUseInstalled {
@@ -512,6 +514,22 @@ func InstallHookWithMode(w io.Writer, settingsPath string, mode string, opts age
 			},
 		})
 	}
+	if !userPromptSubmitInstalled {
+		// UserPromptSubmit fires before every user turn — the moment to
+		// proactively inject graph symbols relevant to the prompt so the
+		// model reaches for Gortex instead of grepping. It is best-effort
+		// and time-bounded; a miss is a silent no-op.
+		appendHookEntry(hooks, "UserPromptSubmit", map[string]any{
+			"hooks": []any{
+				map[string]any{
+					"type":          "command",
+					"command":       hookCommand,
+					"timeout":       3000,
+					"statusMessage": "Surfacing relevant Gortex symbols...",
+				},
+			},
+		})
+	}
 	// PostToolUse is only installed in enrich mode. It augments
 	// Grep / Glob / Read responses with graph context (enclosing
 	// symbols, file footprints) so the agent sees the graph value
@@ -533,7 +551,7 @@ func InstallHookWithMode(w io.Writer, settingsPath string, mode string, opts age
 	}
 
 	allPresent := preToolUseInstalled && preCompactInstalled && stopInstalled && sessionStartInstalled &&
-		(mode != HookModeEnrich || postToolUseInstalled)
+		userPromptSubmitInstalled && (mode != HookModeEnrich || postToolUseInstalled)
 	noChanges := allPresent && !matcherUpgraded && dedupedCount == 0 && healedCount == 0 &&
 		modeRewriteCount == 0 && postToolUseRemoved == 0 && !postToolUseAdded
 	if noChanges {
@@ -582,6 +600,9 @@ func InstallHookWithMode(w io.Writer, settingsPath string, mode string, opts age
 	}
 	if !sessionStartInstalled {
 		changes = append(changes, "installed SessionStart")
+	}
+	if !userPromptSubmitInstalled {
+		changes = append(changes, "installed UserPromptSubmit")
 	}
 	if postToolUseAdded {
 		changes = append(changes, "installed PostToolUse (enrich mode)")

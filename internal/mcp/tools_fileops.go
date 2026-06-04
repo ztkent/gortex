@@ -377,6 +377,45 @@ func (s *Server) reindexFile(absPath string) bool {
 	return false
 }
 
+// fileSyntaxHealth reads back the parse-error stamp the indexer places on a
+// file node during (re)indexing, and returns a syntax_health block to attach
+// to an edit response — but ONLY when the file now has parse errors, so a
+// clean edit stays quiet. This lets an agent notice immediately that an edit
+// left the file syntactically broken, before it trusts graph queries against
+// it. Returns nil when the file parsed cleanly or its health is unknown.
+func (s *Server) fileSyntaxHealth(relPath, absPath string) map[string]any {
+	if s.graph == nil {
+		return nil
+	}
+	graphPath := s.resolveOverlayGraphPath(relPath, absPath)
+	for _, n := range s.graph.GetFileNodes(graphPath) {
+		if n == nil || n.Kind != graph.KindFile || n.Meta == nil {
+			continue
+		}
+		broken, _ := n.Meta["has_parse_errors"].(bool)
+		if !broken {
+			continue
+		}
+		count := 0
+		switch v := n.Meta["parse_errors"].(type) {
+		case int:
+			count = v
+		case int64:
+			count = int(v)
+		case float64:
+			count = int(v)
+		}
+		return map[string]any{
+			"healthy":      false,
+			"parse_errors": count,
+			"warning": fmt.Sprintf(
+				"file has %d parse error(s) after this edit — it may be syntactically broken; review before relying on graph queries for it.",
+				count),
+		}
+	}
+	return nil
+}
+
 func (s *Server) handleEditFile(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	rawPath, err := req.RequireString("path")
 	if err != nil {
@@ -449,6 +488,7 @@ func (s *Server) handleEditFile(ctx context.Context, req mcp.CallToolRequest) (*
 			"replacements":  replacements,
 			"bytes_written": len(newContentBytes),
 			"reindexed":     false,
+			"diff":          unifiedDiff(relPath, fileStr, newContent),
 			"new_sha":       newSHA,
 		})
 	}
@@ -466,14 +506,18 @@ func (s *Server) handleEditFile(ctx context.Context, req mcp.CallToolRequest) (*
 
 	reindexed := s.reindexFile(absPath)
 
-	return s.respondJSONOrTOON(ctx, req, map[string]any{
+	resp := map[string]any{
 		"path":          relPath,
 		"status":        "applied",
 		"replacements":  replacements,
 		"bytes_written": len(newContentBytes),
 		"reindexed":     reindexed,
 		"new_sha":       newSHA,
-	})
+	}
+	if health := s.fileSyntaxHealth(relPath, absPath); health != nil {
+		resp["syntax_health"] = health
+	}
+	return s.respondJSONOrTOON(ctx, req, resp)
 }
 
 func (s *Server) handleWriteFile(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -526,10 +570,15 @@ func (s *Server) handleWriteFile(ctx context.Context, req mcp.CallToolRequest) (
 	newSHA := gitBlobSHA(contentBytes)
 
 	if dryRun {
-		// Dry-run: skip the write + reindex but report what would happen.
+		// Dry-run: skip the write + reindex but report what would happen,
+		// including a unified-diff preview of the change.
 		dryStatus := "would_create"
+		oldContent := ""
 		if status == "overwritten" {
 			dryStatus = "would_overwrite"
+			if existing, e := os.ReadFile(absPath); e == nil {
+				oldContent = string(existing)
+			}
 		}
 		return s.respondJSONOrTOON(ctx, req, map[string]any{
 			"path":          relPath,
@@ -537,6 +586,7 @@ func (s *Server) handleWriteFile(ctx context.Context, req mcp.CallToolRequest) (
 			"dry_run":       true,
 			"bytes_written": len(contentBytes),
 			"reindexed":     false,
+			"diff":          unifiedDiff(relPath, oldContent, content),
 			"new_sha":       newSHA,
 		})
 	}
@@ -550,13 +600,17 @@ func (s *Server) handleWriteFile(ctx context.Context, req mcp.CallToolRequest) (
 
 	reindexed := s.reindexFile(absPath)
 
-	return s.respondJSONOrTOON(ctx, req, map[string]any{
+	resp := map[string]any{
 		"path":          relPath,
 		"status":        status,
 		"bytes_written": len(contentBytes),
 		"reindexed":     reindexed,
 		"new_sha":       newSHA,
-	})
+	}
+	if health := s.fileSyntaxHealth(relPath, absPath); health != nil {
+		resp["syntax_health"] = health
+	}
+	return s.respondJSONOrTOON(ctx, req, resp)
 }
 
 // matchLocationsHint returns a brief " (lines X, Y, Z)" hint listing up to

@@ -31,6 +31,11 @@ var aliasCanonicals = map[string][]string{
 	"text":    {"query"},
 	"term":    {"query"},
 	"keyword": {"query"},
+	// `pattern` only resolves to `query` on tools that have no real `pattern`
+	// parameter (search_symbols / search_text). On search_ast / grep_results /
+	// ctx_grep — where `pattern` is a real parameter — it is never treated as
+	// unknown, so the alias is inert there.
+	"pattern": {"query"},
 	// edit payloads
 	"new_body":    {"new_string", "new_source", "content"},
 	"new_content": {"new_string", "new_source", "content"},

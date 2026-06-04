@@ -259,9 +259,12 @@ func (s *Server) registerEnhancementTools() {
 	// batch_edit
 	s.addTool(
 		mcp.NewTool("batch_edit",
-			mcp.WithDescription("Applies multiple symbol edits in dependency order. Re-indexes after each edit. Stops on failure and reports status."),
-			mcp.WithString("edits", mcp.Required(), mcp.Description("JSON array of {id, old_source, new_source} objects")),
-			mcp.WithBoolean("dry_run", mcp.Description("Return dependency-ordered plan without applying changes")),
+			mcp.WithDescription("Applies multiple edits in one atomic, dependency-ordered batch. Symbol edits are ordered definitions→callers; the graph re-indexes after each edit; the batch stops on the first failure and skips the rest. Each edit is one of two operations selected by `op`:\n  • edit_symbol (default): {id, old_source, new_source} — replace a fragment inside a symbol's body.\n  • edit_file: {op:\"edit_file\", path, old_string, new_string, replace_all?} — replace a string in any file (imports, config, comments).\nPass `edits` as a JSON array of objects (a JSON-encoded string of the same array is also accepted for backward compatibility)."),
+			mcp.WithArray("edits", mcp.Required(),
+				mcp.Description("Edit operations. Each item is an edit_symbol or edit_file object selected by the `op` discriminator."),
+				mcp.Items(batchEditItemsSchema()),
+			),
+			mcp.WithBoolean("dry_run", mcp.Description("Return the dependency-ordered plan without applying changes")),
 			mcp.WithBoolean("compact", mcp.Description("One-line-per-edit summary")),
 		),
 		s.handleBatchEdit,
@@ -2830,29 +2833,110 @@ func (s *Server) handleGetSymbolHistory(ctx context.Context, req mcp.CallToolReq
 // ---------------------------------------------------------------------------
 
 // batchEditItem represents a single edit in a batch.
+// batchEditItem is one operation in a batch_edit call. It is a discriminated
+// union over `op`: an edit_symbol op carries {id, old_source, new_source}; an
+// edit_file op carries {path, old_string, new_string, replace_all?}. When `op`
+// is omitted it is inferred (edit_file when a path is present, else edit_symbol)
+// so the legacy homogeneous {id, old_source, new_source} payload still works.
 type batchEditItem struct {
-	SymbolID  string `json:"id"`
-	OldSource string `json:"old_source"`
-	NewSource string `json:"new_source"`
+	Op string `json:"op,omitempty"`
+	// edit_symbol
+	SymbolID  string `json:"id,omitempty"`
+	OldSource string `json:"old_source,omitempty"`
+	NewSource string `json:"new_source,omitempty"`
+	// edit_file
+	Path       string `json:"path,omitempty"`
+	OldString  string `json:"old_string,omitempty"`
+	NewString  string `json:"new_string,omitempty"`
+	ReplaceAll bool   `json:"replace_all,omitempty"`
+}
+
+// kind resolves the operation kind for an item: an explicit, recognised `op`
+// wins; otherwise edit_file is inferred when a path is present, else
+// edit_symbol.
+func (it batchEditItem) kind() string {
+	switch it.Op {
+	case "edit_file", "edit_symbol":
+		return it.Op
+	}
+	if it.Path != "" {
+		return "edit_file"
+	}
+	return "edit_symbol"
 }
 
 // batchEditResult represents the outcome of a single edit in the batch.
 type batchEditResult struct {
-	SymbolID string `json:"id"`
+	Op       string `json:"op,omitempty"`
+	SymbolID string `json:"id,omitempty"`
 	FilePath string `json:"path"`
 	Status   string `json:"status"` // "applied", "failed", "skipped"
 	Error    string `json:"error,omitempty"`
 }
 
-func (s *Server) handleBatchEdit(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	editsStr, err := req.RequireString("edits")
-	if err != nil {
-		return mcp.NewToolResultError("edits is required"), nil
+// batchEditItemsSchema is the JSON Schema for one batch_edit item: a
+// discriminated union over the `op` field. Declaring the branches as a oneOf
+// gives the model per-operation field validation instead of a single
+// permissive, stringly-typed payload — the dominant source of malformed
+// batch_edit calls.
+func batchEditItemsSchema() map[string]any {
+	return map[string]any{
+		"oneOf": []any{
+			map[string]any{
+				"type":        "object",
+				"description": "Replace a fragment inside a symbol's body.",
+				"properties": map[string]any{
+					"op":         map[string]any{"const": "edit_symbol", "description": "Operation kind (optional; inferred as edit_symbol when omitted and `id` is present)."},
+					"id":         map[string]any{"type": "string", "description": "Symbol ID, e.g. pkg/foo.go::Bar."},
+					"old_source": map[string]any{"type": "string", "description": "Exact fragment to replace within the symbol's source."},
+					"new_source": map[string]any{"type": "string", "description": "Replacement fragment."},
+				},
+				"required": []any{"id", "old_source", "new_source"},
+			},
+			map[string]any{
+				"type":        "object",
+				"description": "Replace a string in any file (imports, config, comments — non-symbol edits).",
+				"properties": map[string]any{
+					"op":          map[string]any{"const": "edit_file", "description": "Operation kind. Required to select a file edit."},
+					"path":        map[string]any{"type": "string", "description": "File path (repo-relative or absolute)."},
+					"old_string":  map[string]any{"type": "string", "description": "Exact text to replace; must be unique unless replace_all is set."},
+					"new_string":  map[string]any{"type": "string", "description": "Replacement text."},
+					"replace_all": map[string]any{"type": "boolean", "description": "Replace every occurrence instead of requiring uniqueness."},
+				},
+				"required": []any{"op", "path", "old_string", "new_string"},
+			},
+		},
 	}
+}
 
+// parseBatchEdits accepts the `edits` argument as either a structured JSON
+// array (the typed-schema path) or a JSON-encoded string of the same array
+// (the legacy path), and decodes it into batch edit items.
+func parseBatchEdits(raw any) ([]batchEditItem, error) {
+	var data []byte
+	switch v := raw.(type) {
+	case nil:
+		return nil, fmt.Errorf("edits is required")
+	case string:
+		data = []byte(v)
+	default:
+		b, err := json.Marshal(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid edits: %v", err)
+		}
+		data = b
+	}
 	var edits []batchEditItem
-	if err := json.Unmarshal([]byte(editsStr), &edits); err != nil {
-		return mcp.NewToolResultError("invalid edits JSON: " + err.Error()), nil
+	if err := json.Unmarshal(data, &edits); err != nil {
+		return nil, fmt.Errorf("invalid edits JSON: %v", err)
+	}
+	return edits, nil
+}
+
+func (s *Server) handleBatchEdit(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	edits, perr := parseBatchEdits(req.GetArguments()["edits"])
+	if perr != nil {
+		return mcp.NewToolResultError(perr.Error()), nil
 	}
 	if len(edits) == 0 {
 		return mcp.NewToolResultError("edits array is empty"), nil
@@ -2867,12 +2951,21 @@ func (s *Server) handleBatchEdit(ctx context.Context, req mcp.CallToolRequest) (
 	// Definitions first, then implementations, then callers.
 	type editWithOrder struct {
 		edit  batchEditItem
+		op    string
 		order int
 		file  string
+		idx   int
 	}
 
 	var ordered []editWithOrder
-	for _, edit := range edits {
+	for i, edit := range edits {
+		op := edit.kind()
+		if op == "edit_file" {
+			// File edits carry no graph dependency; apply them after all
+			// symbol edits (order 1000), preserving input order via idx.
+			ordered = append(ordered, editWithOrder{edit: edit, op: op, order: 1000, file: edit.Path, idx: i})
+			continue
+		}
 		node := s.engineFor(ctx).GetSymbol(edit.SymbolID)
 		order := 50 // default middle priority
 		filePath := ""
@@ -2901,15 +2994,19 @@ func (s *Server) handleBatchEdit(ctx context.Context, req mcp.CallToolRequest) (
 				}
 			}
 		}
-		ordered = append(ordered, editWithOrder{edit: edit, order: order, file: filePath})
+		ordered = append(ordered, editWithOrder{edit: edit, op: op, order: order, file: filePath, idx: i})
 	}
 
-	// Sort by order ascending (lowest = edit first)
+	// Sort by order ascending (lowest = edit first), tie-broken by file then
+	// by original index so same-bucket edits stay in a deterministic order.
 	sort.SliceStable(ordered, func(i, j int) bool {
 		if ordered[i].order != ordered[j].order {
 			return ordered[i].order < ordered[j].order
 		}
-		return ordered[i].file < ordered[j].file
+		if ordered[i].file != ordered[j].file {
+			return ordered[i].file < ordered[j].file
+		}
+		return ordered[i].idx < ordered[j].idx
 	})
 
 	if dryRun {
@@ -2917,6 +3014,7 @@ func (s *Server) handleBatchEdit(ctx context.Context, req mcp.CallToolRequest) (
 		for i, o := range ordered {
 			entry := map[string]any{
 				"order":  i + 1,
+				"op":     o.op,
 				"id":     o.edit.SymbolID,
 				"path":   o.file,
 				"status": "planned",
@@ -2939,145 +3037,42 @@ func (s *Server) handleBatchEdit(ctx context.Context, req mcp.CallToolRequest) (
 		})
 	}
 
-	// Apply edits sequentially
+	// Apply edits sequentially, dispatching per operation kind. Stop on the
+	// first failure and mark the remainder skipped.
 	var results []batchEditResult
 	failed := false
 
 	for _, o := range ordered {
 		if failed {
 			results = append(results, batchEditResult{
+				Op:       o.op,
 				SymbolID: o.edit.SymbolID,
 				FilePath: o.file,
 				Status:   "skipped",
 			})
 			continue
 		}
-
-		node := s.engineFor(ctx).GetSymbol(o.edit.SymbolID)
-		if node == nil {
-			results = append(results, batchEditResult{
-				SymbolID: o.edit.SymbolID,
-				FilePath: o.file,
-				Status:   "failed",
-				Error:    "symbol not found: " + o.edit.SymbolID,
-			})
+		var r batchEditResult
+		switch o.op {
+		case "edit_file":
+			r = s.applyBatchFileEdit(o.edit)
+		default:
+			r = s.applyBatchSymbolEdit(ctx, o.edit)
+		}
+		results = append(results, r)
+		if r.Status == "failed" {
 			failed = true
-			continue
 		}
-
-		if node.StartLine == 0 || node.EndLine == 0 {
-			results = append(results, batchEditResult{
-				SymbolID: o.edit.SymbolID,
-				FilePath: node.FilePath,
-				Status:   "failed",
-				Error:    "symbol has no line range",
-			})
-			failed = true
-			continue
-		}
-
-		// Resolve file path
-		absPath, resolveErr := s.resolveNodePath(node)
-		if resolveErr != nil {
-			results = append(results, batchEditResult{
-				SymbolID: o.edit.SymbolID,
-				FilePath: node.FilePath,
-				Status:   "failed",
-				Error:    resolveErr.Error(),
-			})
-			failed = true
-			continue
-		}
-
-		// Read file
-		content, readErr := os.ReadFile(absPath)
-		if readErr != nil {
-			results = append(results, batchEditResult{
-				SymbolID: o.edit.SymbolID,
-				FilePath: node.FilePath,
-				Status:   "failed",
-				Error:    fmt.Sprintf("could not read file: %v", readErr),
-			})
-			failed = true
-			continue
-		}
-
-		fileStr := string(content)
-		lines := strings.Split(fileStr, "\n")
-
-		if node.StartLine > len(lines) || node.EndLine > len(lines) {
-			results = append(results, batchEditResult{
-				SymbolID: o.edit.SymbolID,
-				FilePath: node.FilePath,
-				Status:   "failed",
-				Error:    "symbol line range exceeds file length",
-			})
-			failed = true
-			continue
-		}
-
-		symbolSource := strings.Join(lines[node.StartLine-1:node.EndLine], "\n")
-		if !strings.Contains(symbolSource, o.edit.OldSource) {
-			results = append(results, batchEditResult{
-				SymbolID: o.edit.SymbolID,
-				FilePath: node.FilePath,
-				Status:   "failed",
-				Error:    "old_source not found within symbol",
-			})
-			failed = true
-			continue
-		}
-
-		// Compute offset within file
-		symbolStart := 0
-		for i := 0; i < node.StartLine-1 && i < len(lines); i++ {
-			symbolStart += len(lines[i]) + 1
-		}
-		symbolEnd := min(symbolStart+len(symbolSource), len(fileStr))
-
-		offset := strings.Index(fileStr[symbolStart:symbolEnd], o.edit.OldSource)
-		if offset < 0 {
-			results = append(results, batchEditResult{
-				SymbolID: o.edit.SymbolID,
-				FilePath: node.FilePath,
-				Status:   "failed",
-				Error:    "old_source not found in symbol region",
-			})
-			failed = true
-			continue
-		}
-
-		editStart := symbolStart + offset
-		editEnd := editStart + len(o.edit.OldSource)
-		newContent := fileStr[:editStart] + o.edit.NewSource + fileStr[editEnd:]
-
-		if writeErr := os.WriteFile(absPath, []byte(newContent), 0o644); writeErr != nil {
-			results = append(results, batchEditResult{
-				SymbolID: o.edit.SymbolID,
-				FilePath: node.FilePath,
-				Status:   "failed",
-				Error:    fmt.Sprintf("could not write file: %v", writeErr),
-			})
-			failed = true
-			continue
-		}
-
-		// Re-index the file after edit
-		if s.indexer != nil {
-			_ = s.indexer.IndexFile(absPath)
-		}
-
-		results = append(results, batchEditResult{
-			SymbolID: o.edit.SymbolID,
-			FilePath: node.FilePath,
-			Status:   "applied",
-		})
 	}
 
 	if isCompact(req) {
 		var b strings.Builder
 		for _, r := range results {
-			fmt.Fprintf(&b, "%s %s %s\n", r.SymbolID, r.FilePath, r.Status)
+			target := r.SymbolID
+			if target == "" {
+				target = r.FilePath
+			}
+			fmt.Fprintf(&b, "%s %s %s\n", r.Op, target, r.Status)
 		}
 		return mcp.NewToolResultText(b.String()), nil
 	}
@@ -3104,6 +3099,121 @@ func (s *Server) handleBatchEdit(ctx context.Context, req mcp.CallToolRequest) (
 			"total":   len(results),
 		},
 	})
+}
+
+// applyBatchSymbolEdit applies one edit_symbol operation: it locates the
+// symbol's source range, replaces old_source with new_source inside it, writes
+// the file, and re-indexes. Semantics match the legacy single-op batch_edit.
+func (s *Server) applyBatchSymbolEdit(ctx context.Context, edit batchEditItem) batchEditResult {
+	res := batchEditResult{Op: "edit_symbol", SymbolID: edit.SymbolID}
+	node := s.engineFor(ctx).GetSymbol(edit.SymbolID)
+	if node == nil {
+		res.Status, res.Error = "failed", "symbol not found: "+edit.SymbolID
+		return res
+	}
+	res.FilePath = node.FilePath
+	if node.StartLine == 0 || node.EndLine == 0 {
+		res.Status, res.Error = "failed", "symbol has no line range"
+		return res
+	}
+	absPath, resolveErr := s.resolveNodePath(node)
+	if resolveErr != nil {
+		res.Status, res.Error = "failed", resolveErr.Error()
+		return res
+	}
+	content, readErr := os.ReadFile(absPath)
+	if readErr != nil {
+		res.Status, res.Error = "failed", fmt.Sprintf("could not read file: %v", readErr)
+		return res
+	}
+	fileStr := string(content)
+	lines := strings.Split(fileStr, "\n")
+	if node.StartLine > len(lines) || node.EndLine > len(lines) {
+		res.Status, res.Error = "failed", "symbol line range exceeds file length"
+		return res
+	}
+	symbolSource := strings.Join(lines[node.StartLine-1:node.EndLine], "\n")
+	if !strings.Contains(symbolSource, edit.OldSource) {
+		res.Status, res.Error = "failed", "old_source not found within symbol"
+		return res
+	}
+	symbolStart := 0
+	for i := 0; i < node.StartLine-1 && i < len(lines); i++ {
+		symbolStart += len(lines[i]) + 1
+	}
+	symbolEnd := min(symbolStart+len(symbolSource), len(fileStr))
+	offset := strings.Index(fileStr[symbolStart:symbolEnd], edit.OldSource)
+	if offset < 0 {
+		res.Status, res.Error = "failed", "old_source not found in symbol region"
+		return res
+	}
+	editStart := symbolStart + offset
+	editEnd := editStart + len(edit.OldSource)
+	newContent := fileStr[:editStart] + edit.NewSource + fileStr[editEnd:]
+	if writeErr := os.WriteFile(absPath, []byte(newContent), 0o644); writeErr != nil {
+		res.Status, res.Error = "failed", fmt.Sprintf("could not write file: %v", writeErr)
+		return res
+	}
+	if s.indexer != nil {
+		_ = s.indexer.IndexFile(absPath)
+	}
+	res.Status = "applied"
+	return res
+}
+
+// applyBatchFileEdit applies one edit_file operation: it replaces old_string
+// with new_string in the file at path, mirroring edit_file's uniqueness and
+// replace_all semantics, then re-indexes.
+func (s *Server) applyBatchFileEdit(edit batchEditItem) batchEditResult {
+	res := batchEditResult{Op: "edit_file", FilePath: edit.Path}
+	if edit.Path == "" {
+		res.Status, res.Error = "failed", "edit_file op requires path"
+		return res
+	}
+	if edit.OldString == edit.NewString {
+		res.Status, res.Error = "failed", "old_string and new_string are identical"
+		return res
+	}
+	absPath, relPath, resolveErr := s.resolveFilePath(edit.Path)
+	if resolveErr != nil {
+		res.Status, res.Error = "failed", resolveErr.Error()
+		return res
+	}
+	res.FilePath = relPath
+	content, readErr := os.ReadFile(absPath)
+	if readErr != nil {
+		res.Status, res.Error = "failed", fmt.Sprintf("could not read file: %v", readErr)
+		return res
+	}
+	fileStr := string(content)
+	count := strings.Count(fileStr, edit.OldString)
+	if count == 0 {
+		res.Status, res.Error = "failed", "old_string not found in file"
+		return res
+	}
+	if count > 1 && !edit.ReplaceAll {
+		res.Status, res.Error = "failed", fmt.Sprintf(
+			"old_string matches %d locations%s. Provide a larger fragment for uniqueness or set replace_all=true.",
+			count, matchLocationsHint(fileStr, edit.OldString))
+		return res
+	}
+	var newContent string
+	if edit.ReplaceAll {
+		newContent = strings.ReplaceAll(fileStr, edit.OldString, edit.NewString)
+	} else {
+		newContent = strings.Replace(fileStr, edit.OldString, edit.NewString, 1)
+	}
+	perm := os.FileMode(0o644)
+	if info, e := os.Stat(absPath); e == nil {
+		perm = info.Mode().Perm()
+	}
+	if writeErr := os.WriteFile(absPath, []byte(newContent), perm); writeErr != nil {
+		res.Status, res.Error = "failed", fmt.Sprintf("could not write file: %v", writeErr)
+		return res
+	}
+	s.reindexFile(absPath)
+	res.Status = "applied"
+	return res
 }
 
 // ---------------------------------------------------------------------------

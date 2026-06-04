@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/zzet/gortex/internal/daemon"
 )
@@ -63,17 +64,79 @@ func runProxy(ctx context.Context) (ran bool, err error) {
 		errCh <- err
 	}()
 
-	// Wait for first completion; exit on context cancellation too.
+	// Orphan watchdog: if our parent (the MCP client) dies, stdin EOF is the
+	// normal shutdown signal — but a client that is SIGKILLed, or whose stdin
+	// pipe is inherited and held open elsewhere, can leave this proxy wedged
+	// forever, pinning a daemon session. Poll the parent PID and unblock the
+	// select when we get reparented (to init or a subreaper).
+	orphanCh := make(chan struct{}, 1)
+	watchCtx, cancelWatch := context.WithCancel(ctx)
+	defer cancelWatch()
+	go orphanWatch(watchCtx, orphanPollInterval, os.Getppid, func() {
+		fmt.Fprintln(os.Stderr, "[gortex mcp] parent process exited; closing proxy")
+		select {
+		case orphanCh <- struct{}{}:
+		default:
+		}
+	})
+
+	// Wait for first completion; exit on context cancellation or orphaning too.
 	select {
 	case pumpErr := <-errCh:
 		if pumpErr != nil && !errors.Is(pumpErr, io.EOF) {
 			return true, fmt.Errorf("proxy pump: %w", pumpErr)
 		}
+	case <-orphanCh:
 	case <-ctx.Done():
 	}
+	cancelWatch()
 	_ = client.Close()
-	wg.Wait()
+	// Bound the drain: a pump blocked reading a never-closing stdin (the exact
+	// orphan case) must not pin shutdown — the process is exiting regardless.
+	drained := make(chan struct{})
+	go func() { wg.Wait(); close(drained) }()
+	select {
+	case <-drained:
+	case <-time.After(proxyDrainTimeout):
+	}
 	return true, nil
+}
+
+// orphanPollInterval is how often the proxy checks whether its parent
+// process is still alive; proxyDrainTimeout bounds the post-close drain.
+// Both are vars so tests can shorten them.
+var (
+	orphanPollInterval = 5 * time.Second
+	proxyDrainTimeout  = 2 * time.Second
+)
+
+// orphanWatch polls getppid every interval and invokes onOrphan exactly
+// once when the proxy's parent process has gone away — detected as a change
+// of parent PID (reparented to init=1 on classic Unix, or to the nearest
+// subreaper). Watching for a *change* is strictly more robust than testing
+// for PID 1 alone, which misses subreaper reparenting (containers, systemd
+// user sessions, a wrapping CLI that calls prctl(PR_SET_CHILD_SUBREAPER)).
+// It self-disarms when there is no meaningful parent to watch (orig <= 1),
+// and is an inert no-op on platforms that never reparent — there the parent
+// PID stays equal to orig for the whole process lifetime.
+func orphanWatch(ctx context.Context, interval time.Duration, getppid func() int, onOrphan func()) {
+	orig := getppid()
+	if orig <= 1 || interval <= 0 {
+		return
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if getppid() != orig {
+				onOrphan()
+				return
+			}
+		}
+	}
 }
 
 // pumpLines copies newline-delimited frames from src to dst. Uses a

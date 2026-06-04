@@ -117,5 +117,7 @@ func Run(port int, mode Mode) {
 		runPostTask(data, port)
 	case "SessionStart":
 		runSessionStart(data)
+	case "UserPromptSubmit":
+		runUserPromptSubmit(data)
 	}
 }

@@ -1,5 +1,7 @@
 package claudecode
 
+import "strings"
+
 // SubAgents maps the filename under .claude/agents/ to the markdown
 // body of a Claude Code sub-agent definition.
 //
@@ -16,8 +18,32 @@ package claudecode
 // ~/.claude/agents/ and emitted into the marketplace plugin under
 // agents/ — never written in project mode.
 var SubAgents = map[string]string{
-	"gortex-search.md":  subagentSearch,
-	"gortex-impact.md":  subagentImpact,
+	"gortex-search.md": subagentSearch,
+	"gortex-impact.md": subagentImpact,
+}
+
+// SubAgentTools parses the `tools:` allowlist out of a sub-agent definition's
+// YAML frontmatter, returning the declared MCP tool names in order (nil when
+// the definition declares no tools line). Claude Code spawns each sub-agent in
+// a fresh context restricted to exactly this allowlist, so the list is how
+// Gortex propagates its MCP tools to sub-agents — and how it guarantees a
+// sub-agent stays graph-only (no Bash/Grep/Glob escape).
+func SubAgentTools(def string) []string {
+	for _, line := range strings.Split(def, "\n") {
+		t := strings.TrimSpace(line)
+		if !strings.HasPrefix(t, "tools:") {
+			continue
+		}
+		rest := strings.TrimSpace(strings.TrimPrefix(t, "tools:"))
+		var out []string
+		for _, name := range strings.Split(rest, ",") {
+			if n := strings.TrimSpace(name); n != "" {
+				out = append(out, n)
+			}
+		}
+		return out
+	}
+	return nil
 }
 
 // subagentSearch handles exploratory codebase questions: locating

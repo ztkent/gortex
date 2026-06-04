@@ -399,6 +399,21 @@ func TestInstallHookWithMode_DenyMode(t *testing.T) {
 		"deny mode keeps the bare command — no --mode flag")
 }
 
+func TestInstallHook_InstallsUserPromptSubmit(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.local.json")
+	t.Setenv("PATH", t.TempDir()) // force fallback to bare "gortex hook"
+
+	_, err := InstallHookWithMode(io.Discard, settingsPath, HookModeDeny, agentsApplyOptsZero())
+	require.NoError(t, err)
+
+	hooks := readSettingsHooks(t, settingsPath)
+	require.Contains(t, hooks, "UserPromptSubmit",
+		"UserPromptSubmit hook must be installed for per-turn context injection")
+	cmd := extractCmd(t, hooks, "UserPromptSubmit", 0)
+	assert.Equal(t, "gortex hook", cmd)
+}
+
 func TestInstallHookWithMode_EnrichMode(t *testing.T) {
 	dir := t.TempDir()
 	settingsPath := filepath.Join(dir, "settings.local.json")

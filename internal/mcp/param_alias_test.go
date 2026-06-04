@@ -45,6 +45,30 @@ func TestReconcileArgKeys_KeepsExplicitCanonical(t *testing.T) {
 	require.Contains(t, args, "search", "the alias key stays untouched when the canonical is already set")
 }
 
+// TestReconcileArgKeys_PatternAlias confirms `pattern` rewrites to `query`
+// on search-side tools that have no real `pattern` parameter, and stays
+// inert on tools (search_ast / grep_results / ctx_grep) where `pattern` is
+// itself a real parameter.
+func TestReconcileArgKeys_PatternAlias(t *testing.T) {
+	t.Run("rewrites to query on search tools", func(t *testing.T) {
+		// search_symbols / search_text expose `query`, not `pattern`.
+		real := map[string]bool{"query": true, "path": true, "kind": true}
+		args := map[string]any{"pattern": "validateToken"}
+		reconcileArgKeys(args, real)
+		require.Equal(t, "validateToken", args["query"], "pattern must alias to query")
+		require.NotContains(t, args, "pattern", "the aliased pattern key must be removed")
+	})
+	t.Run("inert when pattern is a real parameter", func(t *testing.T) {
+		// search_ast / grep_results expose a real `pattern` parameter; an
+		// agent's `pattern` is valid input and must never be rewritten.
+		real := map[string]bool{"pattern": true, "query": true}
+		args := map[string]any{"pattern": "(identifier) @match"}
+		reconcileArgKeys(args, real)
+		require.Equal(t, "(identifier) @match", args["pattern"], "a real pattern parameter must be left untouched")
+		require.NotContains(t, args, "query", "no spurious query key must be synthesized")
+	})
+}
+
 func TestLevenshtein(t *testing.T) {
 	require.Equal(t, 0, levenshtein("query", "query"))
 	require.Equal(t, 1, levenshtein("quary", "query"))
