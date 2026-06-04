@@ -37,6 +37,7 @@ func RegisterAll(reg *parser.Registry) {
 	reg.Register(NewMyBatisExtractor())
 	reg.Register(NewSpringContextExtractor())
 	reg.Register(NewMarkdownExtractor())
+	reg.Register(NewQuartoExtractor())
 	reg.Register(NewOrgModeExtractor())
 	reg.Register(NewDartExtractor())
 	reg.Register(NewOCamlExtractor())
