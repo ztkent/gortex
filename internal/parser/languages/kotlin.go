@@ -675,17 +675,6 @@ type kotlinMemberOwner struct {
 	companionName string // declared companion name, "" if anonymous
 }
 
-// kotlinDirectMemberOwner returns the (name, container kind) of the
-// nearest class_declaration / object_declaration whose body directly
-// contains fn. Returns ("", "") for free functions and nested
-// functions — preserving the legacy nested-query semantics. Companion
-// members are attributed to their enclosing type (see
-// kotlinResolveMemberOwner).
-func kotlinDirectMemberOwner(fn *sitter.Node, src []byte) (string, string) {
-	o := kotlinResolveMemberOwner(fn, src)
-	return o.name, o.kind
-}
-
 // kotlinResolveMemberOwner walks up from a declaration to find its
 // container. It transparently sees through a companion_object wrapper:
 // `class Foo { companion object Factory { fun create() {} } }` resolves

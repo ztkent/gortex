@@ -91,18 +91,29 @@ func (s *Server) handleAnalyzeResolutionOutcomes(ctx context.Context, req mcp.Ca
 
 	byReason := map[string]int{}
 	var rows []row
-	// Cache name→candidate classification so repeated unresolved names
-	// (very common — every call to the same missing function) classify once.
-	type cand struct {
-		sameLangMin int // realSameLang count is recomputed per caller lang, so cache the raw split
+	// Memoise classification by (name, caller-language): the same
+	// unresolved name is referenced from many sites — every call to one
+	// missing function — and classifyUnresolved is pure given that pair,
+	// so this collapses a FindNodesByName-per-edge into one per distinct
+	// (name, lang).
+	type classKey struct{ name, lang string }
+	type classVal struct {
+		reason string
+		ncand  int
 	}
-	_ = cand{}
+	classCache := map[classKey]classVal{}
 	for _, p := range todo {
 		fromLang := ""
 		if n := fromNodes[p.edge.From]; n != nil {
 			fromLang = n.Language
 		}
-		reason, ncand := s.classifyUnresolved(p.name, fromLang)
+		key := classKey{name: p.name, lang: fromLang}
+		cv, ok := classCache[key]
+		if !ok {
+			cv.reason, cv.ncand = s.classifyUnresolved(p.name, fromLang)
+			classCache[key] = cv
+		}
+		reason, ncand := cv.reason, cv.ncand
 		byReason[reason]++
 		if reasonFilter != "" && reason != reasonFilter {
 			continue
