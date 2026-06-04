@@ -277,6 +277,10 @@ type Server struct {
 	// by ResolveToolScope before each handler runs.
 	toolScopes *scopeRegistry
 
+	// agentReg is the in-memory multi-agent coordination registry backing
+	// the agent_registry tool (presence, cursors, advisory path locks).
+	agentReg *agentRegistry
+
 	// overlays is the optional editor-overlay manager. When non-nil,
 	// every `tools/call` whose session carries overlay buffers is
 	// wrapped (via s.addTool → wrapToolHandler) with the per-request
@@ -761,6 +765,7 @@ func NewServer(engine *query.Engine, g graph.Store, idx *indexer.Indexer, watche
 		sessions:   newSessionMap(),
 		guardRules: guardRules,
 		toolScopes: newScopeRegistry(),
+		agentReg:   newAgentRegistry(),
 	}
 	// Wire the process-wide tokenStats as the parent of every
 	// per-session counter so record() fanout aggregates daemon-wide.
@@ -838,6 +843,7 @@ func NewServer(engine *query.Engine, g graph.Store, idx *indexer.Indexer, watche
 	s.registerEnhancementTools()
 	s.registerLSPTools()
 	s.registerLintTools()
+	s.registerAgentRegistryTools()
 	s.registerDiagnosticsTools()
 	s.registerReadinessTools()
 	s.registerHealthTools()

@@ -226,6 +226,15 @@ const (
 	// otherwise be hidden behind macro expansion (a call site `SQ(2)`
 	// resolves to the macro, whose body-calls then continue the chain).
 	KindMacro NodeKind = "macro"
+	// KindAgent represents a live coding agent participating in a
+	// multi-agent session — a first-class, queryable presence entity
+	// distinct from a transport session. ID convention: `agent::<id>`.
+	// Carries Meta["cursor"] (the symbol/file the agent is focused on),
+	// Meta["status"], Meta["locked_paths"], and Meta["last_seen"]. Agent
+	// presence is volatile and lives in an in-memory registry rather than
+	// the persistent code graph; this kind names the entity so it reads as
+	// first-class in tool output and query filters.
+	KindAgent NodeKind = "agent"
 )
 
 var validNodeKinds = map[NodeKind]bool{
@@ -242,7 +251,7 @@ var validNodeKinds = map[NodeKind]bool{
 	KindRelease: true, KindLicense: true, KindString: true,
 	KindResource: true, KindKustomization: true, KindImage: true,
 	KindArtifact: true, KindDoc: true, KindTopic: true,
-	KindMacro: true,
+	KindMacro: true, KindAgent: true,
 }
 
 type Node struct {
