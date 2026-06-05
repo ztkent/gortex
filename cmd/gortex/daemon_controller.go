@@ -425,20 +425,41 @@ func (c *realController) Reload(ctx context.Context) (json.RawMessage, error) {
 	}
 
 	var added, removed int
-	wantedPrefixes := make(map[string]bool)
 
+	// Match configured entries to currently-tracked instances by ROOT
+	// PATH, not by a recomputed prefix. A worktree tracked as an
+	// independent instance registers under a derived `<base>@<workspace>`
+	// prefix, so keying the diff on config.ResolvePrefix(entry) (the bare
+	// basename) would fail to recognise it as wanted and untrack it on
+	// every reload. The root path is the stable identity of a checkout.
+	trackedByRoot := make(map[string]string) // absolute RootPath → prefix
+	for prefix, meta := range c.multiIndexer.AllMetadata() {
+		if meta != nil {
+			trackedByRoot[meta.RootPath] = prefix
+		}
+	}
+
+	wantedPrefixes := make(map[string]bool)
 	for _, entry := range c.configManager.Global().Repos {
-		prefix := config.ResolvePrefix(entry)
-		wantedPrefixes[prefix] = true
-		if _, exists := c.multiIndexer.AllMetadata()[prefix]; exists {
+		abs, err := filepath.Abs(entry.Path)
+		if err != nil {
+			abs = entry.Path
+		}
+		if prefix, ok := trackedByRoot[abs]; ok {
+			// Already tracked (under whatever prefix it registered) — keep it.
+			wantedPrefixes[prefix] = true
 			continue
 		}
-		if _, err := c.multiIndexer.TrackRepoCtx(ctx, entry); err != nil {
+		res, trackErr := c.multiIndexer.TrackRepoCtx(ctx, entry)
+		if trackErr != nil {
 			c.logger.Warn("reload: track failed",
-				zap.String("path", entry.Path), zap.Error(err))
+				zap.String("path", entry.Path), zap.Error(trackErr))
 			continue
 		}
 		added++
+		if res != nil && res.RepoPrefix != "" {
+			wantedPrefixes[res.RepoPrefix] = true
+		}
 	}
 
 	for prefix := range c.multiIndexer.AllMetadata() {
