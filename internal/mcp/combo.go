@@ -93,6 +93,7 @@ func (cm *comboManager) maxAgeSec() int64 {
 // just for GC.
 func (cm *comboManager) reapStaleLocked() {
 	cutoff := cm.now() - cm.maxAgeSec()
+	queries := cm.store.Queries[:0]
 	for qi := range cm.store.Queries {
 		q := &cm.store.Queries[qi]
 		fresh := q.Matches[:0]
@@ -102,10 +103,18 @@ func (cm *comboManager) reapStaleLocked() {
 			}
 		}
 		q.Matches = fresh
+		// Drop a query once its last match expires. Without this the
+		// emptied shell lingers forever: it bloats findQueryLocked's
+		// linear scan and makes HasData report data that no longer exists.
+		if len(fresh) > 0 {
+			queries = append(queries, *q)
+		}
 	}
+	cm.store.Queries = queries
 	// The per-keyword index decays on the same clock as the
 	// whole-query index -- a keyword association no agent has
 	// reinforced inside the mode's window is stale noise.
+	keywords := cm.kwStore.Keywords[:0]
 	for ki := range cm.kwStore.Keywords {
 		k := &cm.kwStore.Keywords[ki]
 		fresh := k.Matches[:0]
@@ -115,7 +124,11 @@ func (cm *comboManager) reapStaleLocked() {
 			}
 		}
 		k.Matches = fresh
+		if len(fresh) > 0 {
+			keywords = append(keywords, *k)
+		}
 	}
+	cm.kwStore.Keywords = keywords
 }
 
 // normalizeQuery collapses whitespace and lowercases. Matches FFF's
@@ -328,6 +341,20 @@ func (cm *comboManager) moveToEndLocked(idx int) {
 	cm.store.Queries[len(cm.store.Queries)-1] = q
 }
 
+// moveKeywordToEndLocked rotates kwStore.Keywords so the entry at idx
+// lives at the tail, mirroring moveToEndLocked for the whole-query store.
+// SaveKeyword front-trims on overflow, so without this an early-inserted
+// but frequently-reinforced keyword would be evicted before a cold
+// late-inserted one. Caller must hold cm.mu.
+func (cm *comboManager) moveKeywordToEndLocked(idx int) {
+	if idx < 0 || idx >= len(cm.kwStore.Keywords)-1 {
+		return
+	}
+	k := cm.kwStore.Keywords[idx]
+	copy(cm.kwStore.Keywords[idx:], cm.kwStore.Keywords[idx+1:])
+	cm.kwStore.Keywords[len(cm.kwStore.Keywords)-1] = k
+}
+
 // HasData reports whether any queries have been recorded. Used by the
 // feedback tool to decide whether to surface combo stats.
 func (cm *comboManager) HasData() bool {
@@ -336,6 +363,9 @@ func (cm *comboManager) HasData() bool {
 	}
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
+	// Reap first so a store holding only expired (soon-to-be-pruned)
+	// entries doesn't report itself as having data.
+	cm.reapStaleLocked()
 	return len(cm.store.Queries) > 0
 }
 
@@ -423,6 +453,9 @@ func (cm *comboManager) recordKeywordsLocked(rawQuery, symbolID string, now int6
 		if cap := persistence.MaxKeywordEntries(); len(ka.Matches) > cap {
 			ka.Matches = ka.Matches[:cap]
 		}
+		// An existing keyword was re-touched: rotate it to the tail so
+		// SaveKeyword's front-trim evicts least-recently-used keywords.
+		cm.moveKeywordToEndLocked(idx)
 	}
 }
 
@@ -443,6 +476,7 @@ func (cm *comboManager) recordKeywordMissLocked(kw, symbolID string, now int64) 
 		if ka.Matches[i].SymbolID == symbolID {
 			ka.Matches[i].MissCount++
 			ka.Matches[i].LastUsed = now
+			cm.moveKeywordToEndLocked(idx)
 			return
 		}
 	}
@@ -455,6 +489,7 @@ func (cm *comboManager) recordKeywordMissLocked(kw, symbolID string, now int64) 
 		})
 		ka.Matches = ka.Matches[:cap]
 	}
+	cm.moveKeywordToEndLocked(idx)
 }
 
 // findKeywordLocked returns the index of kw in kwStore.Keywords, or
@@ -527,9 +562,14 @@ func (cm *comboManager) KeywordBoostMap(rawQuery string) map[string]float64 {
 	out := make(map[string]float64, len(per))
 	for sym, a := range per {
 		coverage := float64(a.matched) / n
-		// Each hit above the gate adds keywordBoostPerHit, scaled by
-		// the fraction of query keywords the symbol covered.
-		extra := float64(a.hits-keywordMinHits+1) * keywordBoostPerHit * coverage
+		// Each hit above the gate adds keywordBoostPerHit, scaled by the
+		// fraction of query keywords the symbol covered. Use the AVERAGE
+		// per-keyword strength, not the summed hits: a.hits already grows
+		// with the number of matched keywords, so multiplying the sum by
+		// coverage (which also grows with that count) would make the boost
+		// super-linear in coverage instead of the documented ~K/N.
+		avgHits := float64(a.hits) / float64(a.matched)
+		extra := (avgHits - keywordMinHits + 1) * keywordBoostPerHit * coverage
 		if extra < 0 {
 			extra = 0
 		}

@@ -87,6 +87,17 @@ const qGoAll = `
   (parameter_declaration
     type: (type_identifier) @ptype.name) @ptype.decl
 
+  ; Type assertions: x.(T) / x.(pkg.T). The asserted type is a
+  ; reference to T. Without this an interface used only via a type
+  ; assertion has no incoming edge and looks like dead code.
+  (type_assertion_expression
+    type: (type_identifier) @assert.name) @assert.decl
+
+  (type_assertion_expression
+    type: (qualified_type
+      package: (package_identifier) @assertq.pkg
+      name: (type_identifier) @assertq.name)) @assertq.decl
+
   (argument_list
     (selector_expression
       operand: (_) @selarg.receiver
@@ -460,6 +471,23 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 			decl := m.Captures["ptype.decl"]
 			typeRefs = append(typeRefs, goDeferredTypeRef{
 				typeName: m.Captures["ptype.name"].Text,
+				line:     decl.StartLine + 1,
+				kind:     graph.EdgeReferences,
+			})
+
+		case m.Captures["assert.decl"] != nil:
+			decl := m.Captures["assert.decl"]
+			typeRefs = append(typeRefs, goDeferredTypeRef{
+				typeName: m.Captures["assert.name"].Text,
+				line:     decl.StartLine + 1,
+				kind:     graph.EdgeReferences,
+			})
+
+		case m.Captures["assertq.decl"] != nil:
+			decl := m.Captures["assertq.decl"]
+			typeRefs = append(typeRefs, goDeferredTypeRef{
+				typeName: m.Captures["assertq.name"].Text,
+				pkg:      m.Captures["assertq.pkg"].Text,
 				line:     decl.StartLine + 1,
 				kind:     graph.EdgeReferences,
 			})

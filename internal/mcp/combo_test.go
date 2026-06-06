@@ -114,3 +114,24 @@ func TestComboManager_NilSafe(t *testing.T) {
 	assert.Nil(t, cm.BoostMap("x"))
 	assert.False(t, cm.HasData())
 }
+
+// TestComboManager_ReapPrunesEmptyShells confirms that once every match
+// for a query/keyword expires, the emptied outer entry is removed (not
+// left as a zero-match shell) and HasData reflects that.
+func TestComboManager_ReapPrunesEmptyShells(t *testing.T) {
+	now := int64(1_000_000_000)
+	cm := &comboManager{mode: ModeAI, now: func() int64 { return now }}
+	for i := 0; i < comboMinHits; i++ {
+		cm.Record("auth token", "sym-a")
+	}
+	require.True(t, cm.HasData())
+	require.Len(t, cm.store.Queries, 1)
+	require.NotEmpty(t, cm.kwStore.Keywords)
+
+	// Jump past the AI max-age window so every match is stale.
+	now += comboMaxAgeAISec + 1
+	// HasData reaps first, so it must both prune the shells and report false.
+	assert.False(t, cm.HasData(), "a store holding only expired matches must report no data")
+	assert.Empty(t, cm.store.Queries, "emptied query shells must be pruned, not retained")
+	assert.Empty(t, cm.kwStore.Keywords, "emptied keyword shells must be pruned, not retained")
+}

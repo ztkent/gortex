@@ -75,6 +75,29 @@ func TestKeywordBoost_CoverageScaling(t *testing.T) {
 		"a symbol covering more query keywords should out-boost one covering fewer")
 }
 
+// TestKeywordBoost_CoverageIsLinear pins the boost above 1.0 to scale
+// linearly with coverage when per-keyword strength is equal: a symbol
+// matching 1 of 3 keywords earns ~1/3 of the full-coverage boost. Guards
+// against the super-linear (coverage-times-summed-hits) regression.
+func TestKeywordBoost_CoverageIsLinear(t *testing.T) {
+	cm := &comboManager{now: func() int64 { return 1 }}
+	// Equal per-keyword strength: sym-full under all 3 keywords, sym-partial
+	// under 1, each recorded the same number of times.
+	for i := 0; i < 4; i++ {
+		cm.Record("parse encode validate", "sym-full")
+		cm.Record("validate", "sym-partial")
+	}
+	kw := cm.KeywordBoostMap("parse encode validate")
+	require.NotNil(t, kw)
+	full := kw["sym-full"] - 1.0
+	partial := kw["sym-partial"] - 1.0
+	require.Greater(t, full, 0.0)
+	require.Greater(t, partial, 0.0)
+	// 3 keywords ⇒ full coverage boost is ~3× the 1-of-3 boost.
+	assert.InDelta(t, 3.0, full/partial, 0.05,
+		"partial-coverage boost should be ~1/N of full coverage (linear, not super-linear)")
+}
+
 // TestKeywordBoost_ExactQueryDominates confirms the exact whole-query
 // combo boost out-ranks a keyword-only boost when both fire -- the
 // keyword boost is capped below comboMaxBoost.

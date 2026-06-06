@@ -1093,3 +1093,31 @@ func (s *Server) Process() {
 		assert.Equal(t, "Inner", c.Meta["receiver_type"])
 	}
 }
+
+func TestGoExtractor_TypeAssertionReferences(t *testing.T) {
+	src := []byte(`package main
+
+type Doer interface{ Do() }
+
+func run(x any) {
+	if d, ok := x.(Doer); ok {
+		d.Do()
+	}
+	_ = x.(other.Fooer)
+}
+`)
+	e := NewGoExtractor()
+	result, err := e.Extract("main.go", src)
+	require.NoError(t, err)
+
+	var targets []string
+	for _, r := range edgesOfKind(result.Edges, graph.EdgeReferences) {
+		targets = append(targets, r.To)
+	}
+	// Local type assertion x.(Doer) must reference the asserted type, so an
+	// interface used only via an assertion is not seen as dead code.
+	assert.Contains(t, targets, "unresolved::Doer")
+	// Qualified assertion x.(other.Fooer): the package qualifier is dropped
+	// and the type is resolved by bare name like every other type reference.
+	assert.Contains(t, targets, "unresolved::Fooer")
+}
