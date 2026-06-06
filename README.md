@@ -1,6 +1,6 @@
 <div align="center">
 <p align="center">
-  <img src="(assets/wall.png" alt="Gortex" width="500">
+  <img src="assets/wall.png" alt="Gortex" width="500">
 </p>
 
 # Gortex
