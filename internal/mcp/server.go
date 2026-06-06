@@ -22,6 +22,7 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/llm"
+	"github.com/zzet/gortex/internal/llm/registry"
 	"github.com/zzet/gortex/internal/llm/svc"
 	"github.com/zzet/gortex/internal/platform"
 	"github.com/zzet/gortex/internal/query"
@@ -1044,6 +1045,11 @@ func (s *Server) SetLLMService(service *svc.Service) {
 // `search_symbols` assist modes are simply absent).
 func (s *Server) SetupLLM(cfg llm.Config) {
 	cfg = cfg.MergeEnv()
+	var customWarnings []string
+	cfg, customWarnings = registry.Augment(cfg)
+	for _, w := range customWarnings {
+		s.logger.Warn("custom LLM provider", zap.String("warning", w))
+	}
 	if !cfg.IsEnabled() {
 		return
 	}

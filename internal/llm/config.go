@@ -13,6 +13,7 @@
 package llm
 
 import (
+	"maps"
 	"os"
 	"strconv"
 	"strings"
@@ -76,6 +77,59 @@ type Config struct {
 	// research agent — see RoutingConfig. Disabled by default: every
 	// request runs on the active provider's configured model.
 	Routing RoutingConfig `mapstructure:"routing" yaml:"routing,omitempty"`
+
+	// Custom holds user-registered OpenAI-compatible providers, keyed
+	// by name. Entries may come from an inline `llm.custom:` block or,
+	// more commonly, from the registry file managed by `gortex provider
+	// add/remove` (providers.json) — the config loader merges the two.
+	// Selecting one is just setting Provider to its name.
+	Custom map[string]CustomProvider `mapstructure:"custom" yaml:"custom,omitempty"`
+}
+
+// CustomProvider describes a user-registered OpenAI-compatible LLM
+// endpoint — any service that exposes a /chat/completions API in the
+// OpenAI wire format (OpenRouter, Groq, Together, a self-hosted vLLM,
+// an internal gateway, …). It is dispatched through the shared
+// OpenAI-compatible client; only the addressing, key, and
+// structured-output strategy differ per entry. The registry key is the
+// provider name, so it is not repeated here.
+type CustomProvider struct {
+	// BaseURL is the OpenAI-compatible API base, including any version
+	// segment (e.g. "https://api.groq.com/openai/v1"). gortex appends
+	// "/chat/completions". Must be http or https.
+	BaseURL string `mapstructure:"base_url" yaml:"base_url" json:"base_url"`
+	// Model is the default model identifier sent in the request body.
+	Model string `mapstructure:"model" yaml:"model" json:"model"`
+	// APIKeyEnv names the env var holding the bearer key. Empty is
+	// allowed for keyless local endpoints (no Authorization header).
+	APIKeyEnv string `mapstructure:"api_key_env" yaml:"api_key_env,omitempty" json:"api_key_env,omitempty"`
+	// SchemaMode selects the structured-output strategy:
+	// "json_schema" (default — strict OpenAI structured outputs),
+	// "json_object" (response_format json_object + prompt rider), or
+	// "prompt" (prompt rider only). Use the looser modes for gateways
+	// that don't implement strict json_schema.
+	SchemaMode string `mapstructure:"schema_mode" yaml:"schema_mode,omitempty" json:"schema_mode,omitempty"`
+	// MaxTokensField overrides the output-token-cap body key
+	// ("max_completion_tokens" by default; some gateways still want the
+	// legacy "max_tokens").
+	MaxTokensField string `mapstructure:"max_tokens_field" yaml:"max_tokens_field,omitempty" json:"max_tokens_field,omitempty"`
+	// Temperature, when set, is sent as the `temperature` body field.
+	Temperature *float64 `mapstructure:"temperature" yaml:"temperature,omitempty" json:"temperature,omitempty"`
+	// ReasoningEffort, when set, is sent as `reasoning_effort`.
+	ReasoningEffort string `mapstructure:"reasoning_effort" yaml:"reasoning_effort,omitempty" json:"reasoning_effort,omitempty"`
+	// Headers are extra HTTP headers applied to every request (e.g. an
+	// OpenRouter `HTTP-Referer`).
+	Headers map[string]string `mapstructure:"headers" yaml:"headers,omitempty" json:"headers,omitempty"`
+	// Pricing is optional USD-per-1M-token pricing, surfaced by
+	// `gortex provider show` and EstimateCost. Purely informational.
+	Pricing ProviderPricing `mapstructure:"pricing" yaml:"pricing,omitempty" json:"pricing,omitempty"`
+}
+
+// ProviderPricing is the optional USD-per-1M-token rate card for a
+// custom provider.
+type ProviderPricing struct {
+	Input  float64 `mapstructure:"input" yaml:"input,omitempty" json:"input,omitempty"`
+	Output float64 `mapstructure:"output" yaml:"output,omitempty" json:"output,omitempty"`
 }
 
 // RoutingConfig is the `llm.routing:` sub-block — model routing for
@@ -297,6 +351,23 @@ const (
 	defaultDeepSeekKeyEnv  = "DEEPSEEK_API_KEY"
 )
 
+// builtinProviders is the set of reserved provider names — the ones
+// provider.New dispatches by a fixed case. A custom provider may not
+// shadow these.
+var builtinProviders = map[string]bool{
+	"local": true, "anthropic": true, "openai": true, "azure": true,
+	"ollama": true, "claudecli": true, "codex": true, "copilot": true,
+	"cursor": true, "opencode": true, "gemini": true, "bedrock": true,
+	"deepseek": true,
+}
+
+// IsBuiltinProvider reports whether name is a reserved built-in provider
+// (so the custom-provider registry can refuse to shadow one). The name
+// is matched case-insensitively after trimming.
+func IsBuiltinProvider(name string) bool {
+	return builtinProviders[strings.ToLower(strings.TrimSpace(name))]
+}
+
 // ProviderName returns the effective provider, applying the "local"
 // default for an empty value.
 func (c Config) ProviderName() string {
@@ -336,6 +407,9 @@ func (c Config) ActiveModel() string {
 	case "deepseek":
 		return c.DeepSeek.Model
 	default:
+		if cp, ok := c.Custom[c.ProviderName()]; ok {
+			return cp.Model
+		}
 		return c.Local.Model
 	}
 }
@@ -374,6 +448,17 @@ func (c Config) WithModel(model string) Config {
 	case "deepseek":
 		c.DeepSeek.Model = model
 	default:
+		// For a custom provider, copy-on-write the Custom map so routing
+		// (which derives per-request configs via WithModel) never
+		// mutates the shared base config.
+		if cp, ok := c.Custom[c.ProviderName()]; ok {
+			nc := make(map[string]CustomProvider, len(c.Custom))
+			maps.Copy(nc, c.Custom)
+			cp.Model = model
+			nc[c.ProviderName()] = cp
+			c.Custom = nc
+			return c
+		}
 		c.Local.Model = model
 	}
 	return c
@@ -407,6 +492,12 @@ func (c Config) IsEnabled() bool {
 	case "deepseek":
 		return strings.TrimSpace(c.DeepSeek.Model) != ""
 	default:
+		// A registered custom OpenAI-compatible provider is enabled
+		// once it carries a model; the API key (if any) is validated at
+		// construction time.
+		if cp, ok := c.Custom[c.ProviderName()]; ok {
+			return strings.TrimSpace(cp.Model) != ""
+		}
 		return false
 	}
 }
@@ -647,6 +738,12 @@ func (c Config) MergedWith(fb Config) Config {
 	c.Cursor = c.Cursor.mergedWith(fb.Cursor)
 	c.Opencode = c.Opencode.mergedWith(fb.Opencode)
 	c.Routing = c.Routing.mergedWith(fb.Routing)
+	if len(fb.Custom) > 0 {
+		merged := make(map[string]CustomProvider, len(fb.Custom)+len(c.Custom))
+		maps.Copy(merged, fb.Custom) // global base
+		maps.Copy(merged, c.Custom)  // local overrides per-key
+		c.Custom = merged
+	}
 	return c
 }
 

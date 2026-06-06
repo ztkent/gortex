@@ -44,6 +44,9 @@ func TestConfig_IsEnabled(t *testing.T) {
 		{"copilot no model", Config{Provider: "copilot"}, true},
 		{"cursor no model", Config{Provider: "cursor"}, true},
 		{"opencode no model", Config{Provider: "opencode"}, true},
+		{"custom with model", Config{Provider: "mygw", Custom: map[string]CustomProvider{"mygw": {BaseURL: "https://x/v1", Model: "m"}}}, true},
+		{"custom no model", Config{Provider: "mygw", Custom: map[string]CustomProvider{"mygw": {BaseURL: "https://x/v1"}}}, false},
+		{"custom name not registered", Config{Provider: "mygw"}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -125,6 +128,69 @@ func TestConfig_MergeEnv_DeepSeekModel(t *testing.T) {
 	c := Config{}.MergeEnv()
 	if c.DeepSeek.Model != "deepseek-reasoner" {
 		t.Errorf("deepseek model=%q", c.DeepSeek.Model)
+	}
+}
+
+func TestConfig_CustomProvider_ActiveModelAndWithModel(t *testing.T) {
+	base := Config{
+		Provider: "mygw",
+		Custom: map[string]CustomProvider{
+			"mygw":  {BaseURL: "https://x/v1", Model: "base-model"},
+			"other": {BaseURL: "https://y/v1", Model: "other-model"},
+		},
+	}
+	if got := base.ActiveModel(); got != "base-model" {
+		t.Errorf("ActiveModel=%q want base-model", got)
+	}
+	routed := base.WithModel("routed-model")
+	if got := routed.ActiveModel(); got != "routed-model" {
+		t.Errorf("WithModel/ActiveModel round-trip failed: %q", got)
+	}
+	// Copy-on-write: the base config and other providers are untouched.
+	if base.Custom["mygw"].Model != "base-model" {
+		t.Errorf("WithModel mutated the base config's custom map: %q", base.Custom["mygw"].Model)
+	}
+	if routed.Custom["other"].Model != "other-model" {
+		t.Errorf("WithModel must not disturb other custom providers: %q", routed.Custom["other"].Model)
+	}
+}
+
+func TestConfig_MergedWith_CustomProviders(t *testing.T) {
+	global := Config{
+		Provider: "mygw",
+		Custom: map[string]CustomProvider{
+			"mygw":   {BaseURL: "https://global/v1", Model: "global-model"},
+			"shared": {BaseURL: "https://global/v1", Model: "global-shared"},
+		},
+	}
+	local := Config{
+		Custom: map[string]CustomProvider{
+			"shared": {BaseURL: "https://local/v1", Model: "local-shared"},
+			"local":  {BaseURL: "https://local/v1", Model: "local-only"},
+		},
+	}
+	got := local.MergedWith(global)
+	if got.Custom["mygw"].Model != "global-model" {
+		t.Error("global-only custom provider should be filled in")
+	}
+	if got.Custom["local"].Model != "local-only" {
+		t.Error("local-only custom provider should survive")
+	}
+	if got.Custom["shared"].Model != "local-shared" {
+		t.Errorf("local must win for a name in both, got %q", got.Custom["shared"].Model)
+	}
+}
+
+func TestConfig_IsBuiltinProvider(t *testing.T) {
+	for _, name := range []string{"openai", "azure", "copilot", " Anthropic ", "BEDROCK"} {
+		if !IsBuiltinProvider(name) {
+			t.Errorf("IsBuiltinProvider(%q) = false, want true", name)
+		}
+	}
+	for _, name := range []string{"mygw", "groq", ""} {
+		if IsBuiltinProvider(name) {
+			t.Errorf("IsBuiltinProvider(%q) = true, want false", name)
+		}
 	}
 }
 

@@ -21,6 +21,7 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/llm"
+	"github.com/zzet/gortex/internal/llm/registry"
 	llmprovider "github.com/zzet/gortex/internal/llm/provider"
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/parser/languages"
@@ -375,6 +376,7 @@ func emitWikiSummary(w io.Writer, outDir, repoSlug string, files int) {
 // NoopEnhancer with a warning.
 func makeWikiEnhancer(cfg *config.Config, _ *zap.Logger) (wiki.Enhancer, error) {
 	llmCfg := cfg.LLM.MergeEnv()
+	llmCfg, _ = registry.Augment(llmCfg)
 	if !llmCfg.IsEnabled() {
 		return nil, fmt.Errorf("LLM provider %q is not configured", llmCfg.ProviderName())
 	}
