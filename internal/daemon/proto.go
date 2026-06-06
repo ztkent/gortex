@@ -88,6 +88,12 @@ const (
 	ControlTrack         = "track"
 	ControlUntrack       = "untrack"
 	ControlReload        = "reload"
+	// ControlProxy reloads servers.toml and rebuilds + atomically swaps
+	// the daemon's multi-server Router, then invalidates the roster
+	// cache — so `gortex proxy on/off/add/remove` apply to a running
+	// daemon without a restart. Distinct from ControlReload, which runs
+	// a full repo track/untrack reconcile and never touches the router.
+	ControlProxy         = "proxy"
 	ControlStatus        = "status"
 	ControlShutdown      = "shutdown"
 	ControlSearchSymbols = "search_symbols"
