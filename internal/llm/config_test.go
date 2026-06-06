@@ -26,6 +26,8 @@ func TestConfig_IsEnabled(t *testing.T) {
 		{"anthropic with model", Config{Provider: "anthropic", Anthropic: RemoteConfig{Model: "claude"}}, true},
 		{"anthropic no model", Config{Provider: "anthropic"}, false},
 		{"openai with model", Config{Provider: "openai", OpenAI: RemoteConfig{Model: "gpt"}}, true},
+		{"azure with deployment", Config{Provider: "azure", Azure: AzureConfig{Deployment: "gpt4o"}}, true},
+		{"azure no deployment", Config{Provider: "azure"}, false},
 		{"ollama with model", Config{Provider: "ollama", Ollama: OllamaConfig{Model: "qwen"}}, true},
 		{"ollama no model", Config{Provider: "ollama"}, false},
 		{"claudecli no model", Config{Provider: "claudecli"}, true},
@@ -65,6 +67,9 @@ func TestConfig_ApplyDefaults(t *testing.T) {
 	}
 	if c.OpenAI.Model != defaultOpenAIModel || c.OpenAI.APIKeyEnv != defaultOpenAIKeyEnv || c.OpenAI.BaseURL != defaultOpenAIBaseURL {
 		t.Errorf("openai defaults wrong: %+v", c.OpenAI)
+	}
+	if c.Azure.APIVersion != defaultAzureAPIVersion || c.Azure.EndpointEnv != defaultAzureEndpointEnv || c.Azure.APIKeyEnv != defaultAzureKeyEnv {
+		t.Errorf("azure defaults wrong: %+v", c.Azure)
 	}
 	if c.Ollama.Host != defaultOllamaHost {
 		t.Errorf("ollama host=%q want %q", c.Ollama.Host, defaultOllamaHost)
@@ -114,6 +119,45 @@ func TestConfig_MergeEnv_DeepSeekModel(t *testing.T) {
 	c := Config{}.MergeEnv()
 	if c.DeepSeek.Model != "deepseek-reasoner" {
 		t.Errorf("deepseek model=%q", c.DeepSeek.Model)
+	}
+}
+
+func TestConfig_MergeEnv_AzureDeploymentEndpointVersion(t *testing.T) {
+	t.Setenv("GORTEX_LLM_PROVIDER", "azure")
+	t.Setenv("GORTEX_LLM_MODEL", "gpt4o-routed")
+	t.Setenv("GORTEX_LLM_AZURE_ENDPOINT", "https://r.openai.azure.com")
+	t.Setenv("GORTEX_LLM_AZURE_DEPLOYMENT", "gpt4o-deploy")
+	t.Setenv("GORTEX_LLM_AZURE_API_VERSION", "2025-01-01-preview")
+	c := Config{}.MergeEnv()
+	// GORTEX_LLM_MODEL targets the active provider — for azure that's
+	// the deployment (the routing key). The dedicated
+	// GORTEX_LLM_AZURE_DEPLOYMENT then overrides it.
+	if c.Azure.Deployment != "gpt4o-deploy" {
+		t.Errorf("azure deployment=%q want gpt4o-deploy", c.Azure.Deployment)
+	}
+	if c.Azure.Endpoint != "https://r.openai.azure.com" {
+		t.Errorf("azure endpoint=%q", c.Azure.Endpoint)
+	}
+	if c.Azure.APIVersion != "2025-01-01-preview" {
+		t.Errorf("azure api_version=%q", c.Azure.APIVersion)
+	}
+}
+
+func TestConfig_MergedWith_Azure(t *testing.T) {
+	global := Config{
+		Provider: "azure",
+		Azure:    AzureConfig{Endpoint: "https://r.openai.azure.com", APIVersion: "2024-10-21", APIKeyEnv: "AZURE_OPENAI_API_KEY"},
+	}
+	local := Config{Azure: AzureConfig{Deployment: "gpt4o"}}
+	got := local.MergedWith(global)
+	if got.Provider != "azure" {
+		t.Errorf("provider=%q want azure", got.Provider)
+	}
+	if got.Azure.Deployment != "gpt4o" {
+		t.Errorf("deployment=%q want gpt4o (local should win)", got.Azure.Deployment)
+	}
+	if got.Azure.Endpoint != "https://r.openai.azure.com" || got.Azure.APIVersion != "2024-10-21" {
+		t.Errorf("azure block not filled from global: %+v", got.Azure)
 	}
 }
 
@@ -197,6 +241,7 @@ func TestConfig_ActiveModelAndWithModel(t *testing.T) {
 	}{
 		{"anthropic", Config{Provider: "anthropic"}},
 		{"openai", Config{Provider: "openai"}},
+		{"azure", Config{Provider: "azure"}},
 		{"ollama", Config{Provider: "ollama"}},
 		{"claudecli", Config{Provider: "claudecli"}},
 		{"codex", Config{Provider: "codex"}},

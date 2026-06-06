@@ -33,7 +33,7 @@ const (
 // tier).
 func ProfileForProvider(name string) PromptProfile {
 	switch name {
-	case "anthropic", "openai", "claudecli", "codex", "gemini", "bedrock", "deepseek":
+	case "anthropic", "openai", "azure", "claudecli", "codex", "gemini", "bedrock", "deepseek":
 		return ProfileFrontier
 	default:
 		return ProfileSmall

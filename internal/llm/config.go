@@ -43,6 +43,10 @@ type Config struct {
 	Anthropic RemoteConfig `mapstructure:"anthropic" yaml:"anthropic,omitempty"`
 	// OpenAI configures the hosted OpenAI Chat Completions provider.
 	OpenAI RemoteConfig `mapstructure:"openai" yaml:"openai,omitempty"`
+	// Azure configures the Azure OpenAI Service provider — the OpenAI
+	// Chat Completions wire format with a deployment-in-path /
+	// api-version-query / api-key-header auth model.
+	Azure AzureConfig `mapstructure:"azure" yaml:"azure,omitempty"`
 	// Ollama configures a local/remote Ollama daemon provider.
 	Ollama OllamaConfig `mapstructure:"ollama" yaml:"ollama,omitempty"`
 	// ClaudeCLI configures the Claude Code CLI subprocess provider.
@@ -115,6 +119,39 @@ type RemoteConfig struct {
 	// BaseURL overrides the API endpoint (proxies, gateways, Azure).
 	// Defaulted per provider by ApplyDefaults.
 	BaseURL string `mapstructure:"base_url" yaml:"base_url,omitempty"`
+}
+
+// AzureConfig is the `llm.azure:` sub-block — settings for the Azure
+// OpenAI Service provider. Azure speaks the OpenAI Chat Completions
+// wire format but addresses and authenticates requests differently
+// from api.openai.com: the model is selected by a deployment name
+// folded into the URL path, the API contract is pinned by an
+// `api-version` query parameter, and the key travels in an `api-key`
+// header (not a Bearer token). A bare RemoteConfig.BaseURL override
+// cannot express that, which is why Azure gets its own sub-block.
+type AzureConfig struct {
+	// Endpoint is the Azure OpenAI resource endpoint, e.g.
+	// "https://my-resource.openai.azure.com". When empty it is read
+	// from the env var named by EndpointEnv.
+	Endpoint string `mapstructure:"endpoint" yaml:"endpoint,omitempty"`
+	// EndpointEnv names the env var holding the endpoint when Endpoint
+	// is unset. Defaults to "AZURE_OPENAI_ENDPOINT".
+	EndpointEnv string `mapstructure:"endpoint_env" yaml:"endpoint_env,omitempty"`
+	// Deployment is the Azure deployment name — the path segment that
+	// selects the model. Required; empty disables the provider.
+	Deployment string `mapstructure:"deployment" yaml:"deployment,omitempty"`
+	// APIVersion pins the Azure REST API contract (e.g. "2024-10-21").
+	// Defaults to a recent GA version that supports json_schema
+	// structured outputs.
+	APIVersion string `mapstructure:"api_version" yaml:"api_version,omitempty"`
+	// Model is the logical model identifier sent in the request body.
+	// Optional — Azure routes by Deployment, so this defaults to the
+	// deployment name and rarely needs setting.
+	Model string `mapstructure:"model" yaml:"model,omitempty"`
+	// APIKeyEnv names the env var holding the Azure API key. Defaults
+	// to "AZURE_OPENAI_API_KEY". The key itself is never stored in the
+	// config file.
+	APIKeyEnv string `mapstructure:"api_key_env" yaml:"api_key_env,omitempty"`
 }
 
 // OllamaConfig is the `llm.ollama:` sub-block.
@@ -203,6 +240,10 @@ const (
 	defaultOpenAIBaseURL = "https://api.openai.com"
 	defaultOpenAIKeyEnv  = "OPENAI_API_KEY"
 
+	defaultAzureAPIVersion  = "2024-10-21"
+	defaultAzureEndpointEnv = "AZURE_OPENAI_ENDPOINT"
+	defaultAzureKeyEnv      = "AZURE_OPENAI_API_KEY"
+
 	defaultOllamaHost = "http://localhost:11434"
 
 	defaultClaudeCLIBinary = "claude"
@@ -241,6 +282,8 @@ func (c Config) ActiveModel() string {
 		return c.Anthropic.Model
 	case "openai":
 		return c.OpenAI.Model
+	case "azure":
+		return c.Azure.Deployment
 	case "ollama":
 		return c.Ollama.Model
 	case "claudecli":
@@ -271,6 +314,8 @@ func (c Config) WithModel(model string) Config {
 		c.Anthropic.Model = model
 	case "openai":
 		c.OpenAI.Model = model
+	case "azure":
+		c.Azure.Deployment = model
 	case "ollama":
 		c.Ollama.Model = model
 	case "claudecli":
@@ -304,6 +349,8 @@ func (c Config) IsEnabled() bool {
 		return strings.TrimSpace(c.Anthropic.Model) != ""
 	case "openai":
 		return strings.TrimSpace(c.OpenAI.Model) != ""
+	case "azure":
+		return strings.TrimSpace(c.Azure.Deployment) != ""
 	case "ollama":
 		return strings.TrimSpace(c.Ollama.Model) != ""
 	case "claudecli", "codex":
@@ -338,6 +385,8 @@ func (c Config) MergeEnv() Config {
 			c.Anthropic.Model = v
 		case "openai":
 			c.OpenAI.Model = v
+		case "azure":
+			c.Azure.Deployment = v
 		case "ollama":
 			c.Ollama.Model = v
 		case "claudecli":
@@ -362,6 +411,15 @@ func (c Config) MergeEnv() Config {
 	}
 	if v := os.Getenv("GORTEX_LLM_BEDROCK_REGION"); v != "" {
 		c.Bedrock.Region = v
+	}
+	if v := os.Getenv("GORTEX_LLM_AZURE_ENDPOINT"); v != "" {
+		c.Azure.Endpoint = v
+	}
+	if v := os.Getenv("GORTEX_LLM_AZURE_DEPLOYMENT"); v != "" {
+		c.Azure.Deployment = v
+	}
+	if v := os.Getenv("GORTEX_LLM_AZURE_API_VERSION"); v != "" {
+		c.Azure.APIVersion = v
 	}
 	if v := os.Getenv("GORTEX_LLM_CTX"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
@@ -425,6 +483,17 @@ func (c Config) ApplyDefaults() Config {
 	}
 	if c.OpenAI.BaseURL == "" {
 		c.OpenAI.BaseURL = defaultOpenAIBaseURL
+	}
+
+	// azure
+	if c.Azure.APIVersion == "" {
+		c.Azure.APIVersion = defaultAzureAPIVersion
+	}
+	if c.Azure.EndpointEnv == "" {
+		c.Azure.EndpointEnv = defaultAzureEndpointEnv
+	}
+	if c.Azure.APIKeyEnv == "" {
+		c.Azure.APIKeyEnv = defaultAzureKeyEnv
 	}
 
 	// ollama
@@ -496,6 +565,7 @@ func (c Config) MergedWith(fb Config) Config {
 	c.Local = c.Local.mergedWith(fb.Local)
 	c.Anthropic = c.Anthropic.mergedWith(fb.Anthropic)
 	c.OpenAI = c.OpenAI.mergedWith(fb.OpenAI)
+	c.Azure = c.Azure.mergedWith(fb.Azure)
 	c.Ollama = c.Ollama.mergedWith(fb.Ollama)
 	c.ClaudeCLI = c.ClaudeCLI.mergedWith(fb.ClaudeCLI)
 	c.Gemini = c.Gemini.mergedWith(fb.Gemini)
@@ -546,6 +616,28 @@ func (r RemoteConfig) mergedWith(fb RemoteConfig) RemoteConfig {
 		r.BaseURL = fb.BaseURL
 	}
 	return r
+}
+
+func (a AzureConfig) mergedWith(fb AzureConfig) AzureConfig {
+	if a.Endpoint == "" {
+		a.Endpoint = fb.Endpoint
+	}
+	if a.EndpointEnv == "" {
+		a.EndpointEnv = fb.EndpointEnv
+	}
+	if a.Deployment == "" {
+		a.Deployment = fb.Deployment
+	}
+	if a.APIVersion == "" {
+		a.APIVersion = fb.APIVersion
+	}
+	if a.Model == "" {
+		a.Model = fb.Model
+	}
+	if a.APIKeyEnv == "" {
+		a.APIKeyEnv = fb.APIKeyEnv
+	}
+	return a
 }
 
 func (o OllamaConfig) mergedWith(fb OllamaConfig) OllamaConfig {

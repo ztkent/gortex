@@ -14,6 +14,7 @@ import (
 
 	"github.com/zzet/gortex/internal/llm"
 	"github.com/zzet/gortex/internal/llm/provider/anthropic"
+	"github.com/zzet/gortex/internal/llm/provider/azure"
 	"github.com/zzet/gortex/internal/llm/provider/bedrock"
 	"github.com/zzet/gortex/internal/llm/provider/claudecli"
 	"github.com/zzet/gortex/internal/llm/provider/codex"
@@ -39,6 +40,8 @@ func New(cfg llm.Config) (llm.Provider, error) {
 		return anthropic.New(cfg.Anthropic)
 	case "openai":
 		return openai.New(cfg.OpenAI)
+	case "azure":
+		return azure.New(cfg.Azure)
 	case "ollama":
 		return ollama.New(cfg.Ollama)
 	case "claudecli":
@@ -52,6 +55,6 @@ func New(cfg llm.Config) (llm.Provider, error) {
 	case "deepseek":
 		return deepseek.New(cfg.DeepSeek)
 	default:
-		return nil, fmt.Errorf("llm: unknown provider %q (want local|anthropic|openai|ollama|claudecli|codex|gemini|bedrock|deepseek)", cfg.ProviderName())
+		return nil, fmt.Errorf("llm: unknown provider %q (want local|anthropic|openai|azure|ollama|claudecli|codex|gemini|bedrock|deepseek)", cfg.ProviderName())
 	}
 }
