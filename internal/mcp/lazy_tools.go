@@ -27,6 +27,11 @@ import (
 // subscribe/unsubscribe pairs, notebook, memories editing, scaffold,
 // generate_*) is deferred — the bytes saved compound across every
 // session, every reconnect, and every prompt-cache miss.
+//
+// NOTE: this is a registration / eager-publish set, NOT a write-
+// authorization list. Its editing entries must not be confused with
+// the authoritative mutating-tool set; for "does this tool mutate
+// state" consult daemon.MutatingTools (internal/daemon/mutating.go).
 var hotEagerTools = map[string]bool{
 	"search_symbols":       true,
 	"find_usages":          true,

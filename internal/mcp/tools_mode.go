@@ -3,31 +3,17 @@ package mcp
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
+
+	"github.com/zzet/gortex/internal/daemon"
 )
 
-// editingToolNames is the set of MCP tools that mutate files on disk.
-// Planning mode removes exactly these from the served surface and
-// hard-blocks any call to them.
-var editingToolNames = map[string]bool{
-	"edit_file":     true,
-	"edit_symbol":   true,
-	"write_file":    true,
-	"rename_symbol": true,
-}
-
-// sortedEditingToolNames returns the editing tool names in stable order.
-func sortedEditingToolNames() []string {
-	out := make([]string, 0, len(editingToolNames))
-	for n := range editingToolNames {
-		out = append(out, n)
-	}
-	sort.Strings(out)
-	return out
-}
+// Planning mode and the federation write-gate share one canonical
+// write-tool set — daemon.MutatingTools — so a tool is hidden/blocked
+// in a read-only session by exactly the same list that refuses to route
+// it to a remote. See internal/daemon/mutating.go.
 
 // sessionPlanningMode reports whether the request's session is in
 // planning mode (no writes permitted).
@@ -55,7 +41,7 @@ func (s *Server) toolSurfaceFilter(ctx context.Context, tools []mcp.Tool) []mcp.
 	if s.editingToolsHidden(ctx) {
 		kept := make([]mcp.Tool, 0, len(tools))
 		for _, t := range tools {
-			if editingToolNames[t.Name] {
+			if daemon.MutatingTools[t.Name] {
 				continue
 			}
 			kept = append(kept, t)
@@ -84,7 +70,7 @@ func (s *Server) checkToolGate(ctx context.Context, toolName string) *mcp.CallTo
 // checkPlanningModeGate blocks editing tools while the session is in
 // planning mode.
 func (s *Server) checkPlanningModeGate(ctx context.Context, toolName string) *mcp.CallToolResult {
-	if !editingToolNames[toolName] {
+	if !daemon.IsMutating(toolName) {
 		return nil
 	}
 	if !s.sessionPlanningMode(ctx) {
@@ -145,7 +131,7 @@ func (s *Server) handleSetPlanningMode(ctx context.Context, req mcp.CallToolRequ
 	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"mode":            mode,
 		"editing_enabled": !planning,
-		"editing_tools":   sortedEditingToolNames(),
+		"editing_tools":   daemon.SortedMutatingTools(),
 		"note":            note,
 	})
 }

@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
+
+	"github.com/zzet/gortex/internal/daemon"
 )
 
 // Workflow enforcement modes.
@@ -92,7 +94,7 @@ func (s *Server) workflowHidesEdits(ctx context.Context) bool {
 // mode the workflow auto-advances to the first editing phase and the call
 // proceeds. Non-editing tools are never phase-gated.
 func (s *Server) checkWorkflowGate(ctx context.Context, toolName string) *mcp.CallToolResult {
-	if !editingToolNames[toolName] {
+	if !daemon.IsMutating(toolName) {
 		return nil
 	}
 	sess := s.sessionFor(ctx)
