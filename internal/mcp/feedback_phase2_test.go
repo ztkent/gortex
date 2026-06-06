@@ -56,8 +56,8 @@ func TestFeedbackLegacyEntryMatchesAnyQuery(t *testing.T) {
 func TestMissedSymbolsForQueryScoping(t *testing.T) {
 	fm := &feedbackManager{}
 	for i := 0; i < 3; i++ {
-		fm.Record(persistence.FeedbackEntry{Task: "auth login flow", Missing: []string{"auth.go::Login"}})
-		fm.Record(persistence.FeedbackEntry{Task: "render dashboard chart", Missing: []string{"ui.go::Chart"}})
+		_ = fm.Record(persistence.FeedbackEntry{Task: "auth login flow", Missing: []string{"auth.go::Login"}})
+		_ = fm.Record(persistence.FeedbackEntry{Task: "render dashboard chart", Missing: []string{"ui.go::Chart"}})
 	}
 	got := fm.MissedSymbolsForQuery("auth session login", 2)
 	if len(got) != 1 || got[0] != "auth.go::Login" {

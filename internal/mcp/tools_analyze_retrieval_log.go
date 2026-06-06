@@ -216,7 +216,7 @@ func readQueryLogTail(path string, limit int) ([]queryLogRecord, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	// Ring buffer of the last `limit` raw lines, then parse — bounds
 	// memory regardless of log size.
