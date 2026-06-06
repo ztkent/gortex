@@ -9,7 +9,27 @@ import (
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
+
+	"github.com/zzet/gortex/internal/graph"
 )
+
+// maxSkillSymbols caps how many graph symbols the generated SKILL.md
+// lists in its "Key symbols" map (and how many ride on the JSON
+// response). The most-referenced symbols are the useful ones; the long
+// tail lives in the reference files.
+const maxSkillSymbols = 40
+
+// skillSymbol is one graph-derived symbol surfaced in a generated
+// skill: a load-bearing definition under the bundled directory, ranked
+// by inbound references.
+type skillSymbol struct {
+	Name      string `json:"name"`
+	Kind      string `json:"kind"`
+	Signature string `json:"signature,omitempty"`
+	RelPath   string `json:"rel_path"`
+	Line      int    `json:"line"`
+	FanIn     int    `json:"fan_in"`
+}
 
 // registerGenerateSkillTool wires generate_skill — emits a
 // `.claude/skills/<name>/SKILL.md` plus a `references/` tree from a
@@ -20,7 +40,7 @@ import (
 func (s *Server) registerGenerateSkillTool() {
 	s.addTool(
 		mcp.NewTool("generate_skill",
-			mcp.WithDescription("Bundle a directory into a Claude Code skill. Walks `directory`, applies include/ignore patterns, and writes `<output_dir>/SKILL.md` (with name + description YAML frontmatter and a reference index) plus `<output_dir>/references/<relpath>` for each kept file. Use to ship a region of the codebase as a model-invoked skill — e.g. an internal SDK an agent should reach for when answering questions about that area."),
+			mcp.WithDescription("Bundle a directory into a Claude Code skill. Walks `directory`, applies include/ignore patterns, and writes `<output_dir>/SKILL.md` plus `<output_dir>/references/<relpath>` for each kept file. The SKILL.md is graph-aware: beyond the reference index it carries a \"Key symbols\" map — the region's most-referenced functions/types/methods (by inbound references from the Gortex graph) with their signatures and locations — so the skill points an agent at the area's API surface, not just a file listing. Use to ship a region of the codebase as a model-invoked skill."),
 			mcp.WithString("directory", mcp.Description("Directory to bundle (repo-relative or absolute).")),
 			mcp.WithString("skill_name", mcp.Description("Skill name (kebab-case). Defaults to the directory's basename.")),
 			mcp.WithString("description", mcp.Description("Description for the skill picker. Defaults to a templated 'Use when working with <name>'.")),
@@ -69,9 +89,9 @@ func (s *Server) handleGenerateSkill(ctx context.Context, req mcp.CallToolReques
 	}
 
 	description := strings.TrimSpace(req.GetString("description", ""))
-	if description == "" {
-		description = fmt.Sprintf("Use when working with %s. Bundled from %s.", skillName, rawDir)
-	}
+	// A blank description is filled in after the walk so it can quote
+	// the graph-derived symbol/file counts.
+	descAuto := description == ""
 
 	includes := splitCSV(req.GetString("include_patterns", ""))
 	ignores := splitCSV(req.GetString("ignore_patterns", ""))
@@ -177,7 +197,16 @@ func (s *Server) handleGenerateSkill(ctx context.Context, req mcp.CallToolReques
 		return mcp.NewToolResultError(fmt.Sprintf("walk %s: %v", absDir, walkErr)), nil
 	}
 
-	skillBody := buildSkillMarkdown(skillName, description, refs)
+	// Graph payload: turn the flat file dump into a symbol map. The
+	// most-referenced symbols under the bundled directory (with their
+	// signatures) tell the agent what the region's API surface is —
+	// far more useful than a bare list of file paths.
+	symbols := s.collectSkillSymbols(absDir, refs)
+	if descAuto {
+		description = defaultSkillDescription(skillName, rawDir, len(refs), len(symbols))
+	}
+
+	skillBody := buildSkillMarkdown(skillName, description, refs, symbols)
 	skillPath := filepath.Join(absOutputDir, "SKILL.md")
 
 	if !dryRun {
@@ -192,15 +221,17 @@ func (s *Server) handleGenerateSkill(ctx context.Context, req mcp.CallToolReques
 	sort.Slice(refs, func(i, j int) bool { return refs[i].RelPath < refs[j].RelPath })
 
 	return s.respondJSONOrTOON(ctx, req, map[string]any{
-		"skill_name":   skillName,
-		"description":  description,
-		"skill_path":   skillPath,
-		"output_dir":   absOutputDir,
+		"skill_name":      skillName,
+		"description":     description,
+		"skill_path":      skillPath,
+		"output_dir":      absOutputDir,
 		"reference_count": len(refs),
-		"references":   refs,
-		"skipped":      skipped,
-		"dry_run":      dryRun,
-		"compressed":   compress,
+		"references":      refs,
+		"symbol_count":    len(symbols),
+		"symbols":         topSkillSymbols(symbols, maxSkillSymbols),
+		"skipped":         skipped,
+		"dry_run":         dryRun,
+		"compressed":      compress,
 	})
 }
 
@@ -208,7 +239,7 @@ func (s *Server) handleGenerateSkill(ctx context.Context, req mcp.CallToolReques
 // frontmatter plus a sorted reference index. Format mirrors what
 // the claudecode adapter emits for its bundled skills so Claude Code
 // picks the file up without configuration.
-func buildSkillMarkdown(name, description string, refs []generateSkillRef) string {
+func buildSkillMarkdown(name, description string, refs []generateSkillRef, symbols []skillSymbol) string {
 	var b strings.Builder
 	b.WriteString("---\n")
 	b.WriteString("name: " + name + "\n")
@@ -216,6 +247,31 @@ func buildSkillMarkdown(name, description string, refs []generateSkillRef) strin
 	b.WriteString("---\n\n")
 	b.WriteString("# " + name + "\n\n")
 	b.WriteString(description + "\n\n")
+
+	// Graph-derived symbol map: the load-bearing symbols (ranked by how
+	// many places reference them) with signatures and locations, so the
+	// skill points the agent at the region's API surface rather than a
+	// bare file listing.
+	if top := topSkillSymbols(symbols, maxSkillSymbols); len(top) > 0 {
+		b.WriteString("## Key symbols\n\n")
+		b.WriteString("Most-referenced symbols in this area (by inbound references), from the Gortex graph:\n\n")
+		for _, sym := range top {
+			fmt.Fprintf(&b, "- `%s` (%s)", sym.Name, sym.Kind)
+			if sym.Signature != "" {
+				fmt.Fprintf(&b, " — `%s`", collapseWhitespace(sym.Signature))
+			}
+			fmt.Fprintf(&b, " — `%s:%d`", sym.RelPath, sym.Line)
+			if sym.FanIn > 0 {
+				fmt.Fprintf(&b, " (%d refs)", sym.FanIn)
+			}
+			b.WriteString("\n")
+		}
+		if len(symbols) > len(top) {
+			fmt.Fprintf(&b, "\n_+%d more symbols across the reference files below._\n", len(symbols)-len(top))
+		}
+		b.WriteString("\n")
+	}
+
 	b.WriteString("## References\n\n")
 	if len(refs) == 0 {
 		b.WriteString("(no reference files included — none matched the include/ignore patterns)\n")
@@ -231,6 +287,102 @@ func buildSkillMarkdown(name, description string, refs []generateSkillRef) strin
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// collectSkillSymbols pulls the symbol nodes the Gortex graph holds for
+// the bundled files and ranks them by inbound references (fan-in), so a
+// generated skill leads with the region's most load-bearing API. It is
+// best-effort: a region the daemon hasn't indexed yields no symbols and
+// the skill falls back to its plain reference list.
+func (s *Server) collectSkillSymbols(absDir string, refs []generateSkillRef) []skillSymbol {
+	if s.graph == nil {
+		return nil
+	}
+	var ids []string
+	nodeByID := map[string]*graph.Node{}
+	relByID := map[string]string{}
+	for _, r := range refs {
+		fp := s.repoRelative(filepath.Join(absDir, r.RelPath))
+		for _, n := range s.graph.GetFileNodes(fp) {
+			if n == nil || !isSkillSymbolKind(n.Kind) {
+				continue
+			}
+			if _, dup := nodeByID[n.ID]; dup {
+				continue
+			}
+			nodeByID[n.ID] = n
+			relByID[n.ID] = r.RelPath
+			ids = append(ids, n.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+
+	fan := make(map[string]int, len(ids))
+	for id, edges := range s.graph.GetInEdgesByNodeIDs(ids) {
+		fan[id] = len(edges)
+	}
+
+	syms := make([]skillSymbol, 0, len(ids))
+	for _, id := range ids {
+		n := nodeByID[id]
+		sig, _ := n.Meta["signature"].(string)
+		syms = append(syms, skillSymbol{
+			Name:      n.Name,
+			Kind:      string(n.Kind),
+			Signature: sig,
+			RelPath:   relByID[id],
+			Line:      n.StartLine,
+			FanIn:     fan[id],
+		})
+	}
+	sort.Slice(syms, func(i, j int) bool {
+		if syms[i].FanIn != syms[j].FanIn {
+			return syms[i].FanIn > syms[j].FanIn // most-referenced first
+		}
+		if syms[i].RelPath != syms[j].RelPath {
+			return syms[i].RelPath < syms[j].RelPath
+		}
+		return syms[i].Line < syms[j].Line
+	})
+	return syms
+}
+
+// isSkillSymbolKind keeps the definition kinds worth surfacing in a
+// skill's symbol map and drops the noise (params, locals, imports,
+// fields, file/package nodes).
+func isSkillSymbolKind(k graph.NodeKind) bool {
+	switch string(k) {
+	case "function", "method", "type", "interface", "constant", "variable":
+		return true
+	default:
+		return false
+	}
+}
+
+// topSkillSymbols returns the first limit symbols (already sorted by
+// fan-in), or all of them when fewer.
+func topSkillSymbols(syms []skillSymbol, limit int) []skillSymbol {
+	if len(syms) <= limit {
+		return syms
+	}
+	return syms[:limit]
+}
+
+// defaultSkillDescription builds the auto description, quoting the
+// graph-derived symbol/file counts when any symbols were found.
+func defaultSkillDescription(name, rawDir string, fileCount, symbolCount int) string {
+	if symbolCount > 0 {
+		return fmt.Sprintf("Use when working with %s (%d symbols across %d files). Bundled from %s.", name, symbolCount, fileCount, rawDir)
+	}
+	return fmt.Sprintf("Use when working with %s. Bundled from %s.", name, rawDir)
+}
+
+// collapseWhitespace flattens a multi-line signature to a single line
+// so it renders cleanly in a markdown list item.
+func collapseWhitespace(s string) string {
+	return strings.Join(strings.Fields(s), " ")
 }
 
 // escapeYAMLDoubleQuoted escapes the double-quoted YAML string form
