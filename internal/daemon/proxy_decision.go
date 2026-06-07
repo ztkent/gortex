@@ -52,9 +52,14 @@ func (d *ProxyDecision) Decide(ctx context.Context, in RouteInputs, sess *Sessio
 	if r == nil {
 		return Outcome{}
 	}
+	sid := ""
+	if sess != nil {
+		sid = sess.ID
+	}
 	out, status, err := r.RouteToolCall(ctx, in.ToolName, in.Body, RouteContext{
 		Cwd:            in.Cwd,
 		ScopeOverride:  in.Scope,
+		SessionID:      sid,
 		EnabledRemotes: r.EffectiveEnabledRemotes(sess),
 	})
 	if err != nil || status == 0 {

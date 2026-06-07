@@ -63,6 +63,9 @@ type Router struct {
 	clientsMu    sync.Mutex
 	clients      map[string]*ServerClient
 	localExecute LocalExecutor
+	// federator augments a LOCAL read result with enabled remotes'
+	// results (Option C). nil disables federation entirely.
+	federator *Federator
 }
 
 // LocalExecutor runs a tool against the local server. The daemon
@@ -80,6 +83,10 @@ type RouterConfig struct {
 	LocalSlug    string
 	LocalExecute LocalExecutor
 	Logger       *zap.Logger
+	// Federation tunes the read-only fan-out. When the daemon builds a
+	// router it also builds a Federator over these knobs; a zero value
+	// uses the defaults. --oneshot passes no router and so no Federator.
+	Federation FederationConfig
 }
 
 // NewRouter constructs a Router with the given dependencies. nil
@@ -100,6 +107,7 @@ func NewRouter(rc RouterConfig) *Router {
 	if r.resolveCwd == nil {
 		r.resolveCwd = DefaultCwdResolver
 	}
+	r.federator = NewFederator(rc.Federation, r.clientFor, r.logger)
 	return r
 }
 
@@ -110,6 +118,9 @@ func NewRouter(rc RouterConfig) *Router {
 type RouteContext struct {
 	Cwd           string
 	ScopeOverride string
+	// SessionID identifies the calling MCP session for the cross-daemon
+	// audit log (empty for the HTTP / sessionless paths).
+	SessionID string
 	// EnabledRemotes is the per-call snapshot of the effective
 	// enabled-set: the dialable roster entries that remain enabled
 	// after session overrides are applied over the global Enabled
@@ -166,7 +177,7 @@ func (r *Router) RouteToolCall(ctx context.Context, toolName string, body []byte
 		}
 		if lookup.Server == nil {
 			if r.localExecute != nil {
-				return r.callLocal(ctx, toolName, body)
+				return r.callLocalFederated(ctx, toolName, body, route)
 			}
 			return nil, 0, fmt.Errorf("%w: workspace=%q", ErrRouteUnresolved, lookup.Workspace)
 		}
@@ -178,7 +189,7 @@ func (r *Router) RouteToolCall(ctx context.Context, toolName string, body []byte
 		// proxies correctly instead of being mistaken for local. The
 		// "no server resolves" case is already handled above by the
 		// lookup.Server == nil fall-through.
-		return r.callLocal(ctx, toolName, body)
+		return r.callLocalFederated(ctx, toolName, body, route)
 	}
 
 	// Remote hop. Two gates fire here, BEFORE any client is built or
@@ -187,6 +198,13 @@ func (r *Router) RouteToolCall(ctx context.Context, toolName string, body []byte
 	//   1. enabled-set gate — a disabled remote is never queried.
 	//   2. write-gate — a mutating tool never routes to any remote.
 	slug := lookup.Server.Slug
+	// Audit every remote-routed call (cross-daemon access record),
+	// emitted before the gates so a refusal is auditable too.
+	r.logger.Info("federation: remote-routed call",
+		zap.String("tool", toolName),
+		zap.String("target_slug", slug),
+		zap.String("cwd", route.Cwd),
+		zap.String("session_id", route.SessionID))
 	enabled := route.EnabledRemotes
 	if enabled == nil {
 		// Caller didn't pre-compute; fall back to the router's own
@@ -257,6 +275,18 @@ func (r *Router) callLocal(ctx context.Context, toolName string, body []byte) ([
 		return nil, 0, fmt.Errorf("%w: no local executor wired", ErrRouteUnresolved)
 	}
 	return r.localExecute(ctx, toolName, body)
+}
+
+// callLocalFederated runs the local executor and, for an allowlisted
+// read tool, augments the result with the enabled remotes' results
+// (Option C) — the post-step that lives on the LOCAL path only. The
+// verbatim remote-route path is never federated (no fan-out recursion).
+func (r *Router) callLocalFederated(ctx context.Context, toolName string, body []byte, route RouteContext) ([]byte, int, error) {
+	out, status, err := r.callLocal(ctx, toolName, body)
+	if err != nil || r.federator == nil {
+		return out, status, err
+	}
+	return r.federator.Augment(ctx, toolName, body, out, route.EnabledRemotes), status, nil
 }
 
 // clientFor returns the ServerClient for the given entry, building
