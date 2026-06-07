@@ -41,10 +41,12 @@ func TestFanOut_AuditsAndLogsFailures(t *testing.T) {
 	}, func(e ServerEntry) (*ServerClient, error) { return NewServerClient(e) }, zap.New(core))
 
 	local := envelope(`{"nodes":[],"edges":[],"total_nodes":0,"total_edges":0}`)
-	fed.Augment(context.Background(), "find_usages", []byte(`{}`), local,
+	ctx := withAuditInfo(context.Background(), "/repo", "sess-9")
+	fed.Augment(ctx, "find_usages", []byte(`{}`), local,
 		[]ServerEntry{{Slug: "good", URL: good.URL}, {Slug: "bad", URL: bad.URL}})
 
-	// Audit: one remote-routed call line per remote, tagged via=fan-out.
+	// Audit: one remote-routed call line per remote carrying the full
+	// {session_id, cwd, tool, target_slug} tuple, tagged via=fan-out.
 	audit := logs.FilterMessage("federation: remote-routed call").All()
 	if len(audit) != 2 {
 		t.Fatalf("want 2 fan-out audit lines, got %d", len(audit))
@@ -54,6 +56,9 @@ func TestFanOut_AuditsAndLogsFailures(t *testing.T) {
 		f := e.ContextMap()
 		if f["via"] != "fan-out" || f["tool"] != "find_usages" {
 			t.Errorf("audit line missing via/tool: %v", f)
+		}
+		if f["cwd"] != "/repo" || f["session_id"] != "sess-9" {
+			t.Errorf("audit line missing cwd/session_id tuple: %v", f)
 		}
 		seen[f["target_slug"].(string)] = true
 	}

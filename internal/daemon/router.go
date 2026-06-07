@@ -287,6 +287,9 @@ func (r *Router) callLocalFederated(ctx context.Context, toolName string, body [
 	if err != nil || r.federator == nil {
 		return out, status, err
 	}
+	// Carry the caller's cwd + session id so the fan-out audit records the
+	// same access tuple as the single-remote proxy route.
+	ctx = withAuditInfo(ctx, route.Cwd, route.SessionID)
 	return r.federator.Augment(ctx, toolName, body, out, route.EnabledRemotes), status, nil
 }
 

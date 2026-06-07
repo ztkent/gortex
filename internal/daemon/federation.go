@@ -198,16 +198,20 @@ func (f *Federator) fanOut(ctx context.Context, tool string, body []byte, remote
 			zap.String("reason", reason))
 	}
 
+	audit := auditInfoFrom(ctx)
 	for _, rem := range remotes {
 		rem := rem
 		mu.Lock()
 		meta.RemotesQueried = append(meta.RemotesQueried, rem.Slug)
 		mu.Unlock()
 		// Audit every remote-routed fan-out call (cross-daemon access
-		// record), mirroring the single-remote proxy-routing audit line.
+		// record), carrying the same {session_id, cwd, tool, target_slug}
+		// tuple as the single-remote proxy-routing audit line.
 		f.logger.Info("federation: remote-routed call",
 			zap.String("tool", tool),
 			zap.String("target_slug", rem.Slug),
+			zap.String("cwd", audit.Cwd),
+			zap.String("session_id", audit.SessionID),
 			zap.String("via", "fan-out"))
 
 		if f.breaker.isOpen(rem.Slug) {
