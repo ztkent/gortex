@@ -2,10 +2,12 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"runtime"
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/viper"
 
@@ -967,6 +969,57 @@ type FederationConfig struct {
 	BreakerThreshold   int  `mapstructure:"breaker_threshold" yaml:"breaker_threshold,omitempty"`
 	BreakerCooldownMs  int  `mapstructure:"breaker_cooldown_ms" yaml:"breaker_cooldown_ms,omitempty"`
 	NameKeyedFallback  bool `mapstructure:"name_keyed_fallback" yaml:"name_keyed_fallback,omitempty"`
+	// Edges is the Option-B cross-daemon edge-minting block. Off by
+	// default — federation stays Option-C (read-only fan-out) only.
+	Edges FederationEdgesConfig `mapstructure:"edges" yaml:"edges,omitempty"`
+}
+
+// FederationEdgesConfig is the `federation.edges` block — Option B
+// cross-daemon proxy-node edges (spec-08 / R-FED-5). Research-grade and
+// off by default; none of the mint/hydrate paths run unless IsEnabled().
+type FederationEdgesConfig struct {
+	// Enabled turns on proxy-node minting + lazy hydration.
+	Enabled bool `mapstructure:"enabled" yaml:"enabled,omitempty"`
+	// TTLMs is the proxy-node neighbour-cache TTL in ms (default 5m).
+	TTLMs int `mapstructure:"ttl_ms" yaml:"ttl_ms,omitempty"`
+	// MaxProxyNodes is the hard heap bound across all remotes (default
+	// 5000); overflow refuses the mint (R-NFR-2).
+	MaxProxyNodes int `mapstructure:"max_proxy_nodes" yaml:"max_proxy_nodes,omitempty"`
+	// HydrateDepth is the neighbour rings pulled per access (default 1).
+	HydrateDepth int `mapstructure:"hydrate_depth" yaml:"hydrate_depth,omitempty"`
+}
+
+// IsEnabled reports whether Option-B edges are on, honouring the
+// GORTEX_FEDERATION_EDGES env override (1/true) over the config field.
+func (c FederationEdgesConfig) IsEnabled() bool {
+	if v := strings.TrimSpace(os.Getenv("GORTEX_FEDERATION_EDGES")); v != "" {
+		return v == "1" || strings.EqualFold(v, "true")
+	}
+	return c.Enabled
+}
+
+// TTL is the proxy-node neighbour-cache TTL (default 5m).
+func (c FederationEdgesConfig) TTL() time.Duration {
+	if c.TTLMs > 0 {
+		return time.Duration(c.TTLMs) * time.Millisecond
+	}
+	return 5 * time.Minute
+}
+
+// MaxNodes is the proxy-node heap bound across all remotes (default 5000).
+func (c FederationEdgesConfig) MaxNodes() int {
+	if c.MaxProxyNodes > 0 {
+		return c.MaxProxyNodes
+	}
+	return 5000
+}
+
+// Depth is the neighbour rings pulled per hydration (default 1).
+func (c FederationEdgesConfig) Depth() int {
+	if c.HydrateDepth > 0 {
+		return c.HydrateDepth
+	}
+	return 1
 }
 
 type SearchConfig struct {
