@@ -1,6 +1,9 @@
 package graph
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
 
 type NodeKind string
 
@@ -287,6 +290,22 @@ type Node struct {
 	// encoders, so an editor or agent can open a result directly without
 	// reconstructing the path from repo_prefix + file_path.
 	AbsoluteFilePath string `json:"absolute_file_path,omitempty"`
+
+	// Origin marks a node minted by federation Option B as standing in
+	// for a symbol another daemon owns. "" on every locally-indexed
+	// node; "remote:<slug>" on a proxy node. Written ONLY by the
+	// Option-B mint path; the read-only fan-out (Option C) carries
+	// provenance in the response, never here. Excluded from
+	// graph_stats / BM25 / communities / analyzers (see IsProxyNode).
+	Origin string `json:"origin,omitempty"`
+	// Stub marks a node as a federation proxy placeholder whose
+	// neighbour edges hydrate lazily over /v1/subgraph rather than from
+	// local extraction. Always true together with a non-empty Origin.
+	Stub bool `json:"stub,omitempty"`
+	// FetchedAt is the wall-clock time the proxy node (and its hydrated
+	// ring) was last pulled from the remote — drives the TTL freshness
+	// gate and the federated last_synced field. Zero on local nodes.
+	FetchedAt time.Time `json:"fetched_at,omitempty"`
 }
 
 // Brief returns a compact representation with only the fields needed for listing.
