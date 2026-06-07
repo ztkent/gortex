@@ -206,7 +206,12 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 		// vector index is persisted by the backend itself. Warm
 		// restart reads everything it needs from the on-disk store —
 		// no gob+gzip round-trip required.
-		if state.mcpServer != nil {
+		// Run the shared stack's teardown chain — flushes the savings
+		// store and closes the backend handle (checkpointing the sqlite
+		// WAL) so the daemon shuts down cleanly.
+		if state.shared != nil {
+			_ = state.shared.Close()
+		} else if state.mcpServer != nil {
 			_ = state.mcpServer.FlushSavings()
 		}
 		return nil

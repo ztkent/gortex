@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -14,23 +13,15 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/zzet/gortex/internal/astquery"
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/daemon"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/indexer"
 	gortexmcp "github.com/zzet/gortex/internal/mcp"
-	"github.com/zzet/gortex/internal/parser"
-	"github.com/zzet/gortex/internal/parser/languages"
 	"github.com/zzet/gortex/internal/platform"
 	"github.com/zzet/gortex/internal/progress"
-	"github.com/zzet/gortex/internal/query"
-	"github.com/zzet/gortex/internal/savings"
-	"github.com/zzet/gortex/internal/semantic"
-	"github.com/zzet/gortex/internal/semantic/goanalysis"
 	"github.com/zzet/gortex/internal/semantic/lsp"
-	"github.com/zzet/gortex/internal/semantic/scip"
 	"github.com/zzet/gortex/internal/serverstack"
 )
 
@@ -89,16 +80,15 @@ type daemonState struct {
 	// ResolverHelperRegistry without re-deriving the router from the
 	// semantic manager.
 	lspRouter *lsp.Router
+
+	// overlays is the editor-overlay manager, retained so the HTTP
+	// handler can share the same instance the MCP server uses.
+	overlays *daemon.OverlayManager
+	// shared is the constructed server stack; its Close() runs the
+	// teardown chain (savings flush, backend close) at daemon shutdown.
+	shared *serverstack.SharedServer
 }
 
-// buildDaemonState constructs the full object graph the daemon needs:
-// graph → indexer → multi-indexer → engine → MCP server, plus feedback
-// and savings persistence. Mirrors the setup in runServe() but without
-// stdio transport wiring — the daemon hands frames to MCPServer.HandleMessage
-// via the mcpDispatcher rather than going through server.ServeStdio.
-//
-// Any previously-tracked repos (from ~/.gortex/config.yaml) are
-// loaded on startup so the daemon restarts pick up where it left off.
 // isFalsyEnv returns true when the env var is explicitly set to one
 // of the "no" spellings: "0", "false", "no", "off", "n". An unset or
 // empty env returns false (default-on semantics for opt-out flags).
@@ -122,405 +112,72 @@ func lspDisabledSet(providers []config.SemanticProviderConfig, envVar string) ma
 	return serverstack.LspDisabledSet(providers, envVar)
 }
 
+// buildDaemonState builds the daemon's stack through the shared
+// serverstack constructor, applies the daemon-specific snapshot
+// warm-start (memory backend only), and returns the long-lived
+// daemonState the warmup loop and controller share.
 func buildDaemonState(logger *zap.Logger) (*daemonState, error) {
 	cfg, err := config.Load(cfgFile)
 	if err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
 	}
+	gc, _ := config.LoadGlobal()
 
-	// Load user-defined domain-extractor rules — TOML files of
-	// tree-sitter patterns surfaced through `analyze kind=domain`.
-	for _, pattern := range cfg.RuleFiles {
-		matches, _ := filepath.Glob(pattern)
-		if len(matches) == 0 {
-			matches = []string{pattern}
-		}
-		for _, rp := range matches {
-			if n, lerr := astquery.LoadUserRulesFile(rp); lerr != nil {
-				logger.Warn("daemon: failed to load domain rule file",
-					zap.String("file", rp), zap.Error(lerr))
-			} else if n > 0 {
-				logger.Info("daemon: loaded domain-extractor rules",
-					zap.String("file", rp), zap.Int("rules", n))
-			}
-		}
-	}
-
-	g, backendCleanup, err := openBackend(daemonBackend, daemonBackendPath, resolveDaemonBufferPoolMB(), logger)
+	ss, err := serverstack.NewSharedServer(serverstack.SharedServerConfig{
+		Lifecycle:    serverstack.LifecycleDaemon,
+		Backend:      daemonBackend,
+		BackendPath:  daemonBackendPath,
+		BufferPoolMB: resolveDaemonBufferPoolMB(),
+		Config:       cfg,
+		Global:       gc,
+		Logger:       logger,
+		Version:      version,
+		Embedder: serverstack.EmbedderRequest{
+			FlagChanged: daemonEmbeddingsChanged,
+			FlagEnabled: daemonEmbeddings,
+		},
+		SideStoreKey: "daemon",
+		CacheDir:     platform.DataDir(),
+	})
 	if err != nil {
-		return nil, fmt.Errorf("opening backend %q: %w", daemonBackend, err)
+		return nil, fmt.Errorf("build server stack: %w", err)
 	}
-	// Cleanup runs at daemon shutdown via the returned state's
-	// teardown chain (see DaemonState.Close); store it on the
-	// state so deferred close fires after every other shutdown
-	// step (snapshot save, etc.).
-	defer func() {
-		if err != nil {
-			backendCleanup()
-		}
-	}()
 
-	reg := parser.NewRegistry()
-	languages.RegisterAll(reg)
-	languages.RegisterCustomGrammars(reg, cfg.Index.Grammars, logger)
-	languages.RegisterExtractorPlugins(reg, cfg.Index.ExtractorPlugins, logger)
-	languages.RegisterFallbackChunkers(reg, cfg.Index.FallbackChunkers, logger)
-
-	// Warm-start from snapshot when one exists. Subsequent
-	// ReconcileRepoCtx calls re-index only the files that changed since
-	// the snapshot was written, so restart cost is near-zero on
-	// steady-state repos. The returned per-repo FileMtimes are what
-	// make that incremental path viable — without them, warmup would
-	// have no signal to distinguish "indexed and unchanged" from "new
-	// on disk", treat everything as stale, and produce duplicate
-	// nodes/edges on every restart (bug B1).
-	//
-	// Two snapshot shapes:
-	//
-	//   - Memory backend: full graph replay (loadSnapshot). The
-	//     gob+gzip dump IS the persistence layer; nodes + edges are
-	//     replayed into the empty *graph.Graph.
-	//
-	//   - Persistent backend (sqlite): metadata-only load
-	//     (loadSnapshotMetadata). The graph already lives in the
-	//     backend's own on-disk store, so the snapshot only needs to
-	//     carry the data the backend doesn't track — per-repo
-	//     FileMtimes, contract registries, vector index. Skipping the
-	//     load entirely (the previous behaviour) left priorMtimes
-	//     empty and routed every warm restart through a full
-	//     TrackRepoCtx → BulkUpsertSymbolFTS reindex path.
+	// Snapshot warm-start (memory backend only — the sqlite backend reads
+	// from its own on-disk store and needs no gob replay). Replays
+	// nodes/edges into the graph and carries the per-repo FileMtimes /
+	// contracts / vector index warmup needs. When the snapshot already
+	// holds a dimension-matching vector index, skip re-embedding the whole
+	// graph during warmup; warmupDaemonState restores the cached index.
 	var loadResult snapshotLoadResult
-	if mg, ok := g.(*graph.Graph); ok {
+	if mg, ok := ss.Graph.(*graph.Graph); ok {
 		loadResult, err = loadSnapshot(mg, logger)
 		if err != nil {
 			logger.Warn("daemon: snapshot load failed", zap.Error(err))
 		}
-	}
-	// Disk-backed daemons don't read a metadata snapshot: per-
-	// repo FileMtimes live in the FileMtime sidecar table (loaded
-	// per-repo by priorMtimesFromStore in the parallel_parse loop
-	// below), KindContract nodes carry the rich contract record on
-	// Node.Meta (rehydrated via contracts.LoadRegistryFromGraph),
-	// and vector queries route to the backend's native vector index.
-	// The legacy gob round-trip is now memory-backend-only.
-
-	idx := indexer.New(g, reg, cfg.Index, logger)
-
-	// Locals carrying resolve-time LSP wiring out of the optional
-	// semantic-enrichment block so the daemonState constructor
-	// below sees them whether or not the block ran.
-	var (
-		resolverLSPRegistry *lsp.ResolverHelperRegistry
-		lspRouterOut        *lsp.Router
-	)
-
-	// Semantic enrichment (opt-in via .gortex.yaml `semantic.enabled:
-	// true`). Mirrors the wiring in `gortex mcp` / `gortex server`: a
-	// daemon-managed LSP router owns subprocess lifecycle, SCIP and
-	// goanalysis providers register eagerly, and Manager.SetLSPRouter
-	// installs the bridge so EnrichAll can lazy-spawn LSPs on demand.
-	if cfg.Semantic.Enabled {
-		semCfg := semantic.Config{
-			Enabled:           cfg.Semantic.Enabled,
-			TimeoutSeconds:    cfg.Semantic.TimeoutSeconds,
-			EnrichOnWatch:     cfg.Semantic.EnrichOnWatch,
-			RefuteUnconfirmed: cfg.Semantic.RefuteUnconfirmed,
-		}
-		for _, pc := range cfg.Semantic.Providers {
-			out := semantic.ProviderConfig{
-				Name:      pc.Name,
-				Languages: pc.Languages,
-				Command:   pc.Command,
-				Args:      pc.Args,
-				Env:       pc.Env,
-				Mode:      pc.Mode,
-				Daemon:    pc.Daemon,
-				Priority:  pc.Priority,
-				Enabled:   pc.Enabled,
-			}
-			if pc.Connect != nil {
-				out.Connect = &semantic.ConnectConfig{
-					Network:       pc.Connect.Network,
-					Address:       pc.Connect.Address,
-					FallbackSpawn: pc.Connect.FallbackSpawn,
-				}
-			}
-			semCfg.Providers = append(semCfg.Providers, out)
-		}
-		semMgr := semantic.NewManager(semCfg, logger)
-
-		goProvider := goanalysis.NewProvider(goanalysis.ModeTypeCheck, false, logger)
-		semMgr.RegisterProvider(goProvider)
-		contracts.SetBindingResolver(goProvider)
-
-		lspWorkspace, _ := os.Getwd()
-		lspRouter := lsp.NewRouter(lspWorkspace, logger).
-			WithIdleTimeout(10 * time.Minute).
-			WithReaperInterval(time.Minute).
-			WithMaxAlive(6).
-			WithAdditionalWorkspaceFolders(cfg.Semantic.AdditionalWorkspaceFolders)
-		semMgr.SetLSPRouter(lspRouter)
-
-		for _, pc := range semCfg.Providers {
-			if !pc.Enabled {
-				continue
-			}
-			switch {
-			case strings.HasPrefix(pc.Name, "scip-") && pc.Command != "":
-				scipProv := scip.NewProvider(pc.Command, pc.Args, pc.Languages, semCfg.TimeoutSeconds, logger)
-				// `mode: definitions` selects the definitions-only fast
-				// path — the C# / .NET coverage-helper use case.
-				if pc.Mode == "definitions" {
-					scipProv = scipProv.WithDefinitionsOnly()
-				}
-				semMgr.RegisterProvider(scipProv)
-			case lsp.SpecByName(pc.Name) != nil:
-				// Apply any command / args / env / connect overrides
-				// from .gortex.yaml — this is how a user pins a JRE
-				// for jdtls or wires the IDE-coexistence path that
-				// dials the editor's already-running LSP instead of
-				// spawning a duplicate subprocess.
-				var connect *lsp.ConnectSpec
-				if pc.Connect != nil {
-					connect = &lsp.ConnectSpec{
-						Network:       pc.Connect.Network,
-						Address:       pc.Connect.Address,
-						FallbackSpawn: pc.Connect.FallbackSpawn,
-					}
-				}
-				lspRouter.RegisterSpec(lsp.SpecWithOverridesConnect(
-					lsp.SpecByName(pc.Name), pc.Command, pc.Args, pc.Env, connect))
-			case pc.Daemon:
-				semMgr.RegisterProvider(lsp.NewProvider(pc.Command, pc.Args, pc.Languages, pc.Daemon, pc.MaxParallel, logger))
-			}
-		}
-
-		// Auto-register every known LSP spec whose binary resolves on
-		// PATH. Compiler-grade providers (gopls, tsserver, pyright,
-		// rust-analyzer, clangd, jdtls, …) should be on by default —
-		// users get diagnostics / code actions / find_implementations
-		// without learning the YAML knob, and the lazy-spawn router
-		// keeps cost at "one cached PATH lookup" until a tool actually
-		// calls into a spec. Per-spec opt-out works two ways:
-		//   - .gortex.yaml: `semantic.providers: [{ name: gopls,
-		//     enabled: false }]` — config-side disable.
-		//   - GORTEX_LSP_DISABLE=gopls,tsserver — env-var quick kill.
-		// GORTEX_LSP_DISABLE=all (or =*) disables auto-register
-		// entirely while still honoring the explicit-config loop above.
-		disabled := lspDisabledSet(cfg.Semantic.Providers, os.Getenv("GORTEX_LSP_DISABLE"))
-		var autoRegistered []string
-		if !disabled["__all__"] {
-			autoRegistered = lspRouter.RegisterAvailable(disabled)
-		}
-
-		idx.SetSemanticManager(semMgr)
-
-		// Resolve-time LSP hot path. The resolver consults this
-		// registry for TS/JS/JSX/TSX edges before falling back to AST
-		// heuristics. The registry holds per-repo ResolverHelpers
-		// (built lazily from the same router that backs the enricher
-		// path), so the daemon honours the same disable knobs and
-		// PATH-availability semantics as the enricher. Disabled when
-		// GORTEX_LSP_RESOLVER=0/false/no (env-var quick kill) or when
-		// every TS-family spec is explicitly opted out via
-		// GORTEX_LSP_DISABLE.
-		if !isFalsyEnv("GORTEX_LSP_RESOLVER") {
-			resolverLSPRegistry = lsp.NewResolverHelperRegistry()
-			lspRouterOut = lspRouter
-			idx.SetResolverLSPHelper(resolverLSPRegistry)
-			logger.Info("daemon: resolve-time LSP hot path enabled")
-		} else {
-			logger.Info("daemon: resolve-time LSP hot path disabled (GORTEX_LSP_RESOLVER=0)")
-		}
-
-		logger.Info("daemon: semantic enrichment enabled",
-			zap.Int("providers", len(semCfg.Providers)),
-			zap.Strings("lsp_auto_registered", autoRegistered))
-	}
-
-	// Embeddings on the daemon follow the precedence explicit flag/env
-	// > `embedding:` config > default. The default is semantic search
-	// ON with the static GloVe provider — it needs zero download and
-	// is CPU-only, so the zero-config promise still holds. An explicit
-	// opt-in to the transformer backend (`provider: local`, or
-	// GORTEX_EMBEDDINGS with no config) still pays the ~87 MB MiniLM
-	// download on first use and the per-symbol warmup cost; static is
-	// the default precisely to avoid that.
-	embedder, embDesc, embErr := resolveEmbedder(embedderRequest{
-		FlagChanged: daemonEmbeddingsChanged,
-		FlagEnabled: daemonEmbeddings,
-	}, cfg)
-	switch {
-	case embErr != nil:
-		logger.Warn("daemon: embeddings requested but unavailable", zap.Error(embErr))
-	case embedder != nil:
-		logger.Info("daemon: embeddings enabled",
-			zap.String("provider", embDesc),
-			zap.Int("dim", embedder.Dimensions()))
-	default:
-		logger.Info("daemon: embeddings disabled — set embedding.enabled: false in config, or pass --embeddings / GORTEX_EMBEDDINGS to override")
-	}
-	if embedder != nil {
-		idx.SetEmbedder(embedder)
-		idx.SetEmbeddingChunkOptions(embeddingChunkOptions(cfg))
-		idx.SetEmbeddingMaxSymbols(cfg.Embedding.MaxSymbols)
-		idx.SetEmbeddingAPIConcurrency(cfg.Embedding.APIConcurrency)
-	}
-
-	cm, err := config.NewConfigManager("")
-	if err != nil {
-		logger.Warn("daemon: could not load global config", zap.Error(err))
-	}
-
-	var mi *indexer.MultiIndexer
-	if cm != nil {
-		mi = indexer.NewMultiIndexer(g, reg, idx.Search(), cm, logger)
-		// Without this, every per-repo Indexer created inside TrackRepoCtx
-		// has embedder=nil and buildSearchIndex skips the vector pass —
-		// daemon-tracked repos end up with text-only search.
-		if embedder != nil {
-			mi.SetEmbedder(embedder)
-			mi.SetEmbeddingChunkOptions(embeddingChunkOptions(cfg))
-			mi.SetEmbeddingMaxSymbols(cfg.Embedding.MaxSymbols)
-			mi.SetEmbeddingAPIConcurrency(cfg.Embedding.APIConcurrency)
-			// When the snapshot already carries the workspace vector
-			// index and its dimensionality matches the active embedder,
-			// run the warmup re-index with vector building skipped —
-			// warmupDaemonState restores the cached index in one shot
-			// afterwards. Re-embedding the whole graph only to overwrite
-			// it with the cache is the dominant default-on restart cost.
-			vec := loadResult.Vector
-			if len(vec.Index) > 0 && vec.Dims == embedder.Dimensions() {
-				mi.SetSkipVectorBuild(true)
+		if ss.MultiIndexer != nil {
+			if vec := loadResult.Vector; len(vec.Index) > 0 && vec.Dims == ss.EmbedderDims {
+				ss.MultiIndexer.SetSkipVectorBuild(true)
 				logger.Info("daemon: snapshot carries vector index — warmup will restore it instead of re-embedding",
-					zap.Int("vectors", vec.Count),
-					zap.Int("dims", vec.Dims))
-			}
-		}
-		// Propagate the resolve-time LSP helper so every per-repo
-		// Indexer constructed by the MultiIndexer's warmup /
-		// TrackRepoCtx / ReconcileRepoCtx paths participates in the
-		// resolve-time LSP path (and so the global post-pass resolver
-		// in RunDeferredPassesAll picks up LSP precision too).
-		if resolverLSPRegistry != nil {
-			mi.SetResolverLSPHelper(resolverLSPRegistry)
-
-			// Install a per-track hook so runtime-tracked repos
-			// (via the track_repository MCP tool) also register
-			// a per-repo helper without requiring a daemon
-			// restart. The hook is a no-op when no tsserver is
-			// on PATH.
-			if lspRouterOut != nil {
-				routerRef := lspRouterOut
-				registryRef := resolverLSPRegistry
-				poolSize := lsp.ResolverPoolSizeFromEnv(1)
-				mi.SetOnRepoTracked(func(prefix, absPath string) {
-					tsSpec := lsp.SpecByName("typescript-language-server")
-					if tsSpec == nil || !routerRef.Available(tsSpec) {
-						return
-					}
-					if !repoLikelyHasTypeScriptIntent(absPath) {
-						return
-					}
-					absRootCapture := absPath
-					helper := buildResolverLSPHelper(routerRef, tsSpec, absRootCapture, poolSize, logger)
-					registryRef.Register(prefix, helper)
-				})
+					zap.Int("vectors", vec.Count), zap.Int("dims", vec.Dims))
 			}
 		}
 	}
-
-	// MCP server wiring. Multi-repo options are passed only when a
-	// ConfigManager is available — otherwise the server runs in
-	// single-repo mode and multi-repo tools return errors.
-	var multiOpts []gortexmcp.MultiRepoOptions
-	if mi != nil || cm != nil {
-		multiOpts = append(multiOpts, gortexmcp.MultiRepoOptions{
-			MultiIndexer:  mi,
-			ConfigManager: cm,
-			ActiveProject: "",
-		})
-	}
-
-	eng := query.NewEngine(g)
-	eng.SetSearchProvider(idx.Search)
-	eng.ApplyRerankWeights(cfg.Search.Weights)
-	gortexmcp.Version = version
-	srv := gortexmcp.NewServer(eng, g, idx, nil, logger, cfg.Guards.Rules, multiOpts...)
-	srv.SetArchitecture(cfg.Architecture)
-	srv.SetArtifacts(cfg.Artifacts)
-	srv.SetNamedQueries(cfg.Queries)
-	srv.SetSearchConfig(cfg.Search)
-
-	// Editor-overlay manager. Idle TTL resolved via
-	// GORTEX_OVERLAY_IDLE_TTL > daemon.DefaultOverlayIdleTTL (30m).
-	// Server.ReleaseSession (called on MCP-client disconnect) drops
-	// the overlay synchronously, so the TTL is only the fallback
-	// path for missed disconnects.
-	overlays := daemon.NewOverlayManager(daemon.OverlayIdleTTLFromEnv(0))
-	srv.SetOverlayManager(overlays)
-
-	// Semantic manager, feedback, savings — same wiring as runServe.
-	if semMgr := idx.SemanticManager(); semMgr != nil {
-		srv.SetSemanticManager(semMgr)
-		srv.SetLSPDiagnosticsBroadcasting()
-	}
-	srv.InitFeedback("", "")
-	// Daemon mode has no single repo to anchor the per-repo side-stores
-	// against, but notes/memories must still persist across daemon
-	// restarts and compactions (they are independent of the graph
-	// backend). Wire them to the shared sidecar DB under the data dir
-	// with a stable "daemon" partition key; per-call WorkspaceID /
-	// SessionID filtering keeps repos' notes distinct at query time.
-	// The per-repo `gortex mcp` subprocess persists under its own
-	// cache dir (cmd/gortex/mcp.go).
-	srv.InitNotes(platform.DataDir(), "daemon")
-	srv.InitMemories(platform.DataDir(), "daemon")
-	// Notebook: a global notebook under the data dir so entries survive
-	// daemon restarts and are shared across sessions; CLI mode keeps the
-	// per-repo .gortex/ path wired in cmd/gortex/mcp.go.
-	srv.InitNotebook(filepath.Join(platform.DataDir(), "notebook-cache"))
-	srv.InitCombo("", "", gortexmcp.ModeAI)
-	srv.InitFrecency("", "", gortexmcp.ModeAI)
-
-	if savingsStore, err := savings.Open(savings.DefaultPath()); err == nil {
-		srv.InitSavings(savingsStore, "")
-	} else {
-		logger.Warn("daemon: savings persistence disabled", zap.Error(err))
-	}
-
-	// LLM service (opt-in via the `.gortex.yaml` `llm:` block,
-	// `~/.gortex/config.yaml::llm:`, or GORTEX_LLM_* env vars).
-	// Repo-local config wins per non-zero field; the global config
-	// fills the rest; env overrides land last inside SetupLLM via
-	// MergeEnv. The active provider is chosen by `llm.provider`
-	// (local / anthropic / openai / ollama / claudecli / gemini /
-	// bedrock / deepseek). No-op when the active provider has no model
-	// configured; a provider that fails to construct (e.g. "local"
-	// without `-tags llama`, a missing API key, "claudecli" without
-	// the `claude` binary on PATH, "bedrock" without AWS creds) is logged and
-	// the service stays disabled.
-	gc, _ := config.LoadGlobal()
-	srv.SetupLLM(gc.MergeLLMInto(cfg.LLM))
-
-	// MultiWatcher is created in warmupDaemonState after tracked repos
-	// have been re-indexed — NewMultiWatcher needs mi.AllMetadata() to be
-	// populated to attach per-repo watchers. Until then, multiWatcher is
-	// nil; queries still work, but file edits don't flow into the graph
-	// for the few seconds warmup takes.
 
 	return &daemonState{
-		graph:               g,
-		indexer:             idx,
-		multiIndexer:        mi,
-		configManager:       cm,
-		mcpServer:           srv,
+		graph:               ss.Graph,
+		indexer:             ss.Indexer,
+		multiIndexer:        ss.MultiIndexer,
+		configManager:       ss.ConfigMgr,
+		mcpServer:           ss.MCP,
+		overlays:            ss.Overlays,
+		shared:              ss,
 		snapshotRepos:       loadResult.Repos,
 		snapshotContracts:   loadResult.Contracts,
 		snapshotPartial:     loadResult.Partial,
 		snapshotVector:      loadResult.Vector,
-		resolverLSPRegistry: resolverLSPRegistry,
-		lspRouter:           lspRouterOut,
+		resolverLSPRegistry: ss.ResolverLSPRegistry,
+		lspRouter:           ss.LSPRouter,
 	}, nil
 }
 

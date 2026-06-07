@@ -90,6 +90,10 @@ type SharedServer struct {
 	MCP          *gortexmcp.Server
 	ConfigMgr    *config.ConfigManager
 	Overlays     *daemon.OverlayManager
+	// EmbedderDims is the active embedder's vector dimensionality, or 0
+	// when embeddings are off. The entry point's snapshot warm-start
+	// compares it to a snapshot's vector dims before skipping a re-embed.
+	EmbedderDims int
 
 	// ResolverLSPRegistry / LSPRouter are the resolve-time LSP wiring the
 	// entry point's warmup hooks reference; nil when semantic enrichment
@@ -283,6 +287,7 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 		idx.SetEmbeddingChunkOptions(EmbeddingChunkOptions(conf))
 		idx.SetEmbeddingMaxSymbols(conf.Embedding.MaxSymbols)
 		idx.SetEmbeddingAPIConcurrency(conf.Embedding.APIConcurrency)
+		s.EmbedderDims = embedder.Dimensions()
 	}
 
 	cm, err := config.NewConfigManager("")
