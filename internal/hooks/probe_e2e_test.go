@@ -31,6 +31,9 @@ func (f *fakeController) Untrack(_ context.Context, _ daemon.UntrackParams) (jso
 func (f *fakeController) Reload(_ context.Context) (json.RawMessage, error) {
 	return json.RawMessage(`{}`), nil
 }
+func (f *fakeController) ReloadServers(_ context.Context) (json.RawMessage, error) {
+	return json.RawMessage(`{}`), nil
+}
 func (f *fakeController) Status(_ context.Context) (daemon.StatusResponse, error) {
 	return daemon.StatusResponse{}, nil
 }
