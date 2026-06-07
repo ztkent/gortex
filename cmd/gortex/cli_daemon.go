@@ -59,7 +59,12 @@ func buildToolCallFrame(id int, tool string, args map[string]any) ([]byte, error
 	if args == nil {
 		args = map[string]any{}
 	}
-	args["format"] = "json"
+	// Default to JSON, but honour a caller-provided format (e.g.
+	// mermaid / dot for diagram output) so the CLI can request the
+	// daemon's other renderers.
+	if _, ok := args["format"]; !ok {
+		args["format"] = "json"
+	}
 	return json.Marshal(map[string]any{
 		"jsonrpc": "2.0",
 		"id":      id,

@@ -27,7 +27,7 @@ var queryCmd = &cobra.Command{
 func init() {
 	queryCmd.PersistentFlags().StringVar(&queryIndex, "index", ".", "repository path the daemon must track")
 	queryCmd.PersistentFlags().IntVar(&queryDepth, "depth", 3, "traversal depth")
-	queryCmd.PersistentFlags().StringVar(&queryFormat, "format", "text", "output format: text|json")
+	queryCmd.PersistentFlags().StringVar(&queryFormat, "format", "text", "output format: text|json (traversal queries also support dot|mermaid)")
 	queryCmd.PersistentFlags().IntVar(&queryLimit, "limit", 50, "max nodes in result")
 
 	queryCmd.AddCommand(querySymbolCmd)
@@ -147,6 +147,26 @@ func printDaemonSubgraph(cmd *cobra.Command, raw json.RawMessage) error {
 	return nil
 }
 
+// emitSubgraph runs a graph traversal tool and renders it per --format.
+// text/json go through the node-list renderer; dot/mermaid ask the daemon
+// for the diagram directly (its query.SubGraph already knows how to draw
+// itself) and print it verbatim.
+func emitSubgraph(cmd *cobra.Command, repoPath, tool string, args map[string]any) error {
+	diagram := queryFormat == "dot" || queryFormat == "mermaid"
+	if diagram {
+		args["format"] = queryFormat
+	}
+	out, err := requireDaemonTool(repoPath, tool, args)
+	if err != nil {
+		return err
+	}
+	if diagram {
+		_, _ = fmt.Fprintln(cmd.OutOrStdout(), string(out))
+		return nil
+	}
+	return printDaemonSubgraph(cmd, out)
+}
+
 func printDaemonStats(cmd *cobra.Command, raw json.RawMessage) error {
 	if queryFormat == "json" {
 		return emitDaemonJSON(cmd, raw)
@@ -196,12 +216,8 @@ var queryDepsCmd = &cobra.Command{
 	Short: "Show dependencies of a symbol",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		out, err := requireDaemonTool(queryIndex, "get_dependencies",
+		return emitSubgraph(cmd, queryIndex, "get_dependencies",
 			map[string]any{"id": args[0], "depth": queryDepth, "limit": queryLimit})
-		if err != nil {
-			return err
-		}
-		return printDaemonSubgraph(cmd, out)
 	},
 }
 
@@ -210,12 +226,8 @@ var queryDependentsCmd = &cobra.Command{
 	Short: "Show blast radius for a symbol",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		out, err := requireDaemonTool(queryIndex, "get_dependents",
+		return emitSubgraph(cmd, queryIndex, "get_dependents",
 			map[string]any{"id": args[0], "depth": queryDepth, "limit": queryLimit})
-		if err != nil {
-			return err
-		}
-		return printDaemonSubgraph(cmd, out)
 	},
 }
 
@@ -224,12 +236,8 @@ var queryCallersCmd = &cobra.Command{
 	Short: "Show who calls a function",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		out, err := requireDaemonTool(queryIndex, "get_callers",
+		return emitSubgraph(cmd, queryIndex, "get_callers",
 			map[string]any{"id": args[0], "depth": queryDepth, "limit": queryLimit})
-		if err != nil {
-			return err
-		}
-		return printDaemonSubgraph(cmd, out)
 	},
 }
 
@@ -238,12 +246,8 @@ var queryCallsCmd = &cobra.Command{
 	Short: "Show what a function calls",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		out, err := requireDaemonTool(queryIndex, "get_call_chain",
+		return emitSubgraph(cmd, queryIndex, "get_call_chain",
 			map[string]any{"id": args[0], "depth": queryDepth, "limit": queryLimit})
-		if err != nil {
-			return err
-		}
-		return printDaemonSubgraph(cmd, out)
 	},
 }
 
@@ -252,12 +256,8 @@ var queryImplementationsCmd = &cobra.Command{
 	Short: "Show implementations of an interface",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		out, err := requireDaemonTool(queryIndex, "find_implementations",
+		return emitSubgraph(cmd, queryIndex, "find_implementations",
 			map[string]any{"id": args[0]})
-		if err != nil {
-			return err
-		}
-		return printDaemonSubgraph(cmd, out)
 	},
 }
 
@@ -266,12 +266,8 @@ var queryUsagesCmd = &cobra.Command{
 	Short: "Show all usages of a symbol",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		out, err := requireDaemonTool(queryIndex, "find_usages",
+		return emitSubgraph(cmd, queryIndex, "find_usages",
 			map[string]any{"id": args[0], "limit": queryLimit})
-		if err != nil {
-			return err
-		}
-		return printDaemonSubgraph(cmd, out)
 	},
 }
 

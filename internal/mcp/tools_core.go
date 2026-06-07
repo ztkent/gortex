@@ -172,6 +172,15 @@ func (s *Server) returnSubGraph(ctx context.Context, req mcp.CallToolRequest, sg
 	// format below surfaces an openable path. The canonical graph nodes
 	// are copied, never mutated.
 	sg.Nodes = s.withAbsPaths(sg.Nodes)
+	// Diagram formats render the subgraph directly — one place serves
+	// every traversal tool (callers/dependencies/usages/...), so a
+	// `gortex query ... --format mermaid|dot` gets a real diagram.
+	switch req.GetString("format", "") {
+	case "mermaid":
+		return mcp.NewToolResultText(sg.ToMermaid()), nil
+	case "dot":
+		return mcp.NewToolResultText(sg.ToDot()), nil
+	}
 	if isCompact(req) {
 		return mcp.NewToolResultText(compactSubGraph(sg)), nil
 	}
