@@ -80,6 +80,17 @@ type SharedServerConfig struct {
 	SideStores     SideStores
 	ScopeWorkspace string
 	ScopeProject   string
+	// ActiveProject names the project the MCP server should start scoped
+	// to (multi-repo mode hint). Empty leaves it unset.
+	ActiveProject string
+	// SemanticMode selects the goanalysis provider mode: "callgraph"
+	// builds the call graph; anything else (default) type-checks.
+	SemanticMode string
+	// SavingsPath overrides the token-savings store path; empty uses the
+	// default (~/.gortex/cache/savings.json). SavingsRepo scopes the
+	// accumulated totals (empty = workspace-global).
+	SavingsPath string
+	SavingsRepo string
 }
 
 // SideStores configures where the agent-authored knowledge stores
@@ -229,6 +240,7 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 			Enabled:           conf.Semantic.Enabled,
 			TimeoutSeconds:    conf.Semantic.TimeoutSeconds,
 			EnrichOnWatch:     conf.Semantic.EnrichOnWatch,
+			WatchDebounceMs:   conf.Semantic.WatchDebounceMs,
 			RefuteUnconfirmed: conf.Semantic.RefuteUnconfirmed,
 		}
 		for _, pc := range conf.Semantic.Providers {
@@ -254,7 +266,11 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 		}
 		semMgr := semantic.NewManager(semCfg, logger)
 
-		goProvider := goanalysis.NewProvider(goanalysis.ModeTypeCheck, false, logger)
+		goMode := goanalysis.ModeTypeCheck
+		if cfg.SemanticMode == "callgraph" {
+			goMode = goanalysis.ModeCallGraph
+		}
+		goProvider := goanalysis.NewProvider(goMode, false, logger)
 		semMgr.RegisterProvider(goProvider)
 		contracts.SetBindingResolver(goProvider)
 
@@ -308,6 +324,19 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 			s.ResolverLSPRegistry = lsp.NewResolverHelperRegistry()
 			s.LSPRouter = lspRouter
 			idx.SetResolverLSPHelper(s.ResolverLSPRegistry)
+			// Single-repo standalone mode: anchor a "" prefix helper at
+			// the workspace the server points at. Only fires when Index is
+			// set (the embedded path); the daemon leaves Index empty and
+			// registers per-repo helpers via the OnRepoTracked hook.
+			if cfg.Index != "" {
+				if abs, aerr := filepath.Abs(cfg.Index); aerr == nil {
+					tsSpec := lsp.SpecByName("typescript-language-server")
+					if tsSpec != nil && lspRouter.Available(tsSpec) && RepoLikelyHasTypeScriptIntent(abs) {
+						helper := BuildResolverLSPHelper(lspRouter, tsSpec, abs, lsp.ResolverPoolSizeFromEnv(1), logger)
+						s.ResolverLSPRegistry.Register("", helper)
+					}
+				}
+			}
 			logger.Info("serverstack: resolve-time LSP hot path enabled")
 		} else {
 			logger.Info("serverstack: resolve-time LSP hot path disabled (GORTEX_LSP_RESOLVER=0)")
@@ -381,7 +410,7 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 		multiOpts = append(multiOpts, gortexmcp.MultiRepoOptions{
 			MultiIndexer:   mi,
 			ConfigManager:  cm,
-			ActiveProject:  "",
+			ActiveProject:  cfg.ActiveProject,
 			ScopeWorkspace: cfg.ScopeWorkspace,
 			ScopeProject:   cfg.ScopeProject,
 		})
@@ -419,8 +448,12 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 	srv.InitCombo(sideCfg.FeedbackDir, sideCfg.FeedbackRepo, gortexmcp.ModeAI)
 	srv.InitFrecency(sideCfg.FeedbackDir, sideCfg.FeedbackRepo, gortexmcp.ModeAI)
 
-	if savingsStore, err := savings.Open(savings.DefaultPath()); err == nil {
-		srv.InitSavings(savingsStore, "")
+	savingsPath := cfg.SavingsPath
+	if savingsPath == "" {
+		savingsPath = savings.DefaultPath()
+	}
+	if savingsStore, err := savings.Open(savingsPath); err == nil {
+		srv.InitSavings(savingsStore, cfg.SavingsRepo)
 		s.cleanup = append(s.cleanup, func() { _ = srv.FlushSavings() })
 	} else {
 		logger.Warn("serverstack: savings persistence disabled", zap.Error(err))
