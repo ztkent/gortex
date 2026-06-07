@@ -134,12 +134,14 @@ func describeFields(t reflect.Type) string {
 func wireContractGolden(name string) string {
 	switch name {
 	case "graph.Node":
-		// Bumped when AbsoluteFilePath was added — a per-response
-		// decoration (empty on the canonical node, populated only on the
-		// copies MCP result encoders serialise). Additive: gob decodes
-		// unknown fields as zero, so older snapshots still load with it
-		// blank. Previously bumped when WorkspaceID / ProjectID were added.
-		return "b04bc4f58977e8220d31fdbf3fdab66867ab76790d6724bdabaf80b87958a7a4"
+		// Bumped when the federation proxy-node fields Origin / Stub /
+		// FetchedAt were added — written only by the (gated, not-yet-built)
+		// cross-daemon mint path; empty on every locally-indexed node.
+		// Additive: gob decodes unknown fields as zero, so older snapshots
+		// still load with them blank, and proxy nodes are never persisted.
+		// Previously bumped when AbsoluteFilePath, then WorkspaceID /
+		// ProjectID, were added.
+		return "3b8920ab88d05028e215d68d5917445e2e6d05bdad23aef6dcdf6c9920647823"
 	case "graph.Edge":
 		// Bumped when Context was added — the per-reference role label
 		// (parameter_type / return_type / field / …) populated on demand by
