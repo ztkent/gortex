@@ -181,6 +181,20 @@ func (w *Watcher) Start(paths []string) error {
 		return errors.New("watcher: no paths to watch")
 	}
 	ready := make(chan struct{})
+	// Own the events/dropped channels so the library never closes them on
+	// teardown. fswatcher's shutdown closes its events channel while its
+	// EventAggregator goroutine may still be flushing a final event into
+	// it — a "send on closed channel" panic under -race on the Linux
+	// inotify path (the aggregator's close() does not join its run loop).
+	// When we supply the channels, ownsEventsChannel is false and the
+	// library skips the close; the aggregator's send is already
+	// non-blocking, so a late flush lands harmlessly in our buffer (or
+	// the dropped channel) and our loop still exits on its own stop
+	// signal, not on the channel closing. Buffer sizes match the
+	// library's defaults so coalescing behaviour is unchanged.
+	droppedSize := max(fswatcher.DefaultBufferSize/fswatcher.MaxDroppedBufferRatio, fswatcher.MinDroppedBuffer)
+	fswEvents := make(chan fswatcher.WatchEvent, fswatcher.DefaultBufferSize)
+	fswDropped := make(chan fswatcher.WatchEvent, droppedSize)
 	opts := []fswatcher.WatcherOpt{
 		// Disable fswatcher's internal debouncer. Its mergeEvents path
 		// mutates the Types backing array of an already-delivered event
@@ -195,6 +209,9 @@ func (w *Watcher) Start(paths []string) error {
 		// Without this the first events after Start race against
 		// stream registration and silently disappear.
 		fswatcher.WithReadyChannel(ready),
+		// We own the channels (see above) — eliminates the teardown
+		// send-on-closed-channel race.
+		fswatcher.WithCustomChannels(fswEvents, fswDropped),
 	}
 	absPaths := make([]string, 0, len(paths))
 	for _, p := range paths {
