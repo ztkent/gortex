@@ -2803,6 +2803,10 @@ func (idx *Indexer) indexFile(filePath string, resolve bool) error {
 				detectClonesAndEmitEdges(idx.graph, idx.repoPrefix, idx.cloneThreshold())
 			}
 		}
+		// Persist this file's resolved-reference facts to the durable sidecar
+		// (delete-then-set so removed references don't linger). No-op on the
+		// in-memory backend.
+		idx.persistRefFactsForFiles([]string{graphPath})
 	}
 
 	// Update mtime for this file. relPath is already the canonical
@@ -2938,6 +2942,10 @@ func (idx *Indexer) ResolveAll() {
 	// and returns_to placeholders join cleanly against the
 	// now-resolved EdgeCalls edge at the same caller+line.
 	idx.materializeDataflowParams()
+
+	// Seed the durable reference-facts sidecar from the fully-resolved graph
+	// (no-op on the in-memory backend).
+	idx.persistAllRefFacts()
 }
 
 // EvictFile removes all nodes and edges belonging to filePath.
@@ -2964,6 +2972,7 @@ func (idx *Indexer) EvictFile(filePath string) (int, int) {
 	}
 	idx.restubIncomingRefs(graphPath)
 	idx.evictEnrichment(graphPath)
+	idx.deleteRefFactsForFiles(idx.repoPrefix, []string{graphPath})
 	return idx.graph.EvictFile(graphPath)
 }
 

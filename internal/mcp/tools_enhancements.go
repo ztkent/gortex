@@ -760,6 +760,8 @@ func (s *Server) handleAnalyze(ctx context.Context, req mcp.CallToolRequest) (*m
 		return s.handleAnalyzeIndirectMutations(ctx, req)
 	case "speculative":
 		return s.handleAnalyzeSpeculative(ctx, req)
+	case "ref_facts":
+		return s.handleAnalyzeRefFacts(ctx, req)
 	case "race_writes":
 		return s.handleAnalyzeRaceWrites(ctx, req)
 	case "unclosed_channels":

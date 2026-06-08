@@ -470,6 +470,86 @@ func (s *Server) handleAnalyzeSpeculative(ctx context.Context, req mcp.CallToolR
 	})
 }
 
+// handleAnalyzeRefFacts surfaces resolved-reference facts — each reference edge
+// that resolved to a concrete target, with the provenance tier that resolved
+// it. The durable form is the backend's ref_facts sidecar; this read derives
+// the same facts from the live graph (backend-agnostic). With `id` it scopes to
+// references originating in one file.
+func (s *Server) handleAnalyzeRefFacts(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := req.GetArguments()
+	fileFilter := strings.TrimSpace(stringArg(args, "id"))
+	if fileFilter == "" {
+		fileFilter = strings.TrimSpace(stringArg(args, "path"))
+	}
+	limit := 200
+	if v, ok := args["limit"].(float64); ok && v > 0 {
+		limit = int(v)
+	}
+
+	type fact struct {
+		From    string `json:"from"`
+		To      string `json:"to"`
+		Kind    string `json:"kind"`
+		RefName string `json:"ref_name,omitempty"`
+		Origin  string `json:"origin,omitempty"`
+		Tier    string `json:"tier,omitempty"`
+		File    string `json:"file,omitempty"`
+	}
+
+	var nodes []*graph.Node
+	if fileFilter != "" {
+		nodes = s.graph.GetFileNodes(fileFilter)
+	} else {
+		for _, k := range []graph.NodeKind{graph.KindFunction, graph.KindMethod} {
+			for n := range s.graph.NodesByKind(k) {
+				nodes = append(nodes, n)
+			}
+		}
+	}
+
+	var facts []fact
+	truncated := false
+	for _, n := range nodes {
+		if n == nil {
+			continue
+		}
+		for _, e := range s.graph.GetOutEdges(n.ID) {
+			if e == nil || !graph.IsResolvableRefEdge(e.Kind) {
+				continue
+			}
+			if e.To == "" || graph.IsUnresolvedTarget(e.To) || graph.IsStub(e.To) {
+				continue
+			}
+			refName := ""
+			if t := s.graph.GetNode(e.To); t != nil {
+				refName = t.Name
+			}
+			origin := e.Origin
+			if origin == "" {
+				sem, _ := e.Meta["semantic_source"].(string)
+				origin = graph.DefaultOriginFor(e.Kind, e.Confidence, sem)
+			}
+			facts = append(facts, fact{
+				From: e.From, To: e.To, Kind: string(e.Kind), RefName: refName,
+				Origin: origin, Tier: graph.ResolvedBy(origin), File: n.FilePath,
+			})
+			if len(facts) >= limit {
+				truncated = true
+				break
+			}
+		}
+		if truncated {
+			break
+		}
+	}
+
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
+		"facts":     facts,
+		"total":     len(facts),
+		"truncated": truncated,
+	})
+}
+
 // ---------------------------------------------------------------------------
 // annotation_users — for an annotation node id (or list all when no
 // id), surface annotated symbols.
