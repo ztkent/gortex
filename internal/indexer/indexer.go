@@ -756,6 +756,13 @@ func (idx *Indexer) RunGlobalGraphPasses(ctx context.Context) {
 			zap.Int("edges", extCalls),
 		)
 	}
+	// Speculative dynamic-dispatch synthesis (opt-in, default off). Mints
+	// best-guess hidden-by-default call edges for blind-spot shapes.
+	if spec := resolver.ResolveSpeculativeDispatch(idx.graph, idx.speculativeDispatchEnabled()); spec > 0 {
+		idx.logger.Info("speculative dispatch edges synthesized (global)",
+			zap.Int("edges", spec),
+		)
+	}
 	// Cross-repo edge layer. Runs after InferImplements / InferOverrides
 	// so cross-repo implements / extends edges pick up their parallel
 	// cross_repo_* edges. No-op on single-repo graphs (no RepoPrefix).
@@ -2496,6 +2503,11 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 					zap.Int("edges", extCalls),
 				)
 			}
+			if spec := resolver.ResolveSpeculativeDispatch(idx.graph, idx.speculativeDispatchEnabled()); spec > 0 {
+				idx.logger.Info("speculative dispatch edges synthesized",
+					zap.Int("edges", spec),
+				)
+			}
 			// Reachability index — used to be precomputed for every
 			// impact seed here. The eager pass was retired because the
 			// breakeven was untenable on monorepo graphs (k8s:
@@ -2919,6 +2931,7 @@ func (idx *Indexer) ResolveAll() {
 	// resolver and stub passes so only genuinely un-indexed external
 	// targets remain to materialise.
 	resolver.SynthesizeExternalCalls(idx.graph, idx.externalCallSynthesisEnabled())
+	resolver.ResolveSpeculativeDispatch(idx.graph, idx.speculativeDispatchEnabled())
 	// CPG-lite dataflow rewriting must run after the call resolver
 	// has lifted unresolved:: targets; arg_of edges then point at
 	// real function/method nodes whose param nodes can be found,

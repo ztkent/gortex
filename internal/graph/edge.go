@@ -600,7 +600,17 @@ const (
 	OriginASTResolved = "ast_resolved"
 	OriginASTInferred = "ast_inferred"
 	OriginTextMatched = "text_matched"
+	// OriginSpeculative ranks strictly below text_matched: a best-guess
+	// dynamic-dispatch edge (obj[name]() / getattr / decorator registry) that
+	// is present-but-hidden-by-default. Always carries Meta[MetaSpeculative]=true
+	// so queries exclude it unless the caller opts in.
+	OriginSpeculative = "speculative"
 )
+
+// MetaSpeculative is the edge Meta key marking a speculative (best-guess)
+// edge. It is the single source of truth for default-exclusion: any
+// edge-returning surface drops these unless the caller opts in.
+const MetaSpeculative = "speculative"
 
 // OriginRank returns a numeric rank for origin comparison. Higher = more
 // confident. Unknown or empty origin returns 0 so it sorts below all known
@@ -608,17 +618,29 @@ const (
 func OriginRank(origin string) int {
 	switch origin {
 	case OriginLSPResolved:
-		return 5
+		return 6
 	case OriginLSPDispatch:
-		return 4
+		return 5
 	case OriginASTResolved:
-		return 3
+		return 4
 	case OriginASTInferred:
-		return 2
+		return 3
 	case OriginTextMatched:
+		return 2
+	case OriginSpeculative:
 		return 1
 	}
 	return 0
+}
+
+// IsSpeculative reports whether the edge is a best-guess speculative edge
+// (excluded from default query results).
+func (e *Edge) IsSpeculative() bool {
+	if e == nil || e.Meta == nil {
+		return false
+	}
+	v, _ := e.Meta[MetaSpeculative].(bool)
+	return v
 }
 
 // MeetsMinTier returns true when origin is at least as confident as minTier.

@@ -413,6 +413,63 @@ func (s *Server) handleAnalyzeIndirectMutations(ctx context.Context, req mcp.Cal
 	})
 }
 
+// handleAnalyzeSpeculative is the audit surface for opt-in speculative
+// dynamic-dispatch edges: it groups the best-guess call edges (Meta
+// speculative=true) by their shape (computed_member / getattr / …) with a
+// candidate-count histogram and samples, so an agent can review what the
+// best-guess synthesizer produced before trusting any of it.
+func (s *Server) handleAnalyzeSpeculative(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	type sample struct {
+		From           string `json:"from"`
+		To             string `json:"to"`
+		CandidateCount int    `json:"candidate_count,omitempty"`
+		Confidence     string `json:"confidence,omitempty"`
+	}
+	type shapeRow struct {
+		Shape   string   `json:"shape"`
+		Edges   int      `json:"edges"`
+		Samples []sample `json:"samples,omitempty"`
+	}
+	byShape := map[string]*shapeRow{}
+	total := 0
+	for e := range edgesByKinds(s.graph, graph.EdgeCalls) {
+		if !e.IsSpeculative() {
+			continue
+		}
+		total++
+		shape, _ := e.Meta["via"].(string)
+		shape = strings.TrimPrefix(shape, "speculative.")
+		if shape == "" {
+			shape = "unknown"
+		}
+		row, ok := byShape[shape]
+		if !ok {
+			row = &shapeRow{Shape: shape}
+			byShape[shape] = row
+		}
+		row.Edges++
+		if len(row.Samples) < 10 {
+			cc, _ := e.Meta["candidate_count"].(int)
+			row.Samples = append(row.Samples, sample{From: e.From, To: e.To, CandidateCount: cc, Confidence: e.ConfidenceLabel})
+		}
+	}
+	rows := make([]*shapeRow, 0, len(byShape))
+	for _, r := range byShape {
+		rows = append(rows, r)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Edges != rows[j].Edges {
+			return rows[i].Edges > rows[j].Edges
+		}
+		return rows[i].Shape < rows[j].Shape
+	})
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
+		"shapes": rows,
+		"total":  total,
+		"note":   "speculative edges are best-guess fan-outs, hidden from default queries; pass include_speculative:true to surface them",
+	})
+}
+
 // ---------------------------------------------------------------------------
 // annotation_users — for an annotation node id (or list all when no
 // id), surface annotated symbols.

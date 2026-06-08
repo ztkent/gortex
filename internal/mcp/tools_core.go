@@ -31,6 +31,12 @@ const minTierParamDescription = "Filter edges by minimum confidence tier. " +
 	"text_matched (name-only). Omit for no filter. " +
 	"Use lsp_resolved for high-stakes refactors where false positives are expensive."
 
+const includeSpeculativeParamDescription = "Include best-guess speculative " +
+	"dynamic-dispatch edges (computed-member calls like obj[name](), getattr, " +
+	"decorator registries). Default false — these are hidden low-confidence " +
+	"fan-outs minted only when synthesize_speculative_dispatch is enabled; " +
+	"set true to surface them (each carries candidate_count + a speculative tier)."
+
 // isCompact checks if the compact flag is set in the request.
 func isCompact(req mcp.CallToolRequest) bool {
 	if v, ok := req.GetArguments()["compact"].(bool); ok {
@@ -844,6 +850,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
 			mcp.WithNumber("max_bytes", mcp.Description("Cap the marshaled response at this many bytes. The longest list is trimmed; truncation metadata rides on the response. Omit for no cap.")),
 			mcp.WithString("min_tier", mcp.Description(minTierParamDescription)),
+			mcp.WithBoolean("include_speculative", mcp.Description(includeSpeculativeParamDescription)),
 		),
 		s.handleGetDependencies,
 	)
@@ -858,6 +865,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
 			mcp.WithNumber("max_bytes", mcp.Description("Cap the marshaled response at this many bytes. The longest list is trimmed; truncation metadata rides on the response. Omit for no cap.")),
 			mcp.WithString("min_tier", mcp.Description(minTierParamDescription)),
+			mcp.WithBoolean("include_speculative", mcp.Description(includeSpeculativeParamDescription)),
 		),
 		s.handleGetDependents,
 	)
@@ -876,6 +884,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithString("project", mcp.Description("Filter results to repositories in a specific project")),
 			mcp.WithString("ref", mcp.Description("Filter results to repositories with a specific reference tag")),
 			mcp.WithString("min_tier", mcp.Description(minTierParamDescription)),
+			mcp.WithBoolean("include_speculative", mcp.Description(includeSpeculativeParamDescription)),
 		),
 		s.handleGetCallChain,
 	)
@@ -890,6 +899,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
 			mcp.WithNumber("max_bytes", mcp.Description("Cap the marshaled response at this many bytes. The longest list is trimmed; truncation metadata rides on the response. Omit for no cap.")),
 			mcp.WithString("min_tier", mcp.Description(minTierParamDescription)),
+			mcp.WithBoolean("include_speculative", mcp.Description(includeSpeculativeParamDescription)),
 			mcp.WithBoolean("exclude_tests", mcp.Description("Drop callers originating in test functions (set true when you want production callers only)")),
 		),
 		s.handleGetCallers,
@@ -902,6 +912,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
 			mcp.WithNumber("max_bytes", mcp.Description("Cap the marshaled response at this many bytes. The longest list is trimmed; truncation metadata rides on the response. Omit for no cap.")),
 			mcp.WithString("min_tier", mcp.Description(minTierParamDescription)),
+			mcp.WithBoolean("include_speculative", mcp.Description(includeSpeculativeParamDescription)),
 		),
 		s.handleFindImplementations,
 	)
@@ -914,6 +925,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
 			mcp.WithNumber("max_bytes", mcp.Description("Cap the marshaled response at this many bytes. The longest list is trimmed; truncation metadata rides on the response. Omit for no cap.")),
 			mcp.WithString("min_tier", mcp.Description(minTierParamDescription)),
+			mcp.WithBoolean("include_speculative", mcp.Description(includeSpeculativeParamDescription)),
 		),
 		s.handleFindOverrides,
 	)
@@ -928,6 +940,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
 			mcp.WithNumber("max_bytes", mcp.Description("Cap the marshaled response at this many bytes. The longest list is trimmed; truncation metadata rides on the response. Omit for no cap.")),
 			mcp.WithString("min_tier", mcp.Description(minTierParamDescription)),
+			mcp.WithBoolean("include_speculative", mcp.Description(includeSpeculativeParamDescription)),
 		),
 		s.handleGetClassHierarchy,
 	)
@@ -945,6 +958,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithString("project", mcp.Description("Filter results to repositories in a specific project")),
 			mcp.WithString("ref", mcp.Description("Filter results to repositories with a specific reference tag")),
 			mcp.WithString("min_tier", mcp.Description(minTierParamDescription)),
+			mcp.WithBoolean("include_speculative", mcp.Description(includeSpeculativeParamDescription)),
 			mcp.WithBoolean("exclude_tests", mcp.Description("Drop references originating in test functions (set true to see only production usages)")),
 			mcp.WithString("group_by", mcp.Description("Set to \"file\" to bucket the usages by the file each reference originates in -- each group carries the per-file use count and the enclosing symbol of every reference. Omit for the default flat result.")),
 			mcp.WithString("context", mcp.Description("Filter usages by their reference context — the role the symbol plays at each site: parameter_type, return_type, field, value, type, attribute, generic_arg, or call. Every returned usage also carries its classified context. Omit for all usages.")),
@@ -1889,6 +1903,7 @@ func (s *Server) handleGetDependencies(ctx context.Context, req mcp.CallToolRequ
 	}
 	sg := s.engineFor(ctx).GetDependencies(id, opts)
 	sg.FilterByMinTier(minTier)
+	sg.FilterSpeculative(req.GetBool("include_speculative", false))
 	enrichSubGraphEdges(sg)
 	return s.returnSubGraph(ctx, req, sg)
 }
@@ -1910,6 +1925,7 @@ func (s *Server) handleGetDependents(ctx context.Context, req mcp.CallToolReques
 	}
 	sg := s.engineFor(ctx).GetDependents(id, opts)
 	sg.FilterByMinTier(minTier)
+	sg.FilterSpeculative(req.GetBool("include_speculative", false))
 	enrichSubGraphEdges(sg)
 	return s.returnSubGraph(ctx, req, sg)
 }
@@ -1939,6 +1955,7 @@ func (s *Server) handleGetCallChain(ctx context.Context, req mcp.CallToolRequest
 	}
 	sg = filterSubGraph(sg, allowed)
 	sg.FilterByMinTier(minTier)
+	sg.FilterSpeculative(req.GetBool("include_speculative", false))
 	enrichSubGraphEdges(sg)
 	annotateProxyFreshness(sg)
 	return s.returnSubGraph(ctx, req, sg)
@@ -1963,6 +1980,7 @@ func (s *Server) handleGetCallers(ctx context.Context, req mcp.CallToolRequest) 
 	s.hydrateProxyTargets(ctx, id)
 	sg := s.engineFor(ctx).GetCallers(id, opts)
 	sg.FilterByMinTier(minTier)
+	sg.FilterSpeculative(req.GetBool("include_speculative", false))
 	enrichSubGraphEdges(sg)
 	annotateCallerConcurrency(s.engineFor(ctx).Reader(), sg, id)
 	if len(sg.Edges) == 0 {
@@ -2149,6 +2167,7 @@ func (s *Server) handleFindUsages(ctx context.Context, req mcp.CallToolRequest) 
 	}
 	sg = filterSubGraph(sg, allowed)
 	sg.FilterByMinTier(minTier)
+	sg.FilterSpeculative(req.GetBool("include_speculative", false))
 	enrichSubGraphEdges(sg)
 	// Classify each usage's reference context (parameter_type / return_type
 	// / field / value / type / attribute / call) and optionally filter to

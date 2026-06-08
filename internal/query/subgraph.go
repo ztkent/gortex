@@ -240,6 +240,23 @@ func (sg *SubGraph) FilterByMinTier(minTier string) {
 	sg.Edges = kept
 }
 
+// FilterSpeculative drops best-guess speculative edges (Meta[speculative]=true)
+// unless include is true. Called with include=false by default on every
+// edge-returning query, so speculative dynamic-dispatch edges never pollute a
+// default result — they are opt-in only.
+func (sg *SubGraph) FilterSpeculative(include bool) {
+	if include || sg == nil {
+		return
+	}
+	kept := sg.Edges[:0]
+	for _, e := range sg.Edges {
+		if !e.IsSpeculative() {
+			kept = append(kept, e)
+		}
+	}
+	sg.Edges = kept
+}
+
 // ToDot returns a Graphviz DOT representation of the subgraph.
 func (sg *SubGraph) ToDot() string {
 	var b strings.Builder

@@ -64,6 +64,7 @@ const (
 	SynthRustScope    = "rust-scope"
 	SynthSQLCallsite  = "sql-callsite"
 	SynthStoreFactory = "store-factory"
+	SynthSpeculative  = "speculative-dispatch"
 )
 
 // StampSynthesized marks an edge as the product of a framework

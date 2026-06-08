@@ -522,6 +522,16 @@ type IndexConfig struct {
 	// stdlib calls are filtered out regardless so the synthetic nodes
 	// only ever name genuine third-party packages.
 	SynthesizeExternalCalls *bool `mapstructure:"synthesize_external_calls" yaml:"synthesize_external_calls,omitempty"`
+	// SynthesizeSpeculativeDispatch mints opt-in, best-guess `calls` edges for
+	// dynamic-dispatch blind spots (computed-member calls obj["foo"](),
+	// getattr, decorator registries). Unlike external-call synthesis it
+	// DEFAULTS OFF (tri-state, nil = off) because the edges are heuristic
+	// fan-outs; when on they ride a strictly-lower confidence tier and are
+	// hidden from every default query (opt in per query with
+	// include_speculative, or audit via `analyze kind=speculative`). Enable
+	// per-repo with `.gortex.yaml::index::synthesize_speculative_dispatch:
+	// true` or the GORTEX_SYNTH_SPECULATIVE=1 environment override.
+	SynthesizeSpeculativeDispatch *bool `mapstructure:"synthesize_speculative_dispatch" yaml:"synthesize_speculative_dispatch,omitempty"`
 	// Transforms are pluggable pre-ingestion content processors. Each
 	// rewrites a matching file's bytes before the parser sees them —
 	// expanding minified bundles, normalising SVG/TOON, converting a
@@ -1279,6 +1289,18 @@ func (i IndexConfig) ExternalCallSynthesisEnabledOrDefault() bool {
 		return true
 	}
 	return *i.SynthesizeExternalCalls
+}
+
+// SpeculativeDispatchEnabledOrDefault resolves the tri-state
+// SynthesizeSpeculativeDispatch flag against a default-OFF policy: an unset
+// flag means speculative dynamic-dispatch synthesis is disabled (the edges are
+// heuristic fan-outs, opt-in only). Enable per-repo with the key set to true
+// or GORTEX_SYNTH_SPECULATIVE=1.
+func (i IndexConfig) SpeculativeDispatchEnabledOrDefault() bool {
+	if i.SynthesizeSpeculativeDispatch == nil {
+		return false
+	}
+	return *i.SynthesizeSpeculativeDispatch
 }
 
 // EmbeddingProviderOrDefault returns the configured provider name,
