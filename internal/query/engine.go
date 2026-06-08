@@ -1060,6 +1060,13 @@ func (e *Engine) bfs(nodeID string, opts QueryOptions, forward bool, edgeKinds [
 	var allEdges []*graph.Edge
 	truncated := false
 
+	// On a forward call-graph walk, record dropped dynamic-dispatch /
+	// unresolved out-edges as epistemic boundaries so get_call_chain can flag
+	// the reachable set as a floor rather than silently undercounting.
+	recordBoundaries := forward && !bidir && kindSet[graph.EdgeCalls]
+	var boundaries []graph.EpistemicBoundary
+	boundarySeen := map[string]bool{}
+
 	if n := e.g.GetNode(nodeID); n != nil {
 		// The seed always enters the result, regardless of scope —
 		// callers ask "what reaches X" with X already in mind. The
@@ -1074,8 +1081,29 @@ func (e *Engine) bfs(nodeID string, opts QueryOptions, forward bool, edgeKinds [
 	// of edge structs), then admits a new, in-scope, non-test neighbour
 	// and returns its id to enqueue ("" = skip).
 	admit := func(edge *graph.Edge, neighborID string, neighbor *graph.Node) string {
-		// Skip unresolved/external targets.
+		// Skip unresolved/external targets — but on a call-graph walk, record
+		// the dropped dynamic-dispatch / external target as an epistemic
+		// boundary first, so the reachable set is honestly flagged as a floor.
 		if graph.IsUnresolvedTarget(neighborID) || strings.HasPrefix(neighborID, "external::") {
+			if recordBoundaries && edge != nil {
+				if reason, ok := graph.ClassifyDroppedTarget(neighborID, edge.Kind); ok {
+					key := edge.From + "\x00" + neighborID
+					if !boundarySeen[key] && len(boundaries) < 50 {
+						boundarySeen[key] = true
+						target := neighborID
+						if graph.IsUnresolvedTarget(neighborID) {
+							target = graph.UnresolvedName(neighborID)
+						}
+						boundaries = append(boundaries, graph.EpistemicBoundary{
+							SeedID:    edge.From,
+							Target:    target,
+							EdgeKind:  string(edge.Kind),
+							Reason:    reason,
+							Direction: "callees",
+						})
+					}
+				}
+			}
 			return ""
 		}
 		// Once the node budget is full, stop recording edges too: the
@@ -1217,6 +1245,10 @@ func (e *Engine) bfs(nodeID string, opts QueryOptions, forward bool, edgeKinds [
 		TotalNodes: len(visited),
 		TotalEdges: len(allEdges),
 		Truncated:  truncated,
+	}
+	if len(boundaries) > 0 {
+		sg.Boundaries = boundaries
+		sg.LowerBound = graph.LowerBoundCaveat(boundaries)
 	}
 
 	if opts.Detail == "brief" {

@@ -44,6 +44,13 @@ type SubGraph struct {
 	// for a purely-local result, so a caller can see how fresh the
 	// remote-derived part of the answer is.
 	LastSynced *time.Time `json:"last_synced,omitempty"`
+	// LowerBound is set by call-graph traversals (get_call_chain) when the
+	// walk dropped one or more dynamic-dispatch / unresolved out-edges: the
+	// reachable set is then a floor, not exhaustive. Omitted when false.
+	LowerBound bool `json:"lower_bound,omitempty"`
+	// Boundaries names the unresolved/dispatch sites that made the result a
+	// floor. Populated only by call-graph traversals; omitted when empty.
+	Boundaries []graph.EpistemicBoundary `json:"boundaries,omitempty"`
 }
 
 // QueryOptions controls traversal depth, result limits, and detail level.

@@ -1968,6 +1968,13 @@ func (s *Server) handleGetCallers(ctx context.Context, req mcp.CallToolRequest) 
 	if len(sg.Edges) == 0 {
 		sg.Caveat = graph.CaveatForZeroEdge(s.graph, id)
 	}
+	// Epistemic lower bound: a caller walk over in-edges cannot see callers
+	// that reach this symbol through interface dispatch the resolver left
+	// unbound. Flag the floor + name the interface so the agent can widen it.
+	if bs := graph.CallerBoundaries(s.graph, []string{id}, 0); len(bs) > 0 {
+		sg.Boundaries = bs
+		sg.LowerBound = graph.LowerBoundCaveat(bs)
+	}
 	annotateProxyFreshness(sg)
 	return s.returnSubGraph(ctx, req, sg)
 }

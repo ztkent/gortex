@@ -308,6 +308,17 @@ func (s *Server) handleEnhancedChangeImpact(ctx context.Context, req mcp.CallToo
 		result["by_repo"] = impact.ByRepo
 	}
 
+	// Epistemic lower bound: the affected count is a floor when the blast
+	// radius crosses a dynamic-dispatch / interface site the resolver could
+	// not bind. Surface the flag + the boundary list so an agent knows
+	// ">=N, could be more" and can act on each named site.
+	if impact.LowerBound {
+		result["lower_bound"] = true
+	}
+	if len(impact.Boundaries) > 0 {
+		result["boundaries"] = impact.Boundaries
+	}
+
 	// When the blast radius is empty, an agent cannot tell genuinely
 	// safe-to-change symbols apart from symbols the extractor never
 	// wired up. Classify each input so a safety gate is not disarmed

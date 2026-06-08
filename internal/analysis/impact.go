@@ -41,6 +41,14 @@ type ImpactResult struct {
 	TotalAffected       int                      `json:"total_affected"`
 	CrossRepoImpact     bool                     `json:"cross_repo_impact,omitempty"`
 	ByRepo              map[string][]ImpactEntry `json:"by_repo,omitempty"`
+	// LowerBound is set when the blast radius crosses a dynamic-dispatch /
+	// interface site the resolver could not bind: the true affected count is
+	// then a floor (">=TotalAffected, could be more"), not an exact number.
+	LowerBound bool `json:"lower_bound,omitempty"`
+	// Boundaries names the unresolved/dispatch sites that make the count a
+	// floor, so an agent can act on them (e.g. find_implementations on the
+	// interface). Omitted when empty.
+	Boundaries []graph.EpistemicBoundary `json:"boundaries,omitempty"`
 }
 
 // AnalyzeImpact performs depth-tiered blast radius analysis on a set of symbols.
@@ -139,11 +147,23 @@ func AnalyzeImpact(g graph.Store, symbolIDs []string, communities *CommunityResu
 		sort.Strings(result.AffectedCommunities)
 	}
 
+	// Epistemic lower bound: blast radius is a count of *callers*, so a seed
+	// that implements/overrides an interface may be reached through dynamic
+	// dispatch the resolver could not attribute — the count is then a floor.
+	result.Boundaries = graph.CallerBoundaries(g, symbolIDs, 0)
+	result.LowerBound = graph.LowerBoundCaveat(result.Boundaries)
+
 	// Summary
 	result.Summary = fmt.Sprintf(
 		"%d direct dependents, %d transitively affected, %d test files, risk: %s",
 		d1, result.TotalAffected, len(result.TestFiles), result.Risk,
 	)
+	if result.LowerBound {
+		result.Summary += fmt.Sprintf(
+			" — lower bound: %d dispatch boundary(ies) may add more callers",
+			len(result.Boundaries),
+		)
+	}
 
 	// Group affected symbols by RepoPrefix and detect cross-repo impact.
 	repoSet := make(map[string]bool)
