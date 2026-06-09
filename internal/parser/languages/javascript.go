@@ -2,6 +2,7 @@ package languages
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
@@ -243,6 +244,22 @@ func (e *JavaScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 		})
 	}
 
+	// Store-factory destructuring: `const {a,b} = useStore.getState()` binds
+	// later bare `a()` / `b()` calls to the store's actions.
+	destructured := map[string]string{} // local action name → store binding
+	for _, dm := range jsDestructureGetStateRE.FindAllStringSubmatch(string(src), -1) {
+		binding := dm[2]
+		for _, nm := range strings.Split(dm[1], ",") {
+			nm = strings.TrimSpace(nm)
+			if i := strings.IndexByte(nm, ':'); i >= 0 { // {a: alias} → key on alias
+				nm = strings.TrimSpace(nm[i+1:])
+			}
+			if nm != "" {
+				destructured[nm] = binding
+			}
+		}
+	}
+
 	// Resolve calls against funcRanges.
 	funcRanges := buildFuncRanges(result)
 	for _, c := range calls {
@@ -267,9 +284,43 @@ func (e *JavaScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 					continue
 				}
 			}
+			// Store-factory chained call: `useStore.getState().action()`.
+			if binding, ok := jsParseGetStateChain(c.receiver); ok {
+				if memberID := objLiteralMembers[binding][c.name]; memberID != "" {
+					result.Edges = append(result.Edges, &graph.Edge{
+						From: callerID, To: memberID,
+						Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
+						Origin: graph.OriginASTResolved, Confidence: 0.9,
+					})
+					continue
+				}
+				result.Edges = append(result.Edges, &graph.Edge{
+					From: callerID, To: "unresolved::*." + c.name,
+					Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
+					Meta: map[string]any{"via": "store-factory", "store_binding": binding, "store_action": c.name},
+				})
+				continue
+			}
 			result.Edges = append(result.Edges, &graph.Edge{
 				From: callerID, To: "unresolved::*." + c.name,
 				Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
+			})
+			continue
+		}
+		// Store-factory destructured call: `const {a}=useStore.getState(); a()`.
+		if binding, ok := destructured[c.name]; ok {
+			if memberID := objLiteralMembers[binding][c.name]; memberID != "" {
+				result.Edges = append(result.Edges, &graph.Edge{
+					From: callerID, To: memberID,
+					Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
+					Origin: graph.OriginASTResolved, Confidence: 0.9,
+				})
+				continue
+			}
+			result.Edges = append(result.Edges, &graph.Edge{
+				From: callerID, To: "unresolved::" + c.name,
+				Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
+				Meta: map[string]any{"via": "store-factory", "store_binding": binding, "store_action": c.name},
 			})
 			continue
 		}
@@ -482,6 +533,12 @@ func (e *JavaScriptExtractor) emitObjectLiteralMethod(m parser.QueryResult, file
 		return "", "", ""
 	}
 	owner = jsObjectOwnerName(def.Node, src)
+	storeFactory := ""
+	if owner == "" || jsIsStoreOptionKey(owner) {
+		if b, _, ok := jsStoreFactoryBinding(def.Node, src); ok {
+			owner, storeFactory = b, b
+		}
+	}
 	name := member
 	if owner != "" {
 		name = owner + "." + member
@@ -491,6 +548,10 @@ func (e *JavaScriptExtractor) emitObjectLiteralMethod(m parser.QueryResult, file
 		ID: id, Kind: graph.KindFunction, Name: name,
 		FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
 		Language: "javascript", Meta: map[string]any{"signature": fmt.Sprintf("%s()", name)},
+	}
+	if storeFactory != "" {
+		node.Meta["store_factory"] = storeFactory
+		node.Meta["store_member"] = member
 	}
 	result.Nodes = append(result.Nodes, node)
 	result.Edges = append(result.Edges, &graph.Edge{
@@ -522,6 +583,12 @@ func (e *JavaScriptExtractor) emitObjectArrowField(m parser.QueryResult, filePat
 		return "", "", ""
 	}
 	owner = jsObjectOwnerName(def.Node, src)
+	storeFactory := ""
+	if owner == "" || jsIsStoreOptionKey(owner) {
+		if b, _, ok := jsStoreFactoryBinding(def.Node, src); ok {
+			owner, storeFactory = b, b
+		}
+	}
 	name := member
 	if owner != "" {
 		name = owner + "." + member
@@ -531,6 +598,10 @@ func (e *JavaScriptExtractor) emitObjectArrowField(m parser.QueryResult, filePat
 		ID: id, Kind: graph.KindFunction, Name: name,
 		FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
 		Language: "javascript", Meta: map[string]any{"signature": fmt.Sprintf("%s: () =>", name)},
+	}
+	if storeFactory != "" {
+		node.Meta["store_factory"] = storeFactory
+		node.Meta["store_member"] = member
 	}
 	result.Nodes = append(result.Nodes, node)
 	result.Edges = append(result.Edges, &graph.Edge{

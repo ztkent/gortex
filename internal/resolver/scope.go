@@ -112,6 +112,27 @@ func scopeArgTypeHints(m map[string]any) []string {
 	return out
 }
 
+// scopePositionalArgHints decodes MetaScopeArgTypes preserving argument
+// positions (unlike scopeArgTypeHints, which drops empties for ADL). A "?"
+// placeholder — an argument the extractor could not type — decodes to "" so the
+// overload ranker treats that slot as unknown (compatible with any parameter).
+func scopePositionalArgHints(m map[string]any) []string {
+	raw := scopeMetaString(m, MetaScopeArgTypes)
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, len(parts))
+	for i, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "?" {
+			p = ""
+		}
+		out[i] = p
+	}
+	return out
+}
+
 // scopeUseAliases decodes the MetaScopeUseAliases payload into a
 // map of (local-alias → fully-qualified target). Empty when the file
 // has no `use function` declarations.
@@ -201,6 +222,14 @@ func (r *Resolver) preferCStaticCandidate(e *graph.Edge, caller *graph.Node, can
 //  2. ADL: walk each scope_arg_types entry's namespace.
 //  3. Fall through to the generic cascade.
 func (r *Resolver) preferCppScopeCandidate(e *graph.Edge, caller *graph.Node, name string, candidates []*graph.Node) *graph.Node {
+	// In-engine overload resolution first: rank the candidates by C++ arity +
+	// implicit-conversion-sequence and pick the best-viable. Returns nil to
+	// DEGRADE to the namespace cascade when it cannot decide (no signatures,
+	// no viable candidate, or genuine ambiguity), so it never binds a wrong
+	// overload.
+	if best := ResolveCppOverload(scopePositionalArgHints(e.Meta), candidates); best != nil {
+		return best
+	}
 	callerNs := scopeMetaString(caller.Meta, MetaScopeNamespace)
 	if callerNs != "" {
 		for _, c := range candidates {

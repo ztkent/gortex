@@ -44,6 +44,13 @@ type SubGraph struct {
 	// for a purely-local result, so a caller can see how fresh the
 	// remote-derived part of the answer is.
 	LastSynced *time.Time `json:"last_synced,omitempty"`
+	// LowerBound is set by call-graph traversals (get_call_chain) when the
+	// walk dropped one or more dynamic-dispatch / unresolved out-edges: the
+	// reachable set is then a floor, not exhaustive. Omitted when false.
+	LowerBound bool `json:"lower_bound,omitempty"`
+	// Boundaries names the unresolved/dispatch sites that made the result a
+	// floor. Populated only by call-graph traversals; omitted when empty.
+	Boundaries []graph.EpistemicBoundary `json:"boundaries,omitempty"`
 }
 
 // QueryOptions controls traversal depth, result limits, and detail level.
@@ -227,6 +234,23 @@ func (sg *SubGraph) FilterByMinTier(minTier string) {
 			origin = graph.DefaultOriginFor(e.Kind, e.Confidence, src)
 		}
 		if graph.MeetsMinTier(origin, minTier) {
+			kept = append(kept, e)
+		}
+	}
+	sg.Edges = kept
+}
+
+// FilterSpeculative drops best-guess speculative edges (Meta[speculative]=true)
+// unless include is true. Called with include=false by default on every
+// edge-returning query, so speculative dynamic-dispatch edges never pollute a
+// default result — they are opt-in only.
+func (sg *SubGraph) FilterSpeculative(include bool) {
+	if include || sg == nil {
+		return
+	}
+	kept := sg.Edges[:0]
+	for _, e := range sg.Edges {
+		if !e.IsSpeculative() {
 			kept = append(kept, e)
 		}
 	}

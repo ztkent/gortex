@@ -434,6 +434,11 @@ func encodeSubGraph(tool string, sg *query.SubGraph) ([]byte, error) {
 	if sg.StoppedAtDepth > 0 {
 		nodeMeta = append(nodeMeta, "stopped_at_depth", fmt.Sprintf("%d", sg.StoppedAtDepth))
 	}
+	// Epistemic lower-bound flag rides the node meta only when set, so a
+	// result with no dispatch boundary keeps its wire shape byte-for-byte.
+	if sg.LowerBound {
+		nodeMeta = append(nodeMeta, "lower_bound", boolString(sg.LowerBound))
+	}
 	nodeEnc := newGCX(&buf, tool+".nodes",
 		[]string{"id", "kind", "name", "path", "path_abs", "line", "is_test", "test_role", "test_runner"},
 		nodeMeta...,
@@ -473,27 +478,47 @@ func encodeSubGraph(tool string, sg *query.SubGraph) ([]byte, error) {
 	if err := edgeEnc.Close(); err != nil {
 		return nil, err
 	}
-	if len(sg.CallerNotes) == 0 {
-		return buf.Bytes(), nil
-	}
-	// caller_notes — one row per caller carrying a concurrency flag.
-	// Rows are sorted by node ID so the wire output is deterministic.
-	noteIDs := make([]string, 0, len(sg.CallerNotes))
-	for id := range sg.CallerNotes {
-		noteIDs = append(noteIDs, id)
-	}
-	sort.Strings(noteIDs)
-	noteEnc := newGCX(&buf, tool+".caller_notes",
-		[]string{"id", "sync_guarded", "sync_guarded_why", "cross_concurrent", "cross_concurrent_why"},
-		"count", fmt.Sprintf("%d", len(noteIDs)),
-	)
-	for _, id := range noteIDs {
-		a := sg.CallerNotes[id]
-		if err := noteEnc.WriteRow(id, a.SyncGuarded, a.SyncGuardedWhy, a.CrossConcurrent, a.CrossConcurrentWhy); err != nil {
+	// caller_notes — one row per caller carrying a concurrency flag. Emitted
+	// only when get_callers attached annotations, so other traversal tools'
+	// wire output is byte-identical to before.
+	if len(sg.CallerNotes) > 0 {
+		noteIDs := make([]string, 0, len(sg.CallerNotes))
+		for id := range sg.CallerNotes {
+			noteIDs = append(noteIDs, id)
+		}
+		sort.Strings(noteIDs)
+		noteEnc := newGCX(&buf, tool+".caller_notes",
+			[]string{"id", "sync_guarded", "sync_guarded_why", "cross_concurrent", "cross_concurrent_why"},
+			"count", fmt.Sprintf("%d", len(noteIDs)),
+		)
+		for _, id := range noteIDs {
+			a := sg.CallerNotes[id]
+			if err := noteEnc.WriteRow(id, a.SyncGuarded, a.SyncGuardedWhy, a.CrossConcurrent, a.CrossConcurrentWhy); err != nil {
+				return nil, err
+			}
+		}
+		if err := noteEnc.Close(); err != nil {
 			return nil, err
 		}
 	}
-	return buf.Bytes(), noteEnc.Close()
+	// boundaries — the epistemic lower-bound diagnosis. Emitted only when the
+	// walk crossed a dynamic-dispatch / unresolved site, so results with none
+	// keep their existing wire bytes.
+	if len(sg.Boundaries) > 0 {
+		bEnc := newGCX(&buf, tool+".boundaries",
+			[]string{"seed_id", "target", "edge_kind", "reason", "direction"},
+			"count", fmt.Sprintf("%d", len(sg.Boundaries)),
+		)
+		for _, b := range sg.Boundaries {
+			if err := bEnc.WriteRow(b.SeedID, b.Target, b.EdgeKind, string(b.Reason), b.Direction); err != nil {
+				return nil, err
+			}
+		}
+		if err := bEnc.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return buf.Bytes(), nil
 }
 
 // encodeFileSummary emits one row per symbol in a file plus a trailing
@@ -1628,7 +1653,87 @@ func encodeChangeImpact(result map[string]any) ([]byte, error) {
 			return nil, err
 		}
 	}
+
+	// boundaries — the epistemic lower-bound diagnosis. Emitted only when the
+	// blast radius crossed a dynamic-dispatch / interface site, so results
+	// with none keep their existing wire bytes. The section's presence (and
+	// its lower_bound meta flag) signals the count is a floor.
+	if boundaries, ok := result["boundaries"].([]graph.EpistemicBoundary); ok && len(boundaries) > 0 {
+		lb, _ := result["lower_bound"].(bool)
+		bEnc := newGCX(&buf, "explain_change_impact.boundaries",
+			[]string{"seed_id", "seed_name", "target", "edge_kind", "reason", "direction"},
+			"count", fmt.Sprintf("%d", len(boundaries)),
+			"lower_bound", boolString(lb),
+		)
+		for _, b := range boundaries {
+			if err := bEnc.WriteRow(b.SeedID, b.SeedName, b.Target, b.EdgeKind, string(b.Reason), b.Direction); err != nil {
+				return nil, err
+			}
+		}
+		if err := bEnc.Close(); err != nil {
+			return nil, err
+		}
+	}
 	return buf.Bytes(), nil
+}
+
+// encodeAPIImpact emits the fused route report as three GCX sections:
+// api_impact.routes (one row per route), api_impact.consumers and
+// api_impact.mismatches (one row each, carrying the route id so they regroup).
+func encodeAPIImpact(reports []apiImpactReport) ([]byte, error) {
+	var buf bytes.Buffer
+	routeEnc := newGCX(&buf, "api_impact.routes",
+		[]string{"route", "method", "path", "handler", "repo", "response_success", "response_error", "middleware", "risk", "direct_consumers", "affected_callers", "affected_flows", "test_files", "warning", "contract_risk_upgrade"},
+		"count", fmt.Sprintf("%d", len(reports)),
+	)
+	for _, r := range reports {
+		mw := strings.Join(r.Middleware, ",")
+		if mw == "" {
+			mw = r.MiddlewareDetection
+		}
+		if err := routeEnc.WriteRow(
+			r.Route, r.Method, r.Path, r.Handler, r.Repo,
+			strings.Join(r.ResponseShape.Success, ","),
+			strings.Join(r.ResponseShape.Error, ","),
+			mw,
+			r.ImpactSummary.RiskLevel,
+			r.ImpactSummary.DirectConsumers,
+			r.ImpactSummary.AffectedCallers,
+			r.ImpactSummary.AffectedFlows,
+			strings.Join(r.ImpactSummary.TestFilesToRun, ","),
+			r.ImpactSummary.Warning,
+			r.ImpactSummary.ContractRiskUpgrade,
+		); err != nil {
+			return nil, err
+		}
+	}
+	if err := routeEnc.Close(); err != nil {
+		return nil, err
+	}
+
+	consEnc := newGCX(&buf, "api_impact.consumers",
+		[]string{"route", "name", "file", "repo", "accesses", "attribution_note"})
+	for _, r := range reports {
+		for _, c := range r.Consumers {
+			if err := consEnc.WriteRow(r.Route, c.Name, c.File, c.Repo, strings.Join(c.Accesses, ","), c.AttributionNote); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if err := consEnc.Close(); err != nil {
+		return nil, err
+	}
+
+	mmEnc := newGCX(&buf, "api_impact.mismatches",
+		[]string{"route", "consumer", "field", "reason", "confidence"})
+	for _, r := range reports {
+		for _, m := range r.Mismatches {
+			if err := mmEnc.WriteRow(r.Route, m.Consumer, m.Field, m.Reason, m.Confidence); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return buf.Bytes(), mmEnc.Close()
 }
 
 // encodeCheckGuards emits one row per guard violation. The empty case

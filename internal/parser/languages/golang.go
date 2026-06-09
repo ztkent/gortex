@@ -591,6 +591,19 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 		return t, ok
 	}
 
+	// recvNameByID maps a method node ID to its receiver variable name, so a
+	// selector call can be classified as invoked on the method's own receiver
+	// (s.counter.Increment() / s.helper()) — the basis for indirect
+	// receiver-field-mutation attribution.
+	recvNameByID := map[string]string{}
+	for _, n := range result.Nodes {
+		if n.Kind == graph.KindMethod && n.Meta != nil {
+			if rn, _ := n.Meta["recv_name"].(string); rn != "" {
+				recvNameByID[n.ID] = rn
+			}
+		}
+	}
+
 	// --- Calls ---
 	for _, c := range calls {
 		callerID := findEnclosingFunc(funcRanges, c.line)
@@ -676,8 +689,23 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 			From: callerID, To: target,
 			Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
 		}
+		// Classify the call against the enclosing method's own receiver so the
+		// capability synthesizer can attribute indirect field mutations:
+		//   s.counter.Increment()  → recv_field=counter (mutates s.counter)
+		//   s.helper()             → recv_self=true     (mutates s's fields
+		//                                                 transitively via helper)
+		if recvName := recvNameByID[callerID]; recvName != "" {
+			if c.receiver == recvName {
+				edge.Meta = map[string]any{"recv_self": true}
+			} else if f, ok := ownReceiverField(c.receiver, recvName); ok {
+				edge.Meta = map[string]any{"recv_field": f}
+			}
+		}
 		if recvType, ok := lookupRecvType(callerID, c.receiver); ok {
-			edge.Meta = map[string]any{"receiver_type": recvType}
+			if edge.Meta == nil {
+				edge.Meta = map[string]any{}
+			}
+			edge.Meta["receiver_type"] = recvType
 		} else if strings.Contains(c.receiver, ".") || strings.Contains(c.receiver, "(") {
 			// Chain walk needs both the file-wide tenv and the
 			// enclosing function's parameter scope as one map. Compose
@@ -693,7 +721,10 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 				}
 			}
 			if chainType := resolveChainType(c.receiver, composed, result); chainType != "" {
-				edge.Meta = map[string]any{"receiver_type": chainType}
+				if edge.Meta == nil {
+					edge.Meta = map[string]any{}
+				}
+				edge.Meta["receiver_type"] = chainType
 			}
 		}
 		applyGoGRPCRegisterMeta(edge, c, src, tenv)
@@ -926,6 +957,23 @@ func goFuncBody(decl *sitter.Node) *sitter.Node {
 	return nil
 }
 
+// ownReceiverField returns the single field name when a selector-call receiver
+// is exactly `<recvName>.<field>` — the one-hop case `s.counter.Increment()`
+// where counter is a field of the enclosing method's own receiver. Deeper
+// chains (s.a.b) and call expressions return ok=false so the indirect-mutation
+// synthesizer never over-attributes past the first own-receiver hop.
+func ownReceiverField(receiver, recvName string) (string, bool) {
+	prefix := recvName + "."
+	if !strings.HasPrefix(receiver, prefix) {
+		return "", false
+	}
+	rest := receiver[len(prefix):]
+	if rest == "" || strings.ContainsAny(rest, ".([ ") {
+		return "", false
+	}
+	return rest, true
+}
+
 func (e *GoExtractor) emitMethod(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, paramsByFunc map[string]typeEnv, imports map[string]string) {
 	name := m.Captures["method.name"].Text
 	def := m.Captures["method.def"]
@@ -956,6 +1004,9 @@ func (e *GoExtractor) emitMethod(m parser.QueryResult, filePath, fileID string, 
 		Meta: map[string]any{
 			"receiver": receiverType,
 		},
+	}
+	if recvName := extractReceiverName(receiverText); recvName != "" {
+		node.Meta["recv_name"] = recvName
 	}
 	node.Meta["signature"] = buildMethodSignature(receiverText, name, m.Captures["method.params"], m.Captures["method.result"])
 	if resultCap, ok := m.Captures["method.result"]; ok && resultCap.Text != "" {

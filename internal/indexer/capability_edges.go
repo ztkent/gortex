@@ -140,6 +140,12 @@ func synthesizeCapabilityEdges(g graph.Store) (readsEnv, execProc, fieldAccess i
 	seen := map[string]bool{}
 	add := func(from, to string, kind graph.EdgeKind, origin, file string, line int, meta map[string]any) bool {
 		key := string(kind) + "\x00" + from + "\x00" + to
+		// Indirect mutations carry a `via`; key on it so a direct and an
+		// indirect write to the same field from the same method coexist as
+		// distinct-provenance edges.
+		if v, _ := meta["via"].(string); v != "" {
+			key += "\x00" + v
+		}
 		if seen[key] {
 			return false
 		}
@@ -179,6 +185,17 @@ func synthesizeCapabilityEdges(g graph.Store) (readsEnv, execProc, fieldAccess i
 			if add(e.From, e.To, graph.EdgeAccessesField, graph.OriginASTResolved, e.FilePath, e.Line, map[string]any{"access": mode}) {
 				fieldAccess++
 			}
+		}
+	}
+
+	// Indirect field mutations: `s.counter.Increment()` mutates counter, and
+	// `s.helper()` mutates whatever helper mutates — attributed transitively.
+	// Lower (ast_inferred) tier than the direct writes above; tagged indirect
+	// + via so it's distinguishable and downgradeable.
+	for _, s := range indirectMutationEdges(g) {
+		if add(s.from, s.to, graph.EdgeAccessesField, graph.OriginASTInferred, s.file, s.line,
+			map[string]any{"access": "write", "indirect": true, "via": s.via}) {
+			fieldAccess++
 		}
 	}
 

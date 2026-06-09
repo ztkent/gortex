@@ -294,6 +294,21 @@ func (s *Server) registerEnhancementTools() {
 		s.handleContracts,
 	)
 
+	// api_impact — fused pre-change report for an API route handler.
+	s.addTool(
+		mcp.NewTool("api_impact",
+			mcp.WithDescription("Fused pre-change impact report for an API route — call this BEFORE modifying any route handler. Given a route path substring (or handler file substring), returns ONE report composing: the route's response shape, every consumer (same-repo and cross-repo via contract pairing) with the fields it accesses, field-level response-shape mismatches (real type-aware diffing, not regex), best-effort middleware, the execution flows (processes) it triggers, the true blast radius (affected callers + test files to run), and a fused risk level. Beats hand-assembling routes + contracts validate + impact: one call, one answer to \"what breaks if I change this endpoint?\"."),
+			mcp.WithString("route", mcp.Description("Route path substring to match (e.g. /v1/users). At least one of route|file is required.")),
+			mcp.WithString("file", mcp.Description("Handler file path substring to match — an alternative to route.")),
+			mcp.WithString("repo", mcp.Description("Filter by repository prefix")),
+			mcp.WithString("project", mcp.Description("Filter to repositories in a specific project")),
+			mcp.WithString("ref", mcp.Description("Filter to repositories tagged with this ref")),
+			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
+			mcp.WithNumber("max_bytes", mcp.Description("Cap the marshaled response at this many bytes. The longest list is trimmed; truncation metadata rides on the response. Omit for no cap.")),
+		),
+		s.handleAPIImpact,
+	)
+
 	// feedback — unified feedback tool (record + query)
 	s.addTool(
 		mcp.NewTool("feedback",
@@ -741,6 +756,12 @@ func (s *Server) handleAnalyze(ctx context.Context, req mcp.CallToolRequest) (*m
 		return s.handleAnalyzeGoroutineSpawns(ctx, req)
 	case "field_writers":
 		return s.handleAnalyzeFieldWriters(ctx, req)
+	case "indirect_mutations":
+		return s.handleAnalyzeIndirectMutations(ctx, req)
+	case "speculative":
+		return s.handleAnalyzeSpeculative(ctx, req)
+	case "ref_facts":
+		return s.handleAnalyzeRefFacts(ctx, req)
 	case "race_writes":
 		return s.handleAnalyzeRaceWrites(ctx, req)
 	case "unclosed_channels":

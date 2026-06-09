@@ -281,6 +281,7 @@ func (e *CppExtractor) addMethodFromNode(funcNode *sitter.Node, src []byte, file
 	if ns := enclosingCppNamespace(funcNode, src); ns != "" {
 		meta["scope_ns"] = ns
 	}
+	stampCppSignature(meta, funcNode, src)
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindMethod, Name: methodName,
 		FilePath: filePath, StartLine: startLine, EndLine: endLine,
@@ -355,6 +356,7 @@ func (e *CppExtractor) emitFunction(m parser.QueryResult, filePath, fileID strin
 	if ns := enclosingCppNamespace(def.Node, src); ns != "" {
 		meta["scope_ns"] = ns
 	}
+	stampCppSignature(meta, def.Node, src)
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindFunction, Name: name,
 		FilePath: filePath, StartLine: startLine, EndLine: def.EndLine + 1,
@@ -497,7 +499,10 @@ func extractCppCallArgTypes(callNode *sitter.Node, src []byte) []string {
 		arg := args.NamedChild(i)
 		typeName := cppArgTypeHint(arg, src)
 		if typeName == "" {
-			continue
+			// Positional placeholder so the overload ranker keeps argument
+			// alignment (an unknown arg is compatible with any param). The ADL
+			// namespace pass ignores "?" (it yields no namespace).
+			typeName = "?"
 		}
 		out = append(out, typeName)
 	}
@@ -509,6 +514,19 @@ func cppArgTypeHint(arg *sitter.Node, src []byte) string {
 		return ""
 	}
 	switch arg.Type() {
+	case "number_literal":
+		if strings.ContainsAny(arg.Content(src), ".eE") && !strings.HasPrefix(arg.Content(src), "0x") {
+			return "double"
+		}
+		return "int"
+	case "string_literal", "raw_string_literal", "concatenated_string":
+		return "string"
+	case "char_literal":
+		return "char"
+	case "true", "false":
+		return "bool"
+	case "null", "nullptr":
+		return "null"
 	case "new_expression":
 		if t := arg.ChildByFieldName("type"); t != nil {
 			return strings.TrimSpace(t.Content(src))

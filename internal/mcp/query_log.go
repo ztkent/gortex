@@ -69,6 +69,7 @@ var retrievalToolSpecs = map[string]queryToolSpec{
 	"find_usages":             {questionKeys: []string{"symbol", "id", "name"}, corpus: "usages"},
 	"get_callers":             {questionKeys: []string{"symbol", "id", "name"}, corpus: "callers"},
 	"get_call_chain":          {questionKeys: []string{"from", "to", "symbol"}, corpus: "call_chain"},
+	"trace_path":              {questionKeys: []string{"source_id", "sink_id"}, corpus: "call_path"},
 	"search_text":             {questionKeys: []string{"query", "pattern"}, corpus: "text"},
 	"search_ast":              {questionKeys: []string{"query", "pattern"}, corpus: "ast"},
 	"winnow_symbols":          {questionKeys: []string{"text_match", "query"}, corpus: "code"},

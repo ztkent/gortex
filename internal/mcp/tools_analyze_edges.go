@@ -343,6 +343,213 @@ func (s *Server) handleAnalyzeFieldWriters(ctx context.Context, req mcp.CallTool
 	return s.respondJSONOrTOON(ctx, req, resp)
 }
 
+// handleAnalyzeIndirectMutations lists fields mutated *indirectly* — via a
+// method call on the field (s.counter.Increment()) or a sibling call on the
+// receiver (s.helper()) — surfacing the `via` method for each. These are the
+// accesses_field edges tagged Meta["indirect"]=true synthesized by the
+// receiver-mutation fixpoint. With `id` it scopes to one field.
+func (s *Server) handleAnalyzeIndirectMutations(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := req.GetArguments()
+	idFilter := strings.TrimSpace(stringArg(args, "id"))
+	limit := 20
+	if v, ok := args["limit"].(float64); ok && v > 0 {
+		limit = int(v)
+	}
+
+	type mutator struct {
+		Function string `json:"function"`
+		Via      string `json:"via,omitempty"`
+		File     string `json:"file,omitempty"`
+		Line     int    `json:"line,omitempty"`
+	}
+	type fieldRow struct {
+		Field     string    `json:"field"`
+		Mutations int       `json:"mutations"`
+		Mutators  []mutator `json:"mutators,omitempty"`
+	}
+	byField := map[string]*fieldRow{}
+
+	for e := range edgesByKinds(s.graph, graph.EdgeAccessesField) {
+		if e.Meta == nil {
+			continue
+		}
+		if ind, _ := e.Meta["indirect"].(bool); !ind {
+			continue
+		}
+		if idFilter != "" && e.To != idFilter {
+			continue
+		}
+		via, _ := e.Meta["via"].(string)
+		row, ok := byField[e.To]
+		if !ok {
+			row = &fieldRow{Field: e.To}
+			byField[e.To] = row
+		}
+		row.Mutations++
+		row.Mutators = append(row.Mutators, mutator{Function: e.From, Via: via, File: e.FilePath, Line: e.Line})
+	}
+
+	rows := make([]*fieldRow, 0, len(byField))
+	for _, r := range byField {
+		sort.Slice(r.Mutators, func(i, j int) bool { return r.Mutators[i].Function < r.Mutators[j].Function })
+		rows = append(rows, r)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Mutations != rows[j].Mutations {
+			return rows[i].Mutations > rows[j].Mutations
+		}
+		return rows[i].Field < rows[j].Field
+	})
+	truncated := false
+	if idFilter == "" && len(rows) > limit {
+		rows = rows[:limit]
+		truncated = true
+	}
+
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
+		"fields":    rows,
+		"total":     len(rows),
+		"truncated": truncated,
+	})
+}
+
+// handleAnalyzeSpeculative is the audit surface for opt-in speculative
+// dynamic-dispatch edges: it groups the best-guess call edges (Meta
+// speculative=true) by their shape (computed_member / getattr / …) with a
+// candidate-count histogram and samples, so an agent can review what the
+// best-guess synthesizer produced before trusting any of it.
+func (s *Server) handleAnalyzeSpeculative(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	type sample struct {
+		From           string `json:"from"`
+		To             string `json:"to"`
+		CandidateCount int    `json:"candidate_count,omitempty"`
+		Confidence     string `json:"confidence,omitempty"`
+	}
+	type shapeRow struct {
+		Shape   string   `json:"shape"`
+		Edges   int      `json:"edges"`
+		Samples []sample `json:"samples,omitempty"`
+	}
+	byShape := map[string]*shapeRow{}
+	total := 0
+	for e := range edgesByKinds(s.graph, graph.EdgeCalls) {
+		if !e.IsSpeculative() {
+			continue
+		}
+		total++
+		shape, _ := e.Meta["via"].(string)
+		shape = strings.TrimPrefix(shape, "speculative.")
+		if shape == "" {
+			shape = "unknown"
+		}
+		row, ok := byShape[shape]
+		if !ok {
+			row = &shapeRow{Shape: shape}
+			byShape[shape] = row
+		}
+		row.Edges++
+		if len(row.Samples) < 10 {
+			cc, _ := e.Meta["candidate_count"].(int)
+			row.Samples = append(row.Samples, sample{From: e.From, To: e.To, CandidateCount: cc, Confidence: e.ConfidenceLabel})
+		}
+	}
+	rows := make([]*shapeRow, 0, len(byShape))
+	for _, r := range byShape {
+		rows = append(rows, r)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Edges != rows[j].Edges {
+			return rows[i].Edges > rows[j].Edges
+		}
+		return rows[i].Shape < rows[j].Shape
+	})
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
+		"shapes": rows,
+		"total":  total,
+		"note":   "speculative edges are best-guess fan-outs, hidden from default queries; pass include_speculative:true to surface them",
+	})
+}
+
+// handleAnalyzeRefFacts surfaces resolved-reference facts — each reference edge
+// that resolved to a concrete target, with the provenance tier that resolved
+// it. The durable form is the backend's ref_facts sidecar; this read derives
+// the same facts from the live graph (backend-agnostic). With `id` it scopes to
+// references originating in one file.
+func (s *Server) handleAnalyzeRefFacts(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := req.GetArguments()
+	fileFilter := strings.TrimSpace(stringArg(args, "id"))
+	if fileFilter == "" {
+		fileFilter = strings.TrimSpace(stringArg(args, "path"))
+	}
+	limit := 200
+	if v, ok := args["limit"].(float64); ok && v > 0 {
+		limit = int(v)
+	}
+
+	type fact struct {
+		From    string `json:"from"`
+		To      string `json:"to"`
+		Kind    string `json:"kind"`
+		RefName string `json:"ref_name,omitempty"`
+		Origin  string `json:"origin,omitempty"`
+		Tier    string `json:"tier,omitempty"`
+		File    string `json:"file,omitempty"`
+	}
+
+	var nodes []*graph.Node
+	if fileFilter != "" {
+		nodes = s.graph.GetFileNodes(fileFilter)
+	} else {
+		for _, k := range []graph.NodeKind{graph.KindFunction, graph.KindMethod} {
+			for n := range s.graph.NodesByKind(k) {
+				nodes = append(nodes, n)
+			}
+		}
+	}
+
+	var facts []fact
+	truncated := false
+	for _, n := range nodes {
+		if n == nil {
+			continue
+		}
+		for _, e := range s.graph.GetOutEdges(n.ID) {
+			if e == nil || !graph.IsResolvableRefEdge(e.Kind) {
+				continue
+			}
+			if e.To == "" || graph.IsUnresolvedTarget(e.To) || graph.IsStub(e.To) {
+				continue
+			}
+			refName := ""
+			if t := s.graph.GetNode(e.To); t != nil {
+				refName = t.Name
+			}
+			origin := e.Origin
+			if origin == "" {
+				sem, _ := e.Meta["semantic_source"].(string)
+				origin = graph.DefaultOriginFor(e.Kind, e.Confidence, sem)
+			}
+			facts = append(facts, fact{
+				From: e.From, To: e.To, Kind: string(e.Kind), RefName: refName,
+				Origin: origin, Tier: graph.ResolvedBy(origin), File: n.FilePath,
+			})
+			if len(facts) >= limit {
+				truncated = true
+				break
+			}
+		}
+		if truncated {
+			break
+		}
+	}
+
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
+		"facts":     facts,
+		"total":     len(facts),
+		"truncated": truncated,
+	})
+}
+
 // ---------------------------------------------------------------------------
 // annotation_users — for an annotation node id (or list all when no
 // id), surface annotated symbols.

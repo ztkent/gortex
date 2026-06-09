@@ -2248,7 +2248,20 @@ func structuralParentEdges(g graph.Store) []graph.StructuralParentEdgeRow {
 // InferImplements detects structural interface satisfaction by comparing
 // method sets and adds EdgeImplements edges from types to interfaces.
 // Returns the number of edges added.
-func (r *Resolver) InferImplements() int {
+func (r *Resolver) InferImplements() int { return r.inferImplements(nil, nil) }
+
+// InferImplementsScoped re-derives EdgeImplements only for (type, interface)
+// pairs where the type or the interface is in the affected set — used by
+// incremental reindex to avoid the whole-graph type×interface cross product.
+// It is add-parity with the full pass: an inferred edge is only ever dropped
+// when one of its endpoints' file is evicted, so re-checking every pair with an
+// affected endpoint re-lands exactly the dropped edges while the survivors are
+// left untouched. Empty scope maps mean "nothing affected" → zero work.
+func (r *Resolver) InferImplementsScoped(scopeTypes, scopeIfaces map[string]bool) int {
+	return r.inferImplements(scopeTypes, scopeIfaces)
+}
+
+func (r *Resolver) inferImplements(scopeTypes, scopeIfaces map[string]bool) int {
 	// Step 1: Collect all interfaces with their required method names.
 	type ifaceInfo struct {
 		id      string
@@ -2353,6 +2366,11 @@ func (r *Resolver) InferImplements() int {
 					if iface.id == typeID {
 						continue
 					}
+					// Scoped incremental: only re-check pairs touching an
+					// affected type or a changed interface.
+					if scopeTypes != nil && !scopeTypes[typeID] && !scopeIfaces[iface.id] {
+						continue
+					}
 					// Repo gate: structural method-set matching across
 					// repos is almost always coincidental — every type
 					// with a `String()` method would "implement" every
@@ -2418,7 +2436,14 @@ func (r *Resolver) InferImplements() int {
 // EdgeOverrides directly with that origin).
 //
 // This is the AST half of override inference — works without an LSP available.
-func (r *Resolver) InferOverrides() int {
+func (r *Resolver) InferOverrides() int { return r.inferOverrides(nil) }
+
+// InferOverridesScoped re-derives EdgeOverrides only for parent-edge rows whose
+// child or parent type is in the affected set (add-parity with the full pass,
+// same reasoning as InferImplementsScoped). Empty scope → zero work.
+func (r *Resolver) InferOverridesScoped(scope map[string]bool) int { return r.inferOverrides(scope) }
+
+func (r *Resolver) inferOverrides(scope map[string]bool) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -2439,6 +2464,10 @@ func (r *Resolver) InferOverrides() int {
 	var pending []overridePair
 	for _, row := range structuralParentEdges(r.graph) {
 		if row.FromID == row.ToID {
+			continue
+		}
+		// Scoped incremental: only re-check parent edges touching an affected type.
+		if scope != nil && !scope[row.FromID] && !scope[row.ToID] {
 			continue
 		}
 		childMethods := typeMembers[row.FromID]

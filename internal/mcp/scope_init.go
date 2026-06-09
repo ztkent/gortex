@@ -118,6 +118,7 @@ var defaultToolScopes = map[string]ToolScope{
 	// cross-repo dataflow joins land.
 	"flow_between": ScopeRepo,
 	"taint_paths":  ScopeRepo,
+	"trace_path":   ScopeRepo,
 }
 
 // applyDefaultToolScopes registers the canonical scope for every

@@ -241,28 +241,9 @@ func confidenceFromEdges(edges []EdgeStep) float64 {
 }
 
 func confidenceFromOrigin(origin, kind string) float64 {
-	switch origin {
-	case graph.OriginLSPResolved:
-		return 1
-	case graph.OriginLSPDispatch:
-		return 0.95
-	case graph.OriginASTResolved:
-		return 0.9
-	case graph.OriginASTInferred:
-		return 0.7
-	case graph.OriginTextMatched:
-		return 0.4
-	}
-	// Unstamped: fall back to the kind tier. value_flow is intra-
-	// procedural and cheap to ground; arg_of / returns_to are
-	// cross-call and start lower until the resolver lifts them.
-	switch kind {
-	case string(graph.EdgeValueFlow):
-		return 0.85
-	case string(graph.EdgeArgOf), string(graph.EdgeReturnsTo):
-		return 0.7
-	}
-	return 0.5
+	// Delegates to the shared graph.EdgeTierScore so dataflow and callpath
+	// compute path confidence from one provenance→weight mapping.
+	return graph.EdgeTierScore(origin, graph.EdgeKind(kind))
 }
 
 // TaintPattern resolves a source / sink pattern against the live

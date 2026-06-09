@@ -600,7 +600,17 @@ const (
 	OriginASTResolved = "ast_resolved"
 	OriginASTInferred = "ast_inferred"
 	OriginTextMatched = "text_matched"
+	// OriginSpeculative ranks strictly below text_matched: a best-guess
+	// dynamic-dispatch edge (obj[name]() / getattr / decorator registry) that
+	// is present-but-hidden-by-default. Always carries Meta[MetaSpeculative]=true
+	// so queries exclude it unless the caller opts in.
+	OriginSpeculative = "speculative"
 )
+
+// MetaSpeculative is the edge Meta key marking a speculative (best-guess)
+// edge. It is the single source of truth for default-exclusion: any
+// edge-returning surface drops these unless the caller opts in.
+const MetaSpeculative = "speculative"
 
 // OriginRank returns a numeric rank for origin comparison. Higher = more
 // confident. Unknown or empty origin returns 0 so it sorts below all known
@@ -608,17 +618,29 @@ const (
 func OriginRank(origin string) int {
 	switch origin {
 	case OriginLSPResolved:
-		return 5
+		return 6
 	case OriginLSPDispatch:
-		return 4
+		return 5
 	case OriginASTResolved:
-		return 3
+		return 4
 	case OriginASTInferred:
-		return 2
+		return 3
 	case OriginTextMatched:
+		return 2
+	case OriginSpeculative:
 		return 1
 	}
 	return 0
+}
+
+// IsSpeculative reports whether the edge is a best-guess speculative edge
+// (excluded from default query results).
+func (e *Edge) IsSpeculative() bool {
+	if e == nil || e.Meta == nil {
+		return false
+	}
+	v, _ := e.Meta[MetaSpeculative].(bool)
+	return v
 }
 
 // MeetsMinTier returns true when origin is at least as confident as minTier.
@@ -712,6 +734,36 @@ func DefaultOriginFor(kind EdgeKind, confidence float64, semanticSource string) 
 		return OriginASTInferred
 	}
 	return OriginTextMatched
+}
+
+// EdgeTierScore maps an edge's Origin provenance tier to a 0..1 confidence
+// weight, falling back to the edge kind when Origin is unstamped. It is the one
+// shared provenance→confidence mapping consumed by the dataflow and callpath
+// path-confidence rankers, so a path's confidence means the same thing across
+// flow_between, taint_paths and trace_path.
+func EdgeTierScore(origin string, kind EdgeKind) float64 {
+	switch origin {
+	case OriginLSPResolved:
+		return 1
+	case OriginLSPDispatch:
+		return 0.95
+	case OriginASTResolved:
+		return 0.9
+	case OriginASTInferred:
+		return 0.7
+	case OriginTextMatched:
+		return 0.4
+	}
+	// Unstamped: fall back to the kind tier. value_flow is intra-procedural
+	// and cheap to ground; arg_of / returns_to are cross-call and start lower
+	// until the resolver lifts them.
+	switch kind {
+	case EdgeValueFlow:
+		return 0.85
+	case EdgeArgOf, EdgeReturnsTo:
+		return 0.7
+	}
+	return 0.5
 }
 
 // Provenance-attenuation weights for graph centrality (HITS /

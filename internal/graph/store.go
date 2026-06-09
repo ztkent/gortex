@@ -986,6 +986,41 @@ type CloneShingleReader interface {
 	LoadCloneShingles(repoPrefix string) (map[string][]uint64, error)
 }
 
+// RefFact is one durable resolved-reference fact: a reference edge from
+// FromID resolved TO ToID with the provenance tier that resolved it. Persisted
+// per source file so a reference's resolution is an auditable, diffable record
+// — gortex persists the RESOLVED target + its 5-tier provenance (unlike
+// codegraph, which persists only unresolved refs behind a flat provenance
+// string). The candidate set the resolver chose AMONG (when ambiguous) rides
+// in Candidates for later disambiguation / audit.
+type RefFact struct {
+	RepoPrefix string
+	FromID     string
+	ToID       string
+	Kind       string // edge kind (calls / references / …)
+	RefName    string // the referenced symbol's bare name
+	Line       int
+	Origin     string // provenance tier (lsp_resolved … text_matched)
+	Tier       string // coarse provenance label
+	Candidates []string
+	FilePath   string // source file (denormalized for indexed per-file queries)
+	Lang       string
+}
+
+// RefFactsWriter is an optional capability backends MAY implement to persist
+// per-file resolved-reference facts in a dedicated sidecar table. Sibling of
+// CloneShingleWriter / FileMtimeWriter. Empty input is a no-op.
+type RefFactsWriter interface {
+	BulkSetRefFacts(repoPrefix string, facts []RefFact) error
+	DeleteRefFactsByFiles(repoPrefix string, files []string) error
+}
+
+// RefFactsReader is the read side of RefFactsWriter: the persisted facts for a
+// set of source files (all files when files is empty), as the audit/diff seed.
+type RefFactsReader interface {
+	LoadRefFactsByFiles(repoPrefix string, files []string) ([]RefFact, error)
+}
+
 // ChurnEnrichment is one node's git-churn enrichment, moved out of
 // nodes.meta into a typed sidecar (change A). Maps 1:1 to the payload
 // internal/churn.EnrichGraph used to stamp on Meta["churn"]/["churn_meta"].

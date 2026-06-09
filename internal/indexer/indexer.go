@@ -756,6 +756,13 @@ func (idx *Indexer) RunGlobalGraphPasses(ctx context.Context) {
 			zap.Int("edges", extCalls),
 		)
 	}
+	// Speculative dynamic-dispatch synthesis (opt-in, default off). Mints
+	// best-guess hidden-by-default call edges for blind-spot shapes.
+	if spec := resolver.ResolveSpeculativeDispatch(idx.graph, idx.speculativeDispatchEnabled()); spec > 0 {
+		idx.logger.Info("speculative dispatch edges synthesized (global)",
+			zap.Int("edges", spec),
+		)
+	}
 	// Cross-repo edge layer. Runs after InferImplements / InferOverrides
 	// so cross-repo implements / extends edges pick up their parallel
 	// cross_repo_* edges. No-op on single-repo graphs (no RepoPrefix).
@@ -2496,6 +2503,11 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 					zap.Int("edges", extCalls),
 				)
 			}
+			if spec := resolver.ResolveSpeculativeDispatch(idx.graph, idx.speculativeDispatchEnabled()); spec > 0 {
+				idx.logger.Info("speculative dispatch edges synthesized",
+					zap.Int("edges", spec),
+				)
+			}
 			// Reachability index — used to be precomputed for every
 			// impact seed here. The eager pass was retired because the
 			// breakeven was untenable on monorepo graphs (k8s:
@@ -2791,6 +2803,10 @@ func (idx *Indexer) indexFile(filePath string, resolve bool) error {
 				detectClonesAndEmitEdges(idx.graph, idx.repoPrefix, idx.cloneThreshold())
 			}
 		}
+		// Persist this file's resolved-reference facts to the durable sidecar
+		// (delete-then-set so removed references don't linger). No-op on the
+		// in-memory backend.
+		idx.persistRefFactsForFiles([]string{graphPath})
 	}
 
 	// Update mtime for this file. relPath is already the canonical
@@ -2919,12 +2935,17 @@ func (idx *Indexer) ResolveAll() {
 	// resolver and stub passes so only genuinely un-indexed external
 	// targets remain to materialise.
 	resolver.SynthesizeExternalCalls(idx.graph, idx.externalCallSynthesisEnabled())
+	resolver.ResolveSpeculativeDispatch(idx.graph, idx.speculativeDispatchEnabled())
 	// CPG-lite dataflow rewriting must run after the call resolver
 	// has lifted unresolved:: targets; arg_of edges then point at
 	// real function/method nodes whose param nodes can be found,
 	// and returns_to placeholders join cleanly against the
 	// now-resolved EdgeCalls edge at the same caller+line.
 	idx.materializeDataflowParams()
+
+	// Seed the durable reference-facts sidecar from the fully-resolved graph
+	// (no-op on the in-memory backend).
+	idx.persistAllRefFacts()
 }
 
 // EvictFile removes all nodes and edges belonging to filePath.
@@ -2951,6 +2972,7 @@ func (idx *Indexer) EvictFile(filePath string) (int, int) {
 	}
 	idx.restubIncomingRefs(graphPath)
 	idx.evictEnrichment(graphPath)
+	idx.deleteRefFactsForFiles(idx.repoPrefix, []string{graphPath})
 	return idx.graph.EvictFile(graphPath)
 }
 
@@ -3926,8 +3948,13 @@ func (idx *Indexer) IncrementalReindexPaths(root string, paths []string) (*Index
 	// eviction may have dropped edges. Skipped under deferGlobalPasses
 	// so a batch caller runs one global pass at the end.
 	if !idx.deferGlobalPasses && (len(staleFiles) > 0 || len(deletedFiles) > 0) {
-		idx.resolver.InferImplements()
-		idx.resolver.InferOverrides()
+		// Scoped inference passes re-derive only the affected types/interfaces
+		// (add-parity with the full pass); fall back to whole-graph when
+		// scoping is disabled.
+		if !idx.runScopedInferencePasses(staleFiles) {
+			idx.resolver.InferImplements()
+			idx.resolver.InferOverrides()
+		}
 		// Keep capability edges (reads_env / executes_process /
 		// accesses_field) fresh on incremental reindex — same idempotent
 		// re-derive RunGlobalGraphPasses runs at full index.
@@ -4139,8 +4166,12 @@ func (idx *Indexer) IncrementalReindex(root string) (*IndexResult, error) {
 	// caller (ReconcileAll, warmup) can run a single global pass at
 	// the end instead of paying O(global) per repo.
 	if !idx.deferGlobalPasses {
-		idx.resolver.InferImplements()
-		idx.resolver.InferOverrides()
+		// Scoped inference passes re-derive only the affected types/interfaces
+		// (add-parity with the full pass); fall back to whole-graph when off.
+		if !idx.runScopedInferencePasses(staleFiles) {
+			idx.resolver.InferImplements()
+			idx.resolver.InferOverrides()
+		}
 		// Capability edges (reads_env / executes_process / accesses_field)
 		// re-derived from the freshly re-indexed files' base edges so the
 		// daemon's capability surface — what a supply-chain / least-privilege
@@ -4226,6 +4257,12 @@ func (idx *Indexer) buildPerFileContractExtractors() ([]contracts.Extractor, map
 		&contracts.TopicExtractor{},
 		&contracts.WebSocketExtractor{},
 		&contracts.EnvVarExtractor{},
+	}
+	// Config-driven event bus: only registered when the user declared
+	// boundaries (index.event_bus / CODEGRAPH_EVENT_CONFIG), so the default
+	// extractor set is unchanged.
+	if b := idx.eventBusBoundaries(); len(b) > 0 {
+		extractors = append(extractors, &contracts.EventBusExtractor{Boundaries: b})
 	}
 	byLang := make(map[string][]contracts.Extractor)
 	for _, ex := range extractors {

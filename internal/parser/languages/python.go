@@ -46,6 +46,11 @@ const qPyAll = `
       object: (_) @callattr.receiver
       attribute: (identifier) @callattr.method)) @callattr.expr
 
+  (call
+    function: (subscript
+      value: (_) @subcall.receiver
+      subscript: (_) @subcall.key)) @subcall.expr
+
   (assignment
     left: (identifier) @var.name) @var.def
 
@@ -85,6 +90,36 @@ type pyDeferredCall struct {
 	line     int
 	isAttr   bool
 	expr     *sitter.Node // for FastAPI Depends() arg lookup
+	// dynShape / dynKey tag a dynamic-dispatch blind-spot call shape the
+	// resolver cannot bind statically (computed-member obj["foo"]()), so the
+	// opt-in speculative synthesizer can fan it to plausible targets. dynKey is
+	// the literal method name when the subscript is a string literal.
+	dynShape string
+	dynKey   string
+}
+
+// pyStringLiteralValue returns the unquoted value of a Python string-literal
+// token (handling an optional r/f/b/u prefix), or "" when the token is not a
+// string literal (e.g. a variable subscript key obj[name]).
+func pyStringLiteralValue(tok string) string {
+	tok = strings.TrimSpace(tok)
+	for len(tok) > 1 {
+		switch tok[0] {
+		case 'r', 'R', 'f', 'F', 'b', 'B', 'u', 'U':
+			if tok[1] == '\'' || tok[1] == '"' {
+				tok = tok[1:]
+				continue
+			}
+		}
+		break
+	}
+	if len(tok) >= 2 {
+		q := tok[0]
+		if (q == '\'' || q == '"') && tok[len(tok)-1] == q {
+			return tok[1 : len(tok)-1]
+		}
+	}
+	return ""
 }
 
 func (e *PythonExtractor) Extract(filePath string, src []byte) (*parser.ExtractionResult, error) {
@@ -149,6 +184,24 @@ func (e *PythonExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 				expr: expr.Node,
 			})
 
+		case m.Captures["subcall.expr"] != nil:
+			// Computed-member call `obj["foo"]()` — a dynamic-dispatch blind
+			// spot. Captured for the opt-in speculative synthesizer; emits no
+			// edge by itself unless that pass is enabled.
+			expr := m.Captures["subcall.expr"]
+			dc := pyDeferredCall{
+				line:     expr.StartLine + 1,
+				expr:     expr.Node,
+				dynShape: "computed_member",
+			}
+			if r := m.Captures["subcall.receiver"]; r != nil {
+				dc.receiver = r.Text
+			}
+			if k := m.Captures["subcall.key"]; k != nil {
+				dc.dynKey = pyStringLiteralValue(k.Text)
+			}
+			calls = append(calls, dc)
+
 		case m.Captures["tvar.def"] != nil:
 			// Tier 0: explicit type annotation — overwrite tenv.
 			name := m.Captures["tvar.name"].Text
@@ -185,6 +238,23 @@ func (e *PythonExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 	for _, c := range calls {
 		callerID := findEnclosingFunc(funcRanges, c.line)
 		if callerID == "" {
+			continue
+		}
+		if c.dynShape != "" {
+			// Tagged dynamic-dispatch blind-spot call. The placeholder carries
+			// the shape + literal key; the speculative synthesizer (opt-in)
+			// fans it to plausible targets.
+			meta := map[string]any{"dyn_shape": c.dynShape}
+			if c.dynKey != "" {
+				meta["dyn_key"] = c.dynKey
+			}
+			if c.receiver != "" {
+				meta["dyn_receiver"] = c.receiver
+			}
+			result.Edges = append(result.Edges, &graph.Edge{
+				From: callerID, To: "unresolved::*",
+				Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line, Meta: meta,
+			})
 			continue
 		}
 		if c.isAttr {

@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
 
 	wire "github.com/gortexhq/gcx-go"
+	"github.com/zzet/gortex/internal/callpath"
 	"github.com/zzet/gortex/internal/dataflow"
 	"github.com/zzet/gortex/internal/graph"
 )
@@ -51,6 +53,22 @@ func (s *Server) registerDataflowTools() {
 		),
 		s.handleTaintPaths,
 	)
+
+	s.addTool(
+		mcp.NewTool("trace_path",
+			mcp.WithDescription("Traces the shortest call path from one symbol to another over the CALLS-class graph (calls + cross-service matches + method-value references), and — when no path exists — returns a structured why-unreachable diagnosis. Distinct from flow_between (dataflow: where a *value* moves) and get_call_chain (single-source forward call BFS, no target): trace_path is a *targeted* A→B search using balanced bidirectional BFS, so it returns THE shortest route with per-hop provenance (lsp/ast/heuristic). On failure it names exactly where the chain dies: the furthest functions reachable from the source, the nearest set that can reach the sink, the dynamic-dispatch / external boundaries the reach terminated at, and a classified reason (crosses_dynamic_dispatch, crosses_external_boundary, depth_exceeded, disconnected, src_no_out_edges, sink_no_in_edges)."),
+			mcp.WithString("source_id", mcp.Required(), mcp.Description("Source symbol node ID — the call-path origin (typically a function or method)")),
+			mcp.WithString("sink_id", mcp.Required(), mcp.Description("Sink symbol node ID — the call-path destination")),
+			mcp.WithNumber("max_depth", mcp.Description("Maximum combined BFS depth before giving up (default: 24)")),
+			mcp.WithNumber("k", mcp.Description("Number of distinct shortest-length paths to return (default: 1)")),
+			mcp.WithNumber("max_frontier", mcp.Description("Cap on the number of frontier nodes reported in the gap diagnosis (default: 25)")),
+			mcp.WithString("min_tier", mcp.Description("Minimum per-edge Origin tier to traverse. Accepts one of: lsp_resolved, lsp_dispatch, ast_resolved, ast_inferred, text_matched. Empty (default) disables the filter.")),
+			mcp.WithBoolean("include_references", mcp.Description("Traverse EdgeReferences (method-value wiring: mux.HandleFunc, command tables) in addition to direct calls (default: true). Set false for a pure direct-call path.")),
+			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
+			mcp.WithNumber("max_bytes", mcp.Description("Cap the marshaled response at this many bytes. The longest list is trimmed; truncation metadata rides on the response. Omit for no cap.")),
+		),
+		s.handleTracePath,
+	)
 }
 
 func (s *Server) handleFlowBetween(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -84,6 +102,34 @@ func (s *Server) handleFlowBetween(ctx context.Context, req mcp.CallToolRequest)
 		return returnTOON(result)
 	}
 	return s.respondJSONOrTOON(ctx, req, result)
+}
+
+func (s *Server) handleTracePath(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	source, err := req.RequireString("source_id")
+	if err != nil {
+		return mcp.NewToolResultError("source_id is required"), nil
+	}
+	sink, err := req.RequireString("sink_id")
+	if err != nil {
+		return mcp.NewToolResultError("sink_id is required"), nil
+	}
+	opts := callpath.Options{
+		MaxDepth:          req.GetInt("max_depth", callpath.DefaultMaxDepth),
+		K:                 req.GetInt("k", callpath.DefaultK),
+		MaxFrontier:       req.GetInt("max_frontier", callpath.DefaultMaxFrontier),
+		MinTier:           req.GetString("min_tier", ""),
+		IncludeReferences: req.GetBool("include_references", true),
+	}
+	res := callpath.New(s.graph).ShortestPath(source, sink, opts)
+
+	if s.isGCX(ctx, req) {
+		payload, encErr := encodeTracePath(res)
+		return s.gcxResponseWithBudget(req)(payload, encErr)
+	}
+	if s.isTOON(ctx, req) {
+		return returnTOON(res)
+	}
+	return s.respondJSONOrTOON(ctx, req, res)
 }
 
 func (s *Server) handleTaintPaths(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -194,6 +240,112 @@ func encodeFlowBetween(source, sink string, paths []dataflow.Path) ([]byte, erro
 		}
 	}
 	return buf.Bytes(), pathEnc.Close()
+}
+
+// encodeTracePath emits a GCX1 envelope with up to three sections:
+// `trace_path.summary` (one row), `trace_path.paths` (one row per returned
+// path with the flattened node + edge sequences) and — only when no path was
+// found — `trace_path.gap` (one row carrying the why-unreachable diagnosis with
+// the frontier and boundary lists flattened).
+func encodeTracePath(res callpath.Result) ([]byte, error) {
+	var buf bytes.Buffer
+	reason := ""
+	if res.Gap != nil {
+		reason = string(res.Gap.Reason)
+	}
+	shortest := 0
+	worstAll := ""
+	if len(res.Paths) > 0 {
+		shortest = res.Paths[0].Length
+		for _, p := range res.Paths {
+			worstAll = mergeWorstTier(worstAll, p.WorstTier)
+		}
+	}
+	sumEnc := wire.NewEncoder(&buf, wire.Header{
+		Tool:   "trace_path.summary",
+		Fields: []string{"source", "sink", "found", "paths", "shortest", "worst_tier", "reason"},
+	})
+	if err := sumEnc.WriteRow(res.SrcID, res.SinkID, res.Found, len(res.Paths), shortest, worstAll, reason); err != nil {
+		return nil, err
+	}
+	if err := sumEnc.Close(); err != nil {
+		return nil, err
+	}
+	pathEnc := wire.NewEncoder(&buf, wire.Header{
+		Tool:   "trace_path.paths",
+		Fields: []string{"length", "confidence", "worst_tier", "nodes", "kinds", "origins", "tiers"},
+		Meta:   map[string]string{"count": fmt.Sprintf("%d", len(res.Paths))},
+	})
+	for _, p := range res.Paths {
+		if err := pathEnc.WriteRow(p.Length, p.Confidence, p.WorstTier,
+			strings.Join(p.Nodes, ","),
+			joinTraceField(p.Edges, func(e callpath.PathEdge) string { return e.Kind }),
+			joinTraceField(p.Edges, func(e callpath.PathEdge) string { return e.Origin }),
+			joinTraceField(p.Edges, func(e callpath.PathEdge) string { return traceTier(e) })); err != nil {
+			return nil, err
+		}
+	}
+	if err := pathEnc.Close(); err != nil {
+		return nil, err
+	}
+	if res.Gap != nil {
+		gapEnc := wire.NewEncoder(&buf, wire.Header{
+			Tool:   "trace_path.gap",
+			Fields: []string{"reason", "message", "forward_reached", "backward_reached", "furthest_from_source", "nearest_to_sink", "boundary_hits"},
+		})
+		if err := gapEnc.WriteRow(
+			string(res.Gap.Reason), res.Gap.Message,
+			res.Gap.ForwardReached, res.Gap.BackwardReached,
+			joinFrontier(res.Gap.FurthestFromSource),
+			joinFrontier(res.Gap.NearestToSink),
+			joinBoundaries(res.Gap.BoundaryHits)); err != nil {
+			return nil, err
+		}
+		if err := gapEnc.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return buf.Bytes(), nil
+}
+
+func traceTier(e callpath.PathEdge) string {
+	if e.Tier != "" {
+		return e.Tier
+	}
+	return graph.ResolvedBy(e.Origin)
+}
+
+func joinTraceField(edges []callpath.PathEdge, f func(callpath.PathEdge) string) string {
+	if len(edges) == 0 {
+		return ""
+	}
+	parts := make([]string, len(edges))
+	for i, e := range edges {
+		parts[i] = f(e)
+	}
+	return strings.Join(parts, ",")
+}
+
+func joinFrontier(ns []callpath.FrontierNode) string {
+	if len(ns) == 0 {
+		return ""
+	}
+	parts := make([]string, len(ns))
+	for i, n := range ns {
+		parts[i] = fmt.Sprintf("%s:%d", n.ID, n.Depth)
+	}
+	return strings.Join(parts, ",")
+}
+
+func joinBoundaries(bs []callpath.BoundaryHit) string {
+	if len(bs) == 0 {
+		return ""
+	}
+	parts := make([]string, len(bs))
+	for i, b := range bs {
+		parts[i] = fmt.Sprintf("%s|%s", b.Target, b.Reason)
+	}
+	return strings.Join(parts, ",")
 }
 
 // encodeTaintPaths emits a GCX1 envelope with two sections:

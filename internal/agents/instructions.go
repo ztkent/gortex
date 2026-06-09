@@ -109,6 +109,7 @@ The ` + "`flow_between`" + ` and ` + "`taint_paths`" + ` MCP tools answer **"whe
 |---------------------------------------|------------------------------------------|
 | Tracing a value through helpers by hand | ` + "`flow_between(source_id, sink_id, max_depth=8)`" + ` — ranked dataflow paths between two symbols |
 | Grepping for sources / sinks         | ` + "`taint_paths(source_pattern, sink_pattern)`" + ` — pattern-driven sweep. Patterns: bare token = name substring; ` + "`exact:Foo`" + `; ` + "`path:dir/`" + `; ` + "`kind:method`" + `. Sinks auto-expand functions to their params. |
+| Asking "can A reach B?" over the call graph | ` + "`trace_path(source_id, sink_id)`" + ` — shortest A→B call path (bidirectional BFS); on no-path returns a why-unreachable diagnosis naming the dynamic-dispatch / external boundary where the chain breaks. CLI: ` + "`gortex trace <from> <to>`" + `. |
 
 ### Structural Code Search
 
@@ -395,6 +396,7 @@ The ` + "`analyze`" + ` MCP tool is a unified dispatcher. Supported ` + "`kind`"
 |---------------------------------------|------------------------------------------|
 | Manually tracking API routes/services | ` + "`contracts`" + ` (default ` + "`action: \"list\"`" + `) — lists HTTP, gRPC, GraphQL, topic, WebSocket, env, OpenAPI; filter by ` + "`repo`" + `, ` + "`project`" + `, or ` + "`ref`" + ` |
 | Guessing if APIs match across repos   | ` + "`contracts`" + ` with ` + "`action: \"check\"`" + ` — detects orphan providers/consumers and mismatches; scope with ` + "`repo`" + ` / ` + "`project`" + ` / ` + "`ref`" + ` |
+| Assessing what breaks before editing a route handler | ` + "`api_impact(route|file)`" + ` — one fused report: response shape, consumers + accessed fields, response-shape mismatches, middleware, execution flows, blast radius (callers + tests to run), fused risk |
 
 ### CPG-lite Dataflow
 

@@ -792,6 +792,22 @@ func (h *HTTPExtractor) extract(
 		}
 	}
 
+	// Non-decorator Flask routing forms. flask-restful's
+	// api.add_resource(Class, '/path') and the imperative
+	// app.add_url_rule('/path', view_func=fn) reference a handler that is
+	// NOT on the call line (a resource class whose methods give the verbs,
+	// or a view_func defined elsewhere), so they need cross-symbol
+	// resolution the per-line httpPatterns table cannot do. They run as
+	// dedicated node-aware passes, gated by a cheap substring prefilter.
+	if lang == "python" {
+		if strings.Contains(text, "add_resource") {
+			out = append(out, h.extractFlaskRestfulRoutes(filePath, text, lines, fileNodes, lang, tree)...)
+		}
+		if strings.Contains(text, "add_url_rule") {
+			out = append(out, h.extractFlaskAddURLRule(filePath, text, lines, fileNodes, lang, tree)...)
+		}
+	}
+
 	// Configurable HTTP-client wrapper aliases. Calls to a
 	// project-named wrapper (e.g. apiGet('/users')) become consumer
 	// contracts even though no built-in fetch/axios pattern matched.

@@ -63,6 +63,8 @@ const (
 	SynthMyBatis      = "mybatis"
 	SynthRustScope    = "rust-scope"
 	SynthSQLCallsite  = "sql-callsite"
+	SynthStoreFactory = "store-factory"
+	SynthSpeculative  = "speculative-dispatch"
 )
 
 // StampSynthesized marks an edge as the product of a framework
@@ -120,6 +122,9 @@ func defaultFrameworkSynthesizers() []FrameworkSynthesizer {
 		synthFunc{name: SynthFabric, fn: ResolveFabricComponents},
 		synthFunc{name: SynthMyBatis, fn: ResolveMyBatisCalls},
 		synthFunc{name: SynthSQLCallsite, fn: ResolveSQLCallsites},
+		// Store-factory (Zustand/Redux/Pinia/MobX) indirect action calls —
+		// binds getState()-chain and destructured calls to the action node.
+		synthFunc{name: SynthStoreFactory, fn: ResolveStoreFactoryCalls},
 		// Rust impl-block / self-receiver / module-path resolution
 		// completion. Runs in the same settle window so residual
 		// unresolved Rust calls land before external-call synthesis

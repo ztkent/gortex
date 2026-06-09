@@ -95,6 +95,29 @@ CREATE TABLE IF NOT EXISTS clone_shingles (
     shingles    BLOB
 ) WITHOUT ROWID;
 
+-- ref_facts is the resolved-reference sidecar: one row per reference edge
+-- that resolved to a concrete target, recording the target + the provenance
+-- tier that resolved it. Denormalized file_path + lang make "all reference
+-- facts originating in file X" a single indexed query (the scope unit for
+-- incremental re-resolution and the audit/diff surface). repo_prefix scopes
+-- per-repo. PK is (repo_prefix, from_id, to_id, kind, line) so re-resolving a
+-- file replaces its facts in place; WITHOUT ROWID — the PK index IS the table.
+CREATE TABLE IF NOT EXISTS ref_facts (
+    repo_prefix TEXT NOT NULL DEFAULT '',
+    from_id     TEXT NOT NULL,
+    to_id       TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    ref_name    TEXT NOT NULL DEFAULT '',
+    line        INTEGER NOT NULL DEFAULT 0,
+    origin      TEXT NOT NULL DEFAULT '',
+    tier        TEXT NOT NULL DEFAULT '',
+    candidates  TEXT NOT NULL DEFAULT '',
+    file_path   TEXT NOT NULL DEFAULT '',
+    lang        TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (repo_prefix, from_id, to_id, kind, line)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS ref_facts_by_file ON ref_facts(repo_prefix, file_path);
+
 CREATE TABLE IF NOT EXISTS vectors (
     node_id TEXT PRIMARY KEY,
     dims    INTEGER NOT NULL,

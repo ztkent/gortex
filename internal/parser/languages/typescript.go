@@ -326,12 +326,44 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 	// range map used to attribute calls to their caller.
 	funcRanges := buildFuncRanges(result)
 
+	// Store-factory destructuring: `const {a,b} = useStore.getState()` binds
+	// later bare `a()` / `b()` calls to the store's actions.
+	destructured := map[string]string{} // local action name → store binding
+	for _, dm := range jsDestructureGetStateRE.FindAllStringSubmatch(string(src), -1) {
+		binding := dm[2]
+		for _, nm := range strings.Split(dm[1], ",") {
+			nm = strings.TrimSpace(nm)
+			if i := strings.IndexByte(nm, ':'); i >= 0 {
+				nm = strings.TrimSpace(nm[i+1:])
+			}
+			if nm != "" {
+				destructured[nm] = binding
+			}
+		}
+	}
+
 	for _, c := range calls {
 		callerID := findEnclosingFunc(funcRanges, c.line)
 		if callerID == "" {
 			continue
 		}
 		if !c.isMember {
+			if binding, ok := destructured[c.name]; ok {
+				if memberID := objLiteralMembers[binding][c.name]; memberID != "" {
+					result.Edges = append(result.Edges, &graph.Edge{
+						From: callerID, To: memberID,
+						Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
+						Origin: graph.OriginASTResolved, Confidence: 0.9,
+					})
+					continue
+				}
+				result.Edges = append(result.Edges, &graph.Edge{
+					From: callerID, To: "unresolved::" + c.name,
+					Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
+					Meta: map[string]any{"via": "store-factory", "store_binding": binding, "store_action": c.name},
+				})
+				continue
+			}
 			result.Edges = append(result.Edges, &graph.Edge{
 				From: callerID, To: "unresolved::" + c.name,
 				Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
@@ -360,6 +392,23 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 			result.Edges = append(result.Edges, &graph.Edge{
 				From: callerID, To: "unresolved::extern::" + importPath + "::" + c.method,
 				Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
+			})
+			continue
+		}
+		// Store-factory chained call: `useStore.getState().action()`.
+		if binding, ok := jsParseGetStateChain(c.receiver); ok {
+			if memberID := objLiteralMembers[binding][c.method]; memberID != "" {
+				result.Edges = append(result.Edges, &graph.Edge{
+					From: callerID, To: memberID,
+					Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
+					Origin: graph.OriginASTResolved, Confidence: 0.9,
+				})
+				continue
+			}
+			result.Edges = append(result.Edges, &graph.Edge{
+				From: callerID, To: "unresolved::*." + c.method,
+				Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
+				Meta: map[string]any{"via": "store-factory", "store_binding": binding, "store_action": c.method},
 			})
 			continue
 		}
@@ -565,6 +614,12 @@ func (e *TypeScriptExtractor) emitArrowField(m parser.QueryResult, filePath, fil
 	// Walk up: pair → object → ... look for the nearest variable_declarator
 	// or assignment whose name we can borrow.
 	owner := tsArrowFieldOwner(def.Node, src)
+	storeFactory := ""
+	if owner == "" || jsIsStoreOptionKey(owner) {
+		if b, _, ok := jsStoreFactoryBinding(def.Node, src); ok {
+			owner, storeFactory = b, b
+		}
+	}
 	name := prop
 	if owner != "" {
 		name = owner + "." + prop
@@ -574,6 +629,10 @@ func (e *TypeScriptExtractor) emitArrowField(m parser.QueryResult, filePath, fil
 	// the human-readable name visible as Node.Name.
 	id := fmt.Sprintf("%s::%s@%d", filePath, name, def.StartLine+1)
 	meta := map[string]any{"signature": fmt.Sprintf("%s: () =>", name)}
+	if storeFactory != "" {
+		meta["store_factory"] = storeFactory
+		meta["store_member"] = prop
+	}
 	if doc := ExtractDocAbove(src, def.StartLine, DocLangBlockStar); doc != "" {
 		meta["doc"] = doc
 	}
@@ -968,12 +1027,22 @@ func (e *TypeScriptExtractor) emitObjectLiteralMethod(m parser.QueryResult, file
 		return "", "", ""
 	}
 	owner = tsArrowFieldOwner(def.Node, src)
+	storeFactory := ""
+	if owner == "" || jsIsStoreOptionKey(owner) {
+		if b, _, ok := jsStoreFactoryBinding(def.Node, src); ok {
+			owner, storeFactory = b, b
+		}
+	}
 	name := member
 	if owner != "" {
 		name = owner + "." + member
 	}
 	id = fmt.Sprintf("%s::%s@%d", filePath, name, def.StartLine+1)
 	meta := map[string]any{"signature": fmt.Sprintf("%s()", name)}
+	if storeFactory != "" {
+		meta["store_factory"] = storeFactory
+		meta["store_member"] = member
+	}
 	if doc := ExtractDocAbove(src, def.StartLine, DocLangBlockStar); doc != "" {
 		meta["doc"] = doc
 	}
