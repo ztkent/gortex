@@ -41,6 +41,7 @@ type ReviewStats struct {
 	BySeverity   map[string]int `json:"by_severity"`   // severity histogram of the report
 	Truncated    bool           `json:"truncated"`     // a budget bound dropped some candidates
 	LLMRequested bool           `json:"llm_requested"` // the LLM phase was asked to run
+	Gate         GateStats      `json:"gate"`          // confidence / severity / category / cap suppression summary
 }
 
 // computeVerdict is the worst-of verdict over the report's findings and per-file

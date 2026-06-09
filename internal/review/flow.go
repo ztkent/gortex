@@ -52,6 +52,11 @@ type Options struct {
 	// MaxLLMTokens caps the freeform generation request. Defaults to a sane
 	// value when <= 0.
 	MaxLLMTokens int
+	// Config supplies the confidence / severity / category / cap gate applied
+	// to the merged findings before the report is assembled. A zero-value
+	// ReviewConfig is a pass-through — no finding is dropped — so the legacy
+	// callers that leave it unset see the report they always did.
+	Config config.ReviewConfig
 }
 
 const defaultMaxLLMTokens = 2048
@@ -298,6 +303,10 @@ func compress(opts Options, plan *reviewPlan, llmFindings []Finding, dropped int
 	merged = dedupeFindings(merged)
 	sortFindings(merged)
 
+	// Apply the confidence / severity / category / cap gate. A zero-value
+	// Config yields a pass-through gate so the legacy report is unchanged.
+	merged, gateStats := NewGate(opts.Config).Apply(merged)
+
 	fileRisk := rankFileRisk(plan.diff, opts.Impact, merged)
 	verdict := computeVerdict(merged, fileRisk)
 
@@ -319,6 +328,7 @@ func compress(opts Options, plan *reviewPlan, llmFindings []Finding, dropped int
 			BySeverity:   bySeverity,
 			Truncated:    truncated || (plan.pack != nil && plan.pack.Truncated),
 			LLMRequested: opts.UseLLM,
+			Gate:         gateStats,
 		},
 	}
 }
