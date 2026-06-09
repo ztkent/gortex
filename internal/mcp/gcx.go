@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -2117,4 +2118,58 @@ func encodeTriagePRs(result map[string]any) ([]byte, error) {
 	}
 
 	return buf.Bytes(), nil
+}
+
+// encodeConflictsPRs encodes the conflicts_prs payload as GCX1: a one-row
+// summary plus one row per conflict cluster — the community, its size, the
+// colliding PR numbers, a suggested merge order, and the conflict-risk
+// score. The PR-number lists are flattened to comma-joined strings, the
+// same shape list_prs uses for its blocker list.
+func encodeConflictsPRs(result map[string]any) ([]byte, error) {
+	var buf bytes.Buffer
+
+	total, _ := result["total"].(int)
+	sumEnc := newGCX(&buf, "conflicts_prs.summary", []string{"total"})
+	if err := sumEnc.WriteRow(total); err != nil {
+		return nil, err
+	}
+	if err := sumEnc.Close(); err != nil {
+		return nil, err
+	}
+
+	conEnc := newGCX(&buf, "conflicts_prs.conflicts",
+		[]string{"community", "size", "prs", "suggested_order", "risk"},
+	)
+	if conflicts, ok := result["conflicts"].([]map[string]any); ok {
+		for _, c := range conflicts {
+			community, _ := c["community"].(string)
+			size, _ := c["size"].(int)
+			prs, _ := c["prs"].([]int)
+			order, _ := c["suggested_order"].([]int)
+			risk, _ := c["risk"].(float64)
+			if err := conEnc.WriteRow(
+				community, size, joinInts(prs), joinInts(order), roundFloat(risk),
+			); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if err := conEnc.Close(); err != nil {
+		return nil, err
+	}
+
+	return buf.Bytes(), nil
+}
+
+// joinInts renders a slice of ints as a comma-joined string for GCX1
+// scalar columns that carry a small list (e.g. colliding PR numbers).
+func joinInts(xs []int) string {
+	if len(xs) == 0 {
+		return ""
+	}
+	parts := make([]string, len(xs))
+	for i, x := range xs {
+		parts[i] = strconv.Itoa(x)
+	}
+	return strings.Join(parts, ",")
 }
