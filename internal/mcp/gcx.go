@@ -2355,6 +2355,63 @@ func encodePRReviewContext(out prReviewContext) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// encodeCritiqueReview renders the self-critique result into GCX1: a one-row
+// summary (revised verdict + kept/dropped/uncertain counts + whether the LLM
+// adjudicated), a kept-findings row-section, and a dropped-findings row-section
+// carrying the critique verdict + reason per finding. The append-only section
+// layout keeps the encoder forward compatible — a new section adds a row-section,
+// never reorders an existing one.
+func encodeCritiqueReview(out critiqueReviewResult) ([]byte, error) {
+	var buf bytes.Buffer
+
+	sumEnc := newGCX(&buf, "critique_review.summary",
+		[]string{"verdict", "kept", "dropped", "uncertain", "total", "llm_used", "elapsed_ms", "summary"},
+	)
+	if err := sumEnc.WriteRow(out.Verdict, out.KeptCount, len(out.Dropped), out.Uncertain,
+		out.Total, out.LLMUsed, out.ElapsedMs, out.Summary); err != nil {
+		return nil, err
+	}
+	if err := sumEnc.Close(); err != nil {
+		return nil, err
+	}
+
+	keptEnc := newGCX(&buf, "critique_review.kept",
+		[]string{"file", "line", "severity", "category", "rule", "message"},
+	)
+	for _, f := range out.Kept {
+		line := f.Line
+		if line == 0 {
+			line = f.StartLine
+		}
+		if err := keptEnc.WriteRow(f.File, line, string(f.Severity), f.Category, f.Rule, f.Message); err != nil {
+			return nil, err
+		}
+	}
+	if err := keptEnc.Close(); err != nil {
+		return nil, err
+	}
+
+	dropEnc := newGCX(&buf, "critique_review.dropped",
+		[]string{"file", "line", "severity", "category", "rule", "critique_verdict", "critique_reason", "message"},
+	)
+	for _, d := range out.Dropped {
+		f := d.Finding
+		line := f.Line
+		if line == 0 {
+			line = f.StartLine
+		}
+		if err := dropEnc.WriteRow(f.File, line, string(f.Severity), f.Category, f.Rule,
+			string(d.Verdict), d.Reason, f.Message); err != nil {
+			return nil, err
+		}
+	}
+	if err := dropEnc.Close(); err != nil {
+		return nil, err
+	}
+
+	return buf.Bytes(), nil
+}
+
 // encodeReviewPack renders the packaged review envelope into GCX1: a one-row
 // summary (verdict + the gate rollups), a changed-symbol classification
 // row-section, a per-file risk row-section, a findings row-section, and a guards

@@ -303,6 +303,13 @@ type Server struct {
 	// without constructing a real provider.
 	reviewLLMGenOverride func() review.LLMGen
 
+	// critiqueLLMGenOverride substitutes the critique_review tool's LLM seam.
+	// Test-only: production leaves it nil and the handler builds the closure
+	// over llmService.Generate. A non-nil override stands in for the real
+	// provider so a test can drive the self-critique pass without constructing
+	// a backend.
+	critiqueLLMGenOverride func() review.LLMGen
+
 	// proxyHydrate is the cross-daemon proxy-edge lazy hydration hook.
 	// nil unless the daemon installed one (federation.edges on); the
 	// traversal tools call it to pull a proxy node's neighbour ring before
@@ -999,6 +1006,7 @@ func NewServer(engine *query.Engine, g graph.Store, idx *indexer.Indexer, watche
 	s.registerSurprisingConnectionsTool()
 	s.registerReviewQuestionsTool()
 	s.registerPRReviewContextTool()
+	s.registerCritiqueReviewTool()
 	s.registerArchitectureTool()
 	s.registerReplayEpisodeTool()
 	s.registerSafeDeleteSymbolTool()
