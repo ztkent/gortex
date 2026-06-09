@@ -22,6 +22,8 @@ gortex untrack <path>        Remove a repository from the tracked workspace
 gortex workspace <sub>       list [--json] / set / set-all — manage workspace + project slugs across tracked repos
 gortex config exclude ...    add / list / remove entries in the effective ignore list
 gortex query <sub>           Query the knowledge graph from the CLI
+gortex prs [number]          List open PRs with a one-shot review-state classification, or deep-dive one PR's blast radius (gortex prs bundle <n> writes a reviewer graph bundle)
+gortex review [path]         Review a changeset and print line-anchored inline comments + a BLOCK/REVIEW/APPROVE verdict (--diff, --base, --audience, --post)
 gortex wiki [path]           Generate a multi-page markdown wiki (per-community + processes + analysis)
 gortex docs [path]           Generate a "living docs" bundle (recent changes + ownership + stale + blame)
 gortex export [path]         Export the graph to Cypher, GraphML, or Mermaid (--format mermaid --scope all)
@@ -93,6 +95,33 @@ gortex query stats                      Show graph statistics
 ```
 
 All query commands support `--format text|json|dot` (DOT output for Graphviz visualization).
+
+## Pull-request review
+
+```bash
+# Triage the review queue — open PRs with CI rollup, review decision, age, and a
+# one-shot review-state label (DRAFT / BASE_MISMATCH / CHANGES_REQUESTED / APPROVED
+# / STALE / READY). Needs a GitHub token (GH_TOKEN / GITHUB_TOKEN).
+gortex prs
+gortex prs --worktrees                  # flag PRs whose head branch is checked out locally
+gortex prs --base main --format json    # override the base branch; machine-readable output
+
+# Deep-dive one PR: join its changed files against the graph for blast radius + risk.
+gortex prs 1234                          # needs a running daemon that tracks the repo
+
+# Write a reviewer graph bundle (impact + privacy-safe receipt + ranked reviewers).
+gortex prs bundle 1234 -o pr-1234.json   # deterministic for an unchanged PR — diffable in CI
+
+# Review a changeset → verdict (BLOCK / REVIEW / APPROVE) + line-anchored inline comments.
+gortex review                            # unstaged changes (default scope)
+gortex review --base main                # compare HEAD against a ref
+gortex review --diff - < patch.diff      # review a pasted unified diff from stdin
+gortex review --use-llm                  # fold in LLM-found findings (needs a configured provider)
+gortex review --audience agent           # terse machine-first packet (vs the default human render)
+gortex review --base main --post --pr 1234   # post the gated findings as inline PR comments (secrets redacted)
+```
+
+The deterministic correctness rulepack always runs (graph-grounded to drop false positives); `--use-llm` adds LLM findings relocated to exact lines. Posting to a public / fork PR is opt-in via `--confirm-public`; `--dry-run` prints the already-redacted payloads without any network call. The same surface is exposed to agents over MCP — see [mcp.md](mcp.md#pr-review).
 
 ## Other commands
 
