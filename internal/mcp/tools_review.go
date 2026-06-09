@@ -76,6 +76,111 @@ func (s *Server) registerReviewTools() {
 		),
 		s.handleReviewPack,
 	)
+
+	s.addTool(
+		mcp.NewTool("suppress_finding",
+			mcp.WithDescription("Durably silence a review finding as a false positive — or list / un-suppress existing suppressions — for the current repository. A suppressed finding is identified by a stable key over its rule, category, symbol, file, and (when supplied) the flagged line's source text, so it stays suppressed after the file shifts the finding to a different line. Every subsequent `review` / `review_pack` run drops a suppressed finding (counted in the gate's `identity_suppressed` stat). This is a permanent, per-repo never-flag-again list (sidecar-backed, survives restarts) — distinct from a development memory or a feedback signal. Pass `action:add` with the finding's `identity_key` (preferred) or the `rule`/`category`/`symbol_id`/`file`/`source_line` fields to derive it; `action:list` to see what is suppressed; `action:remove` with an `identity_key` to un-suppress."),
+			mcp.WithString("action", mcp.Description("add (default), list, or remove.")),
+			mcp.WithString("identity_key", mcp.Description("The finding's stable identity key (from a prior review's gate or a list call). Required for remove; preferred for add. When absent on add, the key is derived from rule/category/symbol_id/file/source_line.")),
+			mcp.WithString("rule", mcp.Description("Detector / rule name of the finding (used to derive identity_key on add).")),
+			mcp.WithString("category", mcp.Description("Finding category (used to derive identity_key on add).")),
+			mcp.WithString("symbol_id", mcp.Description("The flagged symbol's ID (used to derive identity_key on add).")),
+			mcp.WithString("file", mcp.Description("The flagged file path (used to derive identity_key on add).")),
+			mcp.WithNumber("line", mcp.Description("The flagged line number. Recorded for context; NOT part of the identity, so the suppression survives line drift.")),
+			mcp.WithString("source_line", mcp.Description("The flagged line's source text. Folded (trimmed) into the identity so the suppression is drift-stable and does not over-suppress sibling findings on the same symbol.")),
+			mcp.WithString("reason", mcp.Description("Why this finding is a false positive (stored alongside the suppression).")),
+			mcp.WithString("author", mcp.Description("Who suppressed it (stored alongside the suppression).")),
+			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
+			mcp.WithNumber("max_bytes", mcp.Description("Cap the marshaled response at this many bytes (list action). Omit for no cap.")),
+		),
+		s.handleSuppressFinding,
+	)
+}
+
+// reviewSuppressions returns the active repo's durable suppression store and its
+// per-repo key for the review gate. Both are zero-valued (nil store, empty key)
+// when InitSuppressions has not run — the review flow tolerates that and
+// suppresses nothing.
+func (s *Server) reviewSuppressions() (*review.SuppressionStore, string) {
+	if s.suppressions == nil {
+		return nil, ""
+	}
+	return s.suppressions.Store(), s.suppressions.RepoKey()
+}
+
+// handleSuppressFinding records, lists, or removes a durable false-positive
+// suppression for the current repository. The add action derives the finding's
+// stable identity key from the supplied fields (or takes an explicit
+// identity_key); list returns every suppression most-recently-hit first; remove
+// deletes one by identity key. The suppression is honoured by every subsequent
+// review / review_pack run via the gate.
+func (s *Server) handleSuppressFinding(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if s.suppressions == nil {
+		return mcp.NewToolResultError("suppression store not initialised"), nil
+	}
+	store := s.suppressions.Store()
+	repoKey := s.suppressions.RepoKey()
+
+	action := strings.ToLower(strings.TrimSpace(req.GetString("action", "add")))
+	switch action {
+	case "list":
+		rows, err := store.List(repoKey)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("list suppressions: %v", err)), nil
+		}
+		return s.respondJSONOrTOON(ctx, req, map[string]any{
+			"suppressions": rows,
+			"total":        len(rows),
+		})
+
+	case "remove", "delete", "unsuppress":
+		key := strings.TrimSpace(req.GetString("identity_key", ""))
+		if key == "" {
+			return mcp.NewToolResultError("suppress_finding remove requires identity_key"), nil
+		}
+		if err := store.Unsuppress(repoKey, key); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("remove suppression: %v", err)), nil
+		}
+		return s.respondJSONOrTOON(ctx, req, map[string]any{
+			"status":       "removed",
+			"identity_key": key,
+		})
+
+	case "add", "suppress", "":
+		f := review.Finding{
+			IdentityKey: strings.TrimSpace(req.GetString("identity_key", "")),
+			Rule:        strings.TrimSpace(req.GetString("rule", "")),
+			Category:    strings.TrimSpace(req.GetString("category", "")),
+			SymbolID:    strings.TrimSpace(req.GetString("symbol_id", "")),
+			File:        strings.TrimSpace(req.GetString("file", "")),
+			Line:        req.GetInt("line", 0),
+			SourceLine:  req.GetString("source_line", ""),
+		}
+		// Require enough to derive a meaningful identity: either an explicit
+		// key, or at least a rule plus a symbol/file to anchor it.
+		if f.IdentityKey == "" && f.Rule == "" && f.SymbolID == "" && f.File == "" {
+			return mcp.NewToolResultError("suppress_finding add requires identity_key, or at least rule + symbol_id/file to derive one"), nil
+		}
+		if f.IdentityKey == "" {
+			f.IdentityKey = review.IdentityKey(f)
+		}
+		reason := strings.TrimSpace(req.GetString("reason", ""))
+		author := strings.TrimSpace(req.GetString("author", ""))
+		if err := store.Suppress(repoKey, f, reason, author); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("suppress finding: %v", err)), nil
+		}
+		return s.respondJSONOrTOON(ctx, req, map[string]any{
+			"status":       "suppressed",
+			"identity_key": f.IdentityKey,
+			"rule":         f.Rule,
+			"category":     f.Category,
+			"symbol_id":    f.SymbolID,
+			"file":         f.File,
+		})
+
+	default:
+		return mcp.NewToolResultError(fmt.Sprintf("unknown action %q (want add, list, or remove)", action)), nil
+	}
 }
 
 // inlineComment is one line-anchored review finding projected onto the inline
@@ -454,6 +559,7 @@ func (s *Server) handleReview(ctx context.Context, req mcp.CallToolRequest) (*mc
 	useLLM := requestBoolDefault(req, "use_llm", false)
 	gen := s.reviewLLMGen(useLLM)
 
+	suppStore, suppRepoKey := s.reviewSuppressions()
 	report, err := review.Run(ctx, s.graph, gen, review.Options{
 		RepoRoot:        repoRoot,
 		Scope:           scope,
@@ -463,6 +569,8 @@ func (s *Server) handleReview(ctx context.Context, req mcp.CallToolRequest) (*mc
 		Impact:          impact,
 		UseLLM:          useLLM && gen != nil,
 		TokenBudget:     intArg(req.GetArguments(), "max_tokens", 0),
+		Suppressions:    suppStore,
+		RepoKey:         suppRepoKey,
 	})
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
@@ -609,7 +717,7 @@ func reviewPayload(report *review.ReviewReport) map[string]any {
 			if line == 0 {
 				line = f.StartLine
 			}
-			commentRows = append(commentRows, map[string]any{
+			row := map[string]any{
 				"file":     f.File,
 				"line":     line,
 				"severity": string(f.Severity),
@@ -617,7 +725,13 @@ func reviewPayload(report *review.ReviewReport) map[string]any {
 				"rule":     f.Rule,
 				"category": f.Category,
 				"source":   f.Source,
-			})
+			}
+			// Expose the stable identity key so an agent can suppress this exact
+			// finding via suppress_finding without re-deriving it.
+			if f.IdentityKey != "" {
+				row["identity_key"] = f.IdentityKey
+			}
+			commentRows = append(commentRows, row)
 		}
 		for _, fr := range report.FileRisk {
 			fileRisk = append(fileRisk, map[string]any{
@@ -654,18 +768,18 @@ type classifiedSymbol struct {
 // verification command, the privacy-safe risk receipt, and an optional tiered
 // review pack.
 type reviewEnvelope struct {
-	Verdict             string                  `json:"verdict"`
-	Summary             string                  `json:"summary"`
-	ChangedSymbols      []classifiedSymbol      `json:"changed_symbols"`
-	FileRisk            []review.FileRisk       `json:"file_risk"`
-	Findings            []inlineComment         `json:"findings"`
-	Contracts           *contractImpact         `json:"contracts,omitempty"`
+	Verdict             string                    `json:"verdict"`
+	Summary             string                    `json:"summary"`
+	ChangedSymbols      []classifiedSymbol        `json:"changed_symbols"`
+	FileRisk            []review.FileRisk         `json:"file_risk"`
+	Findings            []inlineComment           `json:"findings"`
+	Contracts           *contractImpact           `json:"contracts,omitempty"`
 	Guards              []analysis.GuardViolation `json:"guards"`
-	HighRiskPreviews    []reviewPreview         `json:"high_risk_previews,omitempty"`
-	TestTargets         []string                `json:"test_targets"`
-	VerificationCommand string                  `json:"verification_command"`
-	Receipt             analysis.ReviewReceipt  `json:"receipt"`
-	Pack                *review.ReviewPack      `json:"pack,omitempty"`
+	HighRiskPreviews    []reviewPreview           `json:"high_risk_previews,omitempty"`
+	TestTargets         []string                  `json:"test_targets"`
+	VerificationCommand string                    `json:"verification_command"`
+	Receipt             analysis.ReviewReceipt    `json:"receipt"`
+	Pack                *review.ReviewPack        `json:"pack,omitempty"`
 }
 
 // reviewPreview is the cost-bounded speculative-edit preview run for a single
@@ -751,6 +865,7 @@ func (s *Server) handleReviewPack(ctx context.Context, req mcp.CallToolRequest) 
 	// The review report (deterministic rulepack always; LLM phase gated).
 	useLLM := requestBoolDefault(req, "use_llm", false)
 	gen := s.reviewLLMGen(useLLM)
+	suppStore, suppRepoKey := s.reviewSuppressions()
 	report, err := review.Run(ctx, s.graph, gen, review.Options{
 		RepoRoot:        repoRoot,
 		Scope:           scope,
@@ -760,6 +875,8 @@ func (s *Server) handleReviewPack(ctx context.Context, req mcp.CallToolRequest) 
 		Impact:          impact,
 		UseLLM:          useLLM && gen != nil,
 		TokenBudget:     intArg(req.GetArguments(), "max_tokens", 0),
+		Suppressions:    suppStore,
+		RepoKey:         suppRepoKey,
 	})
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil

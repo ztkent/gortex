@@ -28,11 +28,15 @@ type GateStats struct {
 	// OverCap counts findings trimmed because the kept set exceeded
 	// MaxFindings — the lowest-ranked findings are the ones dropped.
 	OverCap int `json:"over_cap"`
+	// IdentitySuppressed counts findings dropped because their IdentityKey was
+	// recorded in the durable per-repo suppression store — known false
+	// positives silenced permanently until explicitly removed.
+	IdentitySuppressed int `json:"identity_suppressed"`
 }
 
 // Suppressed is the total number of findings the gate removed for any reason.
 func (g GateStats) Suppressed() int {
-	return g.BelowConfidence + g.BelowSeverity + g.CategoryFiltered + g.OverCap
+	return g.BelowConfidence + g.BelowSeverity + g.CategoryFiltered + g.OverCap + g.IdentitySuppressed
 }
 
 // Gate is a deterministic confidence / severity / category / cap filter over a
@@ -44,6 +48,12 @@ type Gate struct {
 	minSeverity   Severity
 	categories    map[string]bool
 	maxFindings   int
+	// supp is the durable per-repo false-positive filter consulted before a
+	// finding is kept. Nil (the default) disables suppression entirely; a
+	// finding's IdentityKey is computed on demand when supp is set and the
+	// finding does not already carry one.
+	supp    *SuppressionStore
+	repoKey string
 }
 
 // NewGate compiles a Gate from the review config. An empty Categories list
@@ -68,6 +78,19 @@ func NewGate(cfg config.ReviewConfig) Gate {
 			}
 		}
 	}
+	return g
+}
+
+// WithSuppression returns a copy of the gate that also drops findings whose
+// IdentityKey is recorded in the durable per-repo suppression store. A nil store
+// (or an empty repoKey) leaves the gate's behaviour unchanged — suppression is
+// purely additive over the confidence / severity / category / cap pipeline. The
+// returned gate stamps each finding's IdentityKey before the suppression lookup,
+// so the kept findings carry a stable identity even when the generator left it
+// blank.
+func (g Gate) WithSuppression(supp *SuppressionStore, repoKey string) Gate {
+	g.supp = supp
+	g.repoKey = repoKey
 	return g
 }
 
@@ -97,6 +120,17 @@ func (g Gate) Apply(findings []Finding) ([]Finding, GateStats) {
 		// Category allow-list. A nil map means "all categories".
 		if g.categories != nil && !g.categories[normalizeCategory(f.Category)] {
 			stats.CategoryFiltered++
+			continue
+		}
+		// Durable false-positive suppression. Stamp a stable IdentityKey (so the
+		// kept finding carries one even if the generator did not), then drop the
+		// finding when that identity is on the per-repo never-flag-again list.
+		// A nil store leaves IdentityKey populated but suppresses nothing.
+		if f.IdentityKey == "" {
+			f.IdentityKey = IdentityKey(f)
+		}
+		if g.supp != nil && g.supp.IsSuppressed(g.repoKey, f.IdentityKey) {
+			stats.IdentitySuppressed++
 			continue
 		}
 		kept = append(kept, f)

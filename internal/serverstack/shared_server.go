@@ -444,6 +444,7 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 	srv.InitFeedback(sideCfg.FeedbackDir, sideCfg.FeedbackRepo)
 	srv.InitNotes(sideCfg.NotesDir, sideCfg.NotesRepo)
 	srv.InitMemories(sideCfg.NotesDir, sideCfg.NotesRepo)
+	srv.InitSuppressions(sideCfg.NotesDir, sideCfg.NotesRepo)
 	srv.InitNotebook(sideCfg.NotebookPath)
 	srv.InitCombo(sideCfg.FeedbackDir, sideCfg.FeedbackRepo, gortexmcp.ModeAI)
 	srv.InitFrecency(sideCfg.FeedbackDir, sideCfg.FeedbackRepo, gortexmcp.ModeAI)

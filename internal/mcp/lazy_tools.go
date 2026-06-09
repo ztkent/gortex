@@ -71,6 +71,7 @@ var hotEagerTools = map[string]bool{
 	"sibling_diff_context": true,
 	"review":               true,
 	"review_pack":          true,
+	"suppress_finding":     true,
 }
 
 // LazyToolsSearchName is the well-known name of the discovery tool the

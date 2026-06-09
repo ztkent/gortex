@@ -55,4 +55,12 @@ type Finding struct {
 	Body       string `json:"body,omitempty"`       // full markdown body for posting
 	Suggestion string `json:"suggestion,omitempty"` //
 	GenTokens  int    `json:"gen_tokens,omitempty"` // tokens attributed to this finding
+
+	// SourceLine is the flagged source line's text, passed in by the finding
+	// generator. IdentityKey folds its trimmed form into the suppression key so
+	// a dismissed finding stays dismissed after the file shifts (line drift). It
+	// is never persisted to disk and never posted; it exists only to compute a
+	// drift-stable identity. Empty SourceLine degrades IdentityKey to the coarser
+	// symbol + rule + category key.
+	SourceLine string `json:"-"`
 }

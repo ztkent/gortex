@@ -220,6 +220,11 @@ type Server struct {
 	notebook *notebookManager
 	combo    *comboManager
 	frecency *frecencyTracker
+	// suppressions holds the durable per-repo review-finding FP suppression
+	// store (sidecar-backed). The review gate consults it to drop known false
+	// positives by stable identity; the suppress_finding tool mutates it. Nil
+	// until InitSuppressions fires; the review flow tolerates a nil store.
+	suppressions *suppressionManager
 
 	// packCache retains recent smart_context pack views keyed by pack
 	// root so a later call with delta_from=<root> returns only the
@@ -1124,6 +1129,16 @@ func (s *Server) InitNotes(cacheDir, repoPath string) {
 // with the repo and surface in PR reviews.
 func (s *Server) InitNotebook(repoPath string) {
 	s.notebook = newNotebookManager(repoPath)
+}
+
+// InitSuppressions initializes the durable per-repo review-finding
+// false-positive suppression store used by the review gate and the
+// suppress_finding tool. Call after NewServer with the cache directory and
+// primary repo path. Empty arguments yield an in-memory-only store (still wired
+// to the tools, just doesn't flush to disk). Suppressions persist across daemon
+// restarts and are per-repo, scoped by the same cache key as notes / memories.
+func (s *Server) InitSuppressions(cacheDir, repoPath string) {
+	s.suppressions = newSuppressionManager(cacheDir, repoPath)
 }
 
 func (s *Server) InitMemories(cacheDir, repoPath string) {

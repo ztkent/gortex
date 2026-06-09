@@ -57,6 +57,15 @@ type Options struct {
 	// ReviewConfig is a pass-through — no finding is dropped — so the legacy
 	// callers that leave it unset see the report they always did.
 	Config config.ReviewConfig
+	// Suppressions is the durable per-repo false-positive filter consulted by
+	// the gate: a finding whose IdentityKey is recorded for RepoKey is silently
+	// dropped from the report and counted in the gate's IdentitySuppressed stat.
+	// Nil disables suppression (every finding survives the gate's suppress step).
+	Suppressions *SuppressionStore
+	// RepoKey scopes the suppression lookup to one repository — the same
+	// per-repo key the notes / memories side-stores use. Ignored when
+	// Suppressions is nil.
+	RepoKey string
 }
 
 const defaultMaxLLMTokens = 2048
@@ -303,9 +312,13 @@ func compress(opts Options, plan *reviewPlan, llmFindings []Finding, dropped int
 	merged = dedupeFindings(merged)
 	sortFindings(merged)
 
-	// Apply the confidence / severity / category / cap gate. A zero-value
-	// Config yields a pass-through gate so the legacy report is unchanged.
-	merged, gateStats := NewGate(opts.Config).Apply(merged)
+	// Apply the confidence / severity / category / cap gate, plus the durable
+	// per-repo false-positive suppression filter. A zero-value Config + nil
+	// suppression store yields a pass-through gate so the legacy report is
+	// unchanged.
+	merged, gateStats := NewGate(opts.Config).
+		WithSuppression(opts.Suppressions, opts.RepoKey).
+		Apply(merged)
 
 	fileRisk := rankFileRisk(plan.diff, opts.Impact, merged)
 	verdict := computeVerdict(merged, fileRisk)

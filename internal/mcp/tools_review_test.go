@@ -317,13 +317,14 @@ type reviewOut struct {
 	Summary  string `json:"summary"`
 	Total    int    `json:"total"`
 	Comments []struct {
-		File     string `json:"file"`
-		Line     int    `json:"line"`
-		Severity string `json:"severity"`
-		Message  string `json:"message"`
-		Rule     string `json:"rule"`
-		Category string `json:"category"`
-		Source   string `json:"source"`
+		File        string `json:"file"`
+		Line        int    `json:"line"`
+		Severity    string `json:"severity"`
+		Message     string `json:"message"`
+		Rule        string `json:"rule"`
+		Category    string `json:"category"`
+		Source      string `json:"source"`
+		IdentityKey string `json:"identity_key"`
 	} `json:"comments"`
 	FileRisk []struct {
 		File     string `json:"file"`
@@ -451,6 +452,101 @@ func TestReview_GCXAndTOONAndBudget(t *testing.T) {
 	toon := callReview(t, srv, toonArgs)
 	require.False(t, toon.IsError)
 	require.Contains(t, toon.Content[0].(mcplib.TextContent).Text, "verdict")
+}
+
+func callSuppressFinding(t *testing.T, srv *Server, args map[string]any) *mcplib.CallToolResult {
+	t.Helper()
+	req := mcplib.CallToolRequest{}
+	req.Params.Name = "suppress_finding"
+	req.Params.Arguments = args
+	res, err := srv.handleSuppressFinding(t.Context(), req)
+	require.NoError(t, err)
+	return res
+}
+
+// TestSuppressFinding_SuppressesAcrossReviews is the end-to-end suppression
+// proof: a review surfaces the planted inverted-err-check finding, suppress_finding
+// records its identity, and a subsequent review of the same changeset no longer
+// flags it (and the gate counts it as identity-suppressed).
+func TestSuppressFinding_SuppressesAcrossReviews(t *testing.T) {
+	dir, file := reviewGitRepo(t)
+	srv := indexedSiblingServer(t, dir)
+	// Wire a sidecar-backed suppression store at a temp cache dir.
+	srv.InitSuppressions(t.TempDir(), dir)
+	require.NotNil(t, srv.suppressions)
+
+	// First review: the finding is present and carries an identity key.
+	out := decodeReview(t, callReview(t, srv, map[string]any{"base": "base-ref"}))
+	require.Equal(t, "BLOCK", out.Verdict)
+
+	var identityKey string
+	for _, c := range out.Comments {
+		if c.Rule == "go-inverted-err-check" {
+			identityKey = c.IdentityKey
+		}
+	}
+	require.NotEmpty(t, identityKey, "review must expose the finding's identity_key; got %+v", out.Comments)
+
+	// Suppress it by identity key.
+	supRes := callSuppressFinding(t, srv, map[string]any{
+		"action":       "add",
+		"identity_key": identityKey,
+		"rule":         "go-inverted-err-check",
+		"reason":       "intentional in this handler",
+		"author":       "tester",
+	})
+	require.False(t, supRes.IsError, "suppress add errored: %v", supRes)
+
+	// List shows the one suppression.
+	listRes := callSuppressFinding(t, srv, map[string]any{"action": "list"})
+	var listOut struct {
+		Total        int `json:"total"`
+		Suppressions []struct {
+			IdentityKey string `json:"identity_key"`
+		} `json:"suppressions"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(listRes.Content[0].(mcplib.TextContent).Text), &listOut))
+	require.Equal(t, 1, listOut.Total)
+	require.Equal(t, identityKey, listOut.Suppressions[0].IdentityKey)
+
+	// Second review: the suppressed finding is gone.
+	out2 := decodeReview(t, callReview(t, srv, map[string]any{"base": "base-ref"}))
+	for _, c := range out2.Comments {
+		require.NotEqual(t, "go-inverted-err-check", c.Rule,
+			"a suppressed finding must not reappear; got %+v", out2.Comments)
+	}
+
+	// Un-suppress and confirm the finding returns.
+	rmRes := callSuppressFinding(t, srv, map[string]any{
+		"action":       "remove",
+		"identity_key": identityKey,
+	})
+	require.False(t, rmRes.IsError, "suppress remove errored: %v", rmRes)
+
+	out3 := decodeReview(t, callReview(t, srv, map[string]any{"base": "base-ref"}))
+	var back bool
+	for _, c := range out3.Comments {
+		if c.Rule == "go-inverted-err-check" {
+			back = true
+			require.Equal(t, filepath.ToSlash(file), filepath.ToSlash(c.File))
+		}
+	}
+	require.True(t, back, "un-suppressed finding must reappear; got %+v", out3.Comments)
+}
+
+// TestSuppressFinding_RegisteredEagerly asserts the suppress_finding tool is in
+// the eager (hot) review-engine set.
+func TestSuppressFinding_RegisteredEagerly(t *testing.T) {
+	require.True(t, hotEagerTools["suppress_finding"],
+		"suppress_finding must be eagerly registered (hot), not deferred")
+
+	t.Setenv("GORTEX_LAZY_TOOLS", "1")
+	srv, _ := setupTestServer(t)
+	live := srv.mcpServer.ListTools()
+	require.Contains(t, live, "suppress_finding",
+		"eager suppress_finding tool must appear in tools/list without tools_search expansion")
+	require.False(t, srv.lazy.IsDeferred("suppress_finding"),
+		"suppress_finding must not be deferred")
 }
 
 // TestReview_RegisteredEagerly asserts the review tool is in the eager set.

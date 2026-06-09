@@ -121,6 +121,22 @@ CREATE TABLE IF NOT EXISTS migration_marks (
 	done_at  INTEGER NOT NULL DEFAULT 0,
 	PRIMARY KEY (repo_key, kind)
 ) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS suppressions (
+	repo_key     TEXT NOT NULL,
+	identity_key TEXT NOT NULL,
+	rule         TEXT NOT NULL DEFAULT '',
+	category     TEXT NOT NULL DEFAULT '',
+	file         TEXT NOT NULL DEFAULT '',
+	symbol_id    TEXT NOT NULL DEFAULT '',
+	reason       TEXT NOT NULL DEFAULT '',
+	author       TEXT NOT NULL DEFAULT '',
+	hit_count    INTEGER NOT NULL DEFAULT 0,
+	created_at   INTEGER NOT NULL DEFAULT 0,
+	last_hit     INTEGER NOT NULL DEFAULT 0,
+	PRIMARY KEY (repo_key, identity_key)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_supp_updated ON suppressions (repo_key, last_hit DESC);
 `
 
 // DefaultSidecarPath is the canonical location of the side-store DB:
@@ -704,6 +720,120 @@ func (s *SidecarStore) NotebookPrune(repoKey string, cutoff time.Time) error {
 		DELETE FROM notebooks
 		WHERE repo_key = ?
 		  AND (CASE WHEN last_used > 0 THEN last_used ELSE updated_at END) < ?`, repoKey, c)
+	return err
+}
+
+// ===========================================================================
+// Suppressions (durable per-repo false-positive review filter)
+// ===========================================================================
+
+// SuppressionEntry is one durable review-finding suppression row, keyed by
+// (repo_key, IdentityKey) — a finding silenced permanently for a repo until it
+// is explicitly removed. The IdentityKey is the line-drift-stable identity the
+// review layer computes; the remaining fields are denormalised context so a
+// listing is human-legible without re-deriving the finding.
+type SuppressionEntry struct {
+	IdentityKey string
+	Rule        string
+	Category    string
+	File        string
+	SymbolID    string
+	Reason      string
+	Author      string
+	HitCount    int64
+	Created     time.Time
+	LastHit     time.Time
+}
+
+// UpsertSuppression writes (or replaces) a single suppression row. A replace
+// preserves the existing HitCount/Created when the caller leaves them zero and
+// the row already exists is NOT done here — the row is replaced wholesale, so
+// callers that want to keep counters read first or use BumpSuppressionHit.
+func (s *SidecarStore) UpsertSuppression(repoKey string, e SuppressionEntry) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	_, err := s.db.Exec(`
+		INSERT OR REPLACE INTO suppressions
+		(repo_key, identity_key, rule, category, file, symbol_id, reason, author,
+		 hit_count, created_at, last_hit)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+		repoKey, e.IdentityKey, e.Rule, e.Category, e.File, e.SymbolID, e.Reason,
+		e.Author, e.HitCount, unixOrZero(e.Created), unixOrZero(e.LastHit))
+	if err != nil {
+		return fmt.Errorf("persistence: upsert suppression: %w", err)
+	}
+	return nil
+}
+
+// LoadSuppression reads a single suppression row by identity key. The bool is
+// false when no row exists (a clean miss, never an error for the caller).
+func (s *SidecarStore) LoadSuppression(repoKey, identityKey string) (SuppressionEntry, bool) {
+	row := s.db.QueryRow(`
+		SELECT identity_key, rule, category, file, symbol_id, reason, author,
+		       hit_count, created_at, last_hit
+		FROM suppressions WHERE repo_key = ? AND identity_key = ?`, repoKey, identityKey)
+	var (
+		e                SuppressionEntry
+		created, lastHit int64
+	)
+	if err := row.Scan(&e.IdentityKey, &e.Rule, &e.Category, &e.File, &e.SymbolID,
+		&e.Reason, &e.Author, &e.HitCount, &created, &lastHit); err != nil {
+		return SuppressionEntry{}, false
+	}
+	e.Created = fromUnix(created)
+	e.LastHit = fromUnix(lastHit)
+	return e, true
+}
+
+// LoadSuppressions reads every suppression row for a repo, most-recently-hit
+// first (created-then-key tiebreak for rows never hit), matching idx_supp_updated.
+func (s *SidecarStore) LoadSuppressions(repoKey string) ([]SuppressionEntry, error) {
+	rows, err := s.db.Query(`
+		SELECT identity_key, rule, category, file, symbol_id, reason, author,
+		       hit_count, created_at, last_hit
+		FROM suppressions WHERE repo_key = ?
+		ORDER BY last_hit DESC, created_at DESC, identity_key ASC`, repoKey)
+	if err != nil {
+		return nil, fmt.Errorf("persistence: query suppressions: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []SuppressionEntry
+	for rows.Next() {
+		var (
+			e                SuppressionEntry
+			created, lastHit int64
+		)
+		if err := rows.Scan(&e.IdentityKey, &e.Rule, &e.Category, &e.File, &e.SymbolID,
+			&e.Reason, &e.Author, &e.HitCount, &created, &lastHit); err != nil {
+			return out, fmt.Errorf("persistence: scan suppression: %w", err)
+		}
+		e.Created = fromUnix(created)
+		e.LastHit = fromUnix(lastHit)
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// DeleteSuppression removes a single suppression row. Missing rows are not errors.
+func (s *SidecarStore) DeleteSuppression(repoKey, identityKey string) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	_, err := s.db.Exec(`DELETE FROM suppressions WHERE repo_key = ? AND identity_key = ?`, repoKey, identityKey)
+	return err
+}
+
+// BumpSuppressionHit records a suppression match: it increments hit_count and
+// stamps last_hit to now for the row, if it exists. A missing row is a no-op
+// (not an error) — IsSuppressed returned false for it, so there was nothing to
+// bump. The write is a single guarded UPDATE.
+func (s *SidecarStore) BumpSuppressionHit(repoKey, identityKey string, at time.Time) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	_, err := s.db.Exec(`
+		UPDATE suppressions
+		SET hit_count = hit_count + 1, last_hit = ?
+		WHERE repo_key = ? AND identity_key = ?`, unixOrZero(at), repoKey, identityKey)
 	return err
 }
 
