@@ -258,6 +258,68 @@ func TestTriagePRs_SortedDescending(t *testing.T) {
 	require.Equal(t, 2, out.Ranked[0].Number, "the higher-risk PR must rank first")
 }
 
+// TestTriagePRs_SecondRunHitsCacheNoRefetch proves the per-(repo,number) PR
+// cache actually saves a forge round-trip: two successive self-served triage
+// runs within the TTL fetch each PR's files exactly once. The first run
+// self-serves the list and fetches files per PR (stamping the hydrated PR
+// into the cache); the second run lists again but resolves every PR's files
+// from the cache, so the file-fetch seam is NOT hit a second time.
+func TestTriagePRs_SecondRunHitsCacheNoRefetch(t *testing.T) {
+	// A resolvable token so forge.Available == true and the handler self-serves.
+	t.Setenv("GH_TOKEN", "x-fake-token")
+
+	srv, hubFile := prToolsTestServer(t)
+
+	// ListPRs returns PRs with EMPTY Files (the forge contract) so the per-PR
+	// file fetch is the only path that hydrates them — and thus the only thing
+	// the cache can save on the second run.
+	listHits := 0
+	fileHits := 0
+	withSeams(t,
+		func(context.Context, string, forge.ListOpts) ([]forge.PR, error) {
+			listHits++
+			return []forge.PR{
+				{Number: 1, Title: "low", Author: "a"},
+				{Number: 2, Title: "high", Author: "b"},
+			}, nil
+		},
+		func(_ context.Context, _ string, number int) ([]string, error) {
+			fileHits++
+			if number == 2 {
+				return []string{hubFile}, nil
+			}
+			return []string{"pkg/unrelated.go"}, nil
+		},
+	)
+
+	// First run: self-serve everything. The list seam fires once and the file
+	// seam fires once per PR.
+	res1 := callPRTool(t, srv, "triage_prs", srv.handleTriagePRs, map[string]any{})
+	require.False(t, res1.IsError, "first run errored: %v", res1)
+	require.Equal(t, 1, listHits, "first run lists once")
+	require.Equal(t, 2, fileHits, "first run fetches files for both PRs")
+
+	// Second run within the TTL on the SAME server: the list is re-served, but
+	// every PR's files are resolved from the cache the first run hydrated — so
+	// the file-fetch seam must NOT fire again.
+	res2 := callPRTool(t, srv, "triage_prs", srv.handleTriagePRs, map[string]any{})
+	require.False(t, res2.IsError, "second run errored: %v", res2)
+	require.Equal(t, 2, fileHits, "second run must reuse cached PR files — the file-fetch seam stays at 2")
+
+	// The cached result is equivalent: both runs rank the security-hub PR first.
+	var out1, out2 struct {
+		Ranked []struct {
+			Number int `json:"number"`
+		} `json:"ranked"`
+	}
+	unmarshalPRResult(t, res1, &out1)
+	unmarshalPRResult(t, res2, &out2)
+	require.Len(t, out2.Ranked, 2)
+	require.Equal(t, out1.Ranked[0].Number, out2.Ranked[0].Number,
+		"the cache-served run ranks identically to the fetched run")
+	require.Equal(t, 2, out2.Ranked[0].Number, "the higher-risk PR ranks first on the cached run")
+}
+
 // --- forge-unavailable: no token, no supplied data -------------------------
 
 func TestPRTools_ForgeUnavailable(t *testing.T) {

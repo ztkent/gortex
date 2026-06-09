@@ -104,6 +104,30 @@ func (c *prCache) put(repo string, number int, pr forge.PR) {
 	c.m[prCacheKey(repo, number)] = prCacheEntry{pr: pr, fetchedAt: time.Now()}
 }
 
+// putList records a list-level PR (one with no hydrated Files) without
+// clobbering an unexpired entry that already carries hydrated Files. A
+// fresh list fan-out runs on every triage / conflicts call, but the PRs it
+// carries have empty Files; overwriting a previously-hydrated entry with one
+// would defeat the cache and force a refetch on the next run. So when a live
+// hydrated entry exists, putList only refreshes its timestamp.
+func (c *prCache) putList(repo string, number int, pr forge.PR) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	key := prCacheKey(repo, number)
+	if e, ok := c.m[key]; ok && len(e.pr.Files) > 0 && len(pr.Files) == 0 {
+		if c.ttl <= 0 || time.Since(e.fetchedAt) <= c.ttl {
+			// Keep the hydrated PR; just slide the freshness window forward.
+			e.fetchedAt = time.Now()
+			c.m[key] = e
+			return
+		}
+	}
+	c.m[key] = prCacheEntry{pr: pr, fetchedAt: time.Now()}
+}
+
 // registerPRTools registers the data-only forge MCP surface — list_prs,
 // get_pr_impact, triage_prs. All three are deferred (they land in the
 // lazy catalog unless GORTEX_LAZY_TOOLS is off), read-only, and forge-
@@ -241,7 +265,7 @@ func (s *Server) handleListPRs(ctx context.Context, req mcp.CallToolRequest) (*m
 		}
 		prs = fetched
 		for _, pr := range prs {
-			s.prCache.put(repo, pr.Number, pr)
+			s.prCache.putList(repo, pr.Number, pr)
 		}
 	}
 
@@ -479,7 +503,7 @@ func (s *Server) handleTriagePRs(ctx context.Context, req mcp.CallToolRequest) (
 		}
 		prs = fetched
 		for _, pr := range prs {
-			s.prCache.put(repo, pr.Number, pr)
+			s.prCache.putList(repo, pr.Number, pr)
 		}
 	}
 
@@ -489,21 +513,12 @@ func (s *Server) handleTriagePRs(ctx context.Context, req mcp.CallToolRequest) (
 
 	ranked := make([]map[string]any, 0, len(prs))
 	for _, pr := range prs {
-		files, ok := filesByNumber[pr.Number]
-		if !ok {
-			// Use the PR's own hydrated files if present; otherwise self-serve.
-			if len(pr.Files) > 0 {
-				files = pr.Files
-			} else {
-				fetched, degraded, ferr := s.fetchPRFiles(ctx, repo, pr.Number)
-				if degraded != nil {
-					return s.respondJSONOrTOON(ctx, req, degraded)
-				}
-				if ferr != nil {
-					return mcp.NewToolResultError(ferr.Error()), nil
-				}
-				files = fetched
-			}
+		files, degraded, ferr := s.resolvePRFiles(ctx, repo, pr, filesByNumber)
+		if degraded != nil {
+			return s.respondJSONOrTOON(ctx, req, degraded)
+		}
+		if ferr != nil {
+			return mcp.NewToolResultError(ferr.Error()), nil
 		}
 		impact := s.prImpactForNumber(ctx, pr.Number, files, false, false)
 		ranked = append(ranked, map[string]any{
@@ -740,6 +755,41 @@ func stripLeadingOrdinal(s string) string {
 		return strings.TrimSpace(s[i+1:])
 	}
 	return s
+}
+
+// resolvePRFiles returns the changed-file set for one PR for the triage /
+// conflicts fan-out, preferring already-available data over a forge call:
+//
+//  1. caller-supplied files (the filesByNumber map) win outright;
+//  2. the PR's own hydrated Files (a supplied `prs` array may carry them);
+//  3. a cached forge.PR with hydrated Files within the TTL — this is what
+//     lets a triage / conflicts re-run within the window skip the refetch;
+//  4. otherwise a self-served forge fetch, whose result is stamped into the
+//     cache (as a hydrated PR) so the NEXT run hits step 3.
+//
+// degraded is non-nil only when a forge-degradation payload should be
+// returned to the caller; err is non-nil only for an unexpected failure.
+func (s *Server) resolvePRFiles(ctx context.Context, repo string, pr forge.PR, filesByNumber map[int][]string) (files []string, degraded map[string]any, err error) {
+	if supplied, ok := filesByNumber[pr.Number]; ok {
+		return supplied, nil, nil
+	}
+	if len(pr.Files) > 0 {
+		return pr.Files, nil, nil
+	}
+	// Cache hit: a prior fan-out stamped this PR's files within the TTL.
+	if cached, ok := s.prCache.get(repo, pr.Number); ok && len(cached.Files) > 0 {
+		return cached.Files, nil, nil
+	}
+	fetched, degraded, ferr := s.fetchPRFiles(ctx, repo, pr.Number)
+	if degraded != nil || ferr != nil {
+		return nil, degraded, ferr
+	}
+	// Stamp the hydrated PR so a subsequent run hits the cache above and
+	// avoids this forge call. Preserve the PR's other fields.
+	hydrated := pr
+	hydrated.Files = fetched
+	s.prCache.put(repo, pr.Number, hydrated)
+	return fetched, nil, nil
 }
 
 // fetchPRFiles resolves the changed-file set for one PR via the forge,

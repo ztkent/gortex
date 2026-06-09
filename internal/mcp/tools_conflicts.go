@@ -91,7 +91,7 @@ func (s *Server) handleConflictsPRs(ctx context.Context, req mcp.CallToolRequest
 		}
 		prs = fetched
 		for _, pr := range prs {
-			s.prCache.put(repo, pr.Number, pr)
+			s.prCache.putList(repo, pr.Number, pr)
 		}
 	}
 
@@ -114,20 +114,12 @@ func (s *Server) handleConflictsPRs(ctx context.Context, req mcp.CallToolRequest
 	prCommunities := map[int][]string{}
 	prRisk := map[int]float64{}
 	for _, pr := range prs {
-		files, ok := filesByNumber[pr.Number]
-		if !ok {
-			if len(pr.Files) > 0 {
-				files = pr.Files
-			} else {
-				fetched, degraded, ferr := s.fetchPRFiles(ctx, repo, pr.Number)
-				if degraded != nil {
-					return s.respondJSONOrTOON(ctx, req, degraded)
-				}
-				if ferr != nil {
-					return mcp.NewToolResultError(ferr.Error()), nil
-				}
-				files = fetched
-			}
+		files, degraded, ferr := s.resolvePRFiles(ctx, repo, pr, filesByNumber)
+		if degraded != nil {
+			return s.respondJSONOrTOON(ctx, req, degraded)
+		}
+		if ferr != nil {
+			return mcp.NewToolResultError(ferr.Error()), nil
 		}
 
 		changedFiles, changedSymbolNodes := s.changedSymbolsForFiles(files)
