@@ -95,6 +95,30 @@ func (s *Server) registerReviewTools() {
 		),
 		s.handleSuppressFinding,
 	)
+
+	s.addTool(
+		mcp.NewTool("post_review",
+			mcp.WithDescription("Post review findings as inline comments on a GitHub PR / GitLab MR. Each finding is mapped to a RIGHT-side (new-code) inline comment anchored to its file + line (multi-line findings carry a start_line < line range), batched into one review. Every comment body is run through a secret-redaction pass BEFORE any payload is built or any request is sent — a body that quotes an inline credential (API key, token, PEM block, password assignment) is redacted (or, by default, the whole finding is skipped) so a secret never egresses. Posting to a public or fork PR is opt-in: pass confirm_public:true (or set review.post.allow_public) or the post is refused. Pass findings as a JSON array (the gated findings from a prior `review` / `review_pack` call); when omitted the deterministic review rulepack runs over the changeset / pasted diff. dry_run:true returns the would-post (already-redacted) payloads without any network call."),
+			mcp.WithNumber("number", mcp.Required(), mcp.Description("The PR / MR number to post comments on.")),
+			mcp.WithString("repo", mcp.Description("Repository prefix to resolve the working tree + token (multi-repo mode).")),
+			mcp.WithString("findings", mcp.Description("JSON array of review findings to post (from a prior review / review_pack call). When omitted, the review rulepack runs over the changeset to produce findings.")),
+			mcp.WithString("diff", mcp.Description("Raw unified-diff text to review off-disk when deriving findings (the pasted-diff path). Ignored when `findings` is supplied.")),
+			mcp.WithString("base", mcp.Description("Base git ref (e.g. main) selecting the changeset when deriving findings. Alias for scope=compare + base_ref=base.")),
+			mcp.WithString("base_ref", mcp.Description("Base ref for scope=compare (default: main) when deriving findings.")),
+			mcp.WithString("scope", mcp.Description("Changeset scope when deriving findings: unstaged (default), staged, all, or compare.")),
+			mcp.WithString("summary", mcp.Description("Top-level review summary body posted alongside the inline comments.")),
+			mcp.WithString("owner", mcp.Description("Repository owner (for the posted review URL).")),
+			mcp.WithString("repo_name", mcp.Description("Repository name (for the posted review URL).")),
+			mcp.WithString("provider", mcp.Description("Forge backend: github (default).")),
+			mcp.WithBoolean("public", mcp.Description("The target PR is on a public or fork repo (world-readable). When true, posting requires confirm_public / review.post.allow_public. Default: false.")),
+			mcp.WithBoolean("confirm_public", mcp.Description("Confirm posting to a public / fork PR (world-readable comments). Default: false — without it a public target is refused.")),
+			mcp.WithBoolean("refuse_on_secret", mcp.Description("Skip a finding whose body still quoted a secret rather than posting a redacted version. Default: true.")),
+			mcp.WithBoolean("dry_run", mcp.Description("Build and return the would-post (already-redacted) payloads without any network call. Default: false.")),
+			mcp.WithString("format", mcp.Description("Output format: json (default), gcx, or toon")),
+			mcp.WithNumber("max_bytes", mcp.Description("Cap the marshaled response at this many bytes. Omit for no cap.")),
+		),
+		s.handlePostReview,
+	)
 }
 
 // reviewSuppressions returns the active repo's durable suppression store and its

@@ -39,6 +39,10 @@ func newReviewTestCmd(t *testing.T) (*cobra.Command, *bytes.Buffer) {
 	reviewUseLLM = false
 	reviewFormat = "text"
 	reviewRepo = ""
+	reviewPost = false
+	reviewPR = 0
+	reviewConfirmPublic = false
+	reviewDryRun = false
 
 	buf := &bytes.Buffer{}
 	cmd := &cobra.Command{Use: "review", RunE: runReview}
@@ -143,4 +147,54 @@ func TestReviewCLI_DiffFromStdin(t *testing.T) {
 	reviewDiff = "-"
 	require.NoError(t, runReview(cmd, nil))
 	require.Equal(t, "diff --git a/y b/y\n+from-stdin\n", gotArgs["diff"])
+}
+
+// TestReviewCLI_PostRelaysToPostReview asserts --post relays to the post_review
+// daemon tool with the PR number and the public-confirmation / dry-run flags.
+func TestReviewCLI_PostRelaysToPostReview(t *testing.T) {
+	orig := reviewDaemonTool
+	t.Cleanup(func() { reviewDaemonTool = orig })
+
+	var gotTool string
+	var gotArgs map[string]any
+	reviewDaemonTool = func(_, tool string, args map[string]any) (json.RawMessage, error) {
+		gotTool = tool
+		gotArgs = args
+		return json.RawMessage(`{"posted":2,"skipped":0,"redacted":1,"dry_run":true}`), nil
+	}
+
+	cmd, _ := newReviewTestCmd(t)
+	reviewPost = true
+	reviewPR = 42
+	reviewBase = "main"
+	reviewConfirmPublic = true
+	reviewDryRun = true
+	require.NoError(t, runReview(cmd, nil))
+
+	require.Equal(t, "post_review", gotTool, "--post must call the post_review daemon tool")
+	require.Equal(t, 42, gotArgs["number"])
+	require.Equal(t, "main", gotArgs["base"])
+	require.Equal(t, true, gotArgs["confirm_public"])
+	require.Equal(t, true, gotArgs["dry_run"])
+}
+
+// TestReviewCLI_PostRequiresPRNumber asserts --post without --pr is an error and
+// never relays to the daemon.
+func TestReviewCLI_PostRequiresPRNumber(t *testing.T) {
+	orig := reviewDaemonTool
+	t.Cleanup(func() { reviewDaemonTool = orig })
+
+	called := false
+	reviewDaemonTool = func(_, _ string, _ map[string]any) (json.RawMessage, error) {
+		called = true
+		return nil, nil
+	}
+
+	cmd, _ := newReviewTestCmd(t)
+	reviewPost = true
+	reviewPR = 0
+	err := runReview(cmd, nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "--pr")
+	require.False(t, called, "must not relay to the daemon without a PR number")
 }

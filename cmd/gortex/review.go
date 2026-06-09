@@ -12,12 +12,16 @@ import (
 )
 
 var (
-	reviewScope  string
-	reviewBase   string
-	reviewDiff   string
-	reviewUseLLM bool
-	reviewFormat string
-	reviewRepo   string
+	reviewScope         string
+	reviewBase          string
+	reviewDiff          string
+	reviewUseLLM        bool
+	reviewFormat        string
+	reviewRepo          string
+	reviewPost          bool
+	reviewPR            int
+	reviewConfirmPublic bool
+	reviewDryRun        bool
 )
 
 // reviewDaemonTool is the daemon-tool relay seam. It is indirected through a
@@ -51,6 +55,10 @@ func init() {
 	reviewCmd.Flags().BoolVar(&reviewUseLLM, "use-llm", false, "fold in LLM-found findings (requires a configured LLM provider)")
 	reviewCmd.Flags().StringVarP(&reviewFormat, "format", "f", "text", "output format: text or json")
 	reviewCmd.Flags().StringVar(&reviewRepo, "repo", "", "repository path the daemon must track (default: current directory)")
+	reviewCmd.Flags().BoolVar(&reviewPost, "post", false, "post the findings as inline comments on a PR (requires --pr); secrets are redacted before egress")
+	reviewCmd.Flags().IntVar(&reviewPR, "pr", 0, "the PR / MR number to post comments on (with --post)")
+	reviewCmd.Flags().BoolVar(&reviewConfirmPublic, "confirm-public", false, "confirm posting to a public / fork PR (world-readable comments)")
+	reviewCmd.Flags().BoolVar(&reviewDryRun, "dry-run", false, "with --post, build and print the would-post (already-redacted) payloads without posting")
 	rootCmd.AddCommand(reviewCmd)
 }
 
@@ -60,6 +68,22 @@ func runReview(cmd *cobra.Command, args []string) error {
 		repoPath = reviewRepo
 	} else if len(args) > 0 {
 		repoPath = args[0]
+	}
+
+	var diffText string
+	if reviewDiff != "" {
+		dt, err := readReviewDiff(cmd, reviewDiff)
+		if err != nil {
+			return err
+		}
+		diffText = dt
+	}
+
+	// Posting path: relay to the post_review daemon tool, which derives the
+	// findings server-side (running the review rulepack over the same changeset),
+	// redacts every comment body before egress, and gates a public / fork PR.
+	if reviewPost {
+		return runReviewPost(cmd, repoPath, diffText)
 	}
 
 	toolArgs := map[string]any{
@@ -73,11 +97,7 @@ func runReview(cmd *cobra.Command, args []string) error {
 	if reviewRepo != "" {
 		toolArgs["repo"] = reviewRepo
 	}
-	if reviewDiff != "" {
-		diffText, err := readReviewDiff(cmd, reviewDiff)
-		if err != nil {
-			return err
-		}
+	if diffText != "" {
 		toolArgs["diff"] = diffText
 	}
 
@@ -90,6 +110,38 @@ func runReview(cmd *cobra.Command, args []string) error {
 		return emitDaemonJSON(cmd, raw)
 	}
 	return printReview(cmd, raw)
+}
+
+// runReviewPost relays a review-and-post request to the post_review daemon tool.
+// The daemon derives the findings from the changeset, redacts every comment body
+// before any payload leaves the machine, and refuses a public / fork PR unless
+// --confirm-public is set.
+func runReviewPost(cmd *cobra.Command, repoPath, diffText string) error {
+	if reviewPR <= 0 {
+		return fmt.Errorf("--post requires --pr <number> (the PR / MR to comment on)")
+	}
+	toolArgs := map[string]any{
+		"number":         reviewPR,
+		"scope":          reviewScope,
+		"confirm_public": reviewConfirmPublic,
+		"dry_run":        reviewDryRun,
+		"format":         "json",
+	}
+	if reviewBase != "" {
+		toolArgs["base"] = reviewBase
+	}
+	if reviewRepo != "" {
+		toolArgs["repo"] = reviewRepo
+	}
+	if diffText != "" {
+		toolArgs["diff"] = diffText
+	}
+
+	raw, err := reviewDaemonTool(repoPath, "post_review", toolArgs)
+	if err != nil {
+		return err
+	}
+	return emitDaemonJSON(cmd, raw)
 }
 
 // readReviewDiff reads the pasted-diff source: "-" reads from stdin, anything

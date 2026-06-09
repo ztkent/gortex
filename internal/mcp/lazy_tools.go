@@ -72,6 +72,7 @@ var hotEagerTools = map[string]bool{
 	"review":               true,
 	"review_pack":          true,
 	"suppress_finding":     true,
+	"post_review":          true,
 }
 
 // LazyToolsSearchName is the well-known name of the discovery tool the
