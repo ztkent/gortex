@@ -1979,6 +1979,60 @@ func encodeSuggestReviewers(result map[string]any) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// encodeReviewQuestions encodes the suggested_review_questions payload as
+// GCX1: a one-row summary section (total + truncated + per-category
+// counts) followed by a per-question row section. Severity / score ride
+// as row values so the prioritised order is reconstructable from the
+// wire form, and signals are joined with ";" since the row is
+// tab-delimited.
+func encodeReviewQuestions(questions []reviewQuestion, byCategory map[string]int, truncated bool) ([]byte, error) {
+	var buf bytes.Buffer
+
+	sumEnc := newGCX(&buf, "suggested_review_questions.summary",
+		[]string{"total", "truncated", "bridge", "hub_risk", "surprising", "thin_community", "untested_hotspot"},
+	)
+	if err := sumEnc.WriteRow(
+		len(questions),
+		truncated,
+		byCategory[rqCatBridge],
+		byCategory[rqCatHubRisk],
+		byCategory[rqCatSurprising],
+		byCategory[rqCatThinCommunity],
+		byCategory[rqCatUntestedHotspot],
+	); err != nil {
+		return nil, err
+	}
+	if err := sumEnc.Close(); err != nil {
+		return nil, err
+	}
+
+	qEnc := newGCX(&buf, "suggested_review_questions.questions",
+		[]string{"id", "category", "severity", "score", "symbol_id", "symbol_name", "file", "line", "question", "evidence", "signals"},
+	)
+	for _, q := range questions {
+		if err := qEnc.WriteRow(
+			q.ID,
+			q.Category,
+			q.Severity,
+			roundFloat(q.Score),
+			q.SymbolID,
+			q.SymbolName,
+			q.File,
+			q.Line,
+			q.Question,
+			q.Evidence,
+			strings.Join(q.Signals, ";"),
+		); err != nil {
+			return nil, err
+		}
+	}
+	if err := qEnc.Close(); err != nil {
+		return nil, err
+	}
+
+	return buf.Bytes(), nil
+}
+
 // encodeListPRs encodes the list_prs payload as GCX1: a one-row summary
 // (total) plus a per-PR row section. The map shape mirrors listPRsPayload
 // so JSON and GCX share one set of field names. A degradation payload
