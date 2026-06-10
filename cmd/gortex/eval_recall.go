@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
@@ -14,6 +16,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/zzet/gortex/internal/config"
+	"github.com/zzet/gortex/internal/gitcmd"
 	"github.com/zzet/gortex/internal/embedding"
 	"github.com/zzet/gortex/internal/eval/recall"
 	"github.com/zzet/gortex/internal/graph"
@@ -477,12 +480,15 @@ func validateFixture(f recall.Fixture, g *graph.Graph) []fixtureMiss {
 // readGitRev returns the short commit SHA of the repo at root, empty
 // string if git is missing or the path isn't a repo.
 func readGitRev(root string) string {
-	cmd := exec.Command("git", "-C", root, "rev-parse", "--short", "HEAD")
-	out, err := cmd.Output()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	// gitcmd injects `-C root`; Output trims trailing whitespace, matching the
+	// prior strings.TrimSpace on cmd.Output().
+	out, err := gitcmd.Output(ctx, root, "rev-parse", "--short", "HEAD")
 	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(string(out))
+	return out
 }
 
 // graphTraverser adapts the query engine to recall.GraphProvider. Each

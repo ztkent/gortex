@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -13,6 +12,7 @@ import (
 
 	"github.com/zzet/gortex/internal/analysis"
 	"github.com/zzet/gortex/internal/astquery"
+	"github.com/zzet/gortex/internal/gitcmd"
 	"github.com/zzet/gortex/internal/review"
 )
 
@@ -100,7 +100,7 @@ func (s *Server) handleCritiqueReview(ctx context.Context, req mcp.CallToolReque
 	grounding := diffText
 	if grounding == "" && repoRoot != "" {
 		scope, baseRef := siblingDiffScope(req)
-		if raw, derr := s.changesetRawDiff(repoRoot, scope, baseRef); derr == nil {
+		if raw, derr := s.changesetRawDiff(ctx, repoRoot, scope, baseRef); derr == nil {
 			grounding = raw
 		}
 	}
@@ -218,10 +218,16 @@ func (s *Server) critiqueFindingsFor(ctx context.Context, req mcp.CallToolReques
 // changed files) used to ground the critique prompt. It reuses the same
 // scope-aware git-diff arg selection the sibling-diff path uses, with no
 // pathspec so every changed file is included.
-func (s *Server) changesetRawDiff(repoRoot, scope, baseRef string) (string, error) {
-	cmd := exec.Command("git", siblingDiffArgs(scope, baseRef)...)
-	cmd.Dir = repoRoot
-	out, err := cmd.Output()
+func (s *Server) changesetRawDiff(ctx context.Context, repoRoot, scope, baseRef string) (string, error) {
+	// Route through gitcmd. Use the handler ctx (cancelled on session teardown);
+	// bound it at 30s when it carries no deadline. Run returns raw stdout so the
+	// grounding text is byte-identical to the pre-gitcmd output.
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+	}
+	out, err := gitcmd.Run(ctx, repoRoot, siblingDiffArgs(scope, baseRef)...)
 	if err != nil {
 		if len(out) == 0 {
 			return "", nil

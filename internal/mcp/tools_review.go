@@ -4,16 +4,17 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/zzet/gortex/internal/analysis"
 	"github.com/zzet/gortex/internal/astquery"
 	"github.com/zzet/gortex/internal/config"
+	"github.com/zzet/gortex/internal/gitcmd"
 	"github.com/zzet/gortex/internal/llm"
 	"github.com/zzet/gortex/internal/query"
 	"github.com/zzet/gortex/internal/review"
@@ -283,7 +284,7 @@ func (s *Server) handleSiblingDiffContext(ctx context.Context, req mcp.CallToolR
 		}
 		seen[f] = true
 
-		raw, derr := s.rawFileDiff(repoRoot, scope, baseRef, f)
+		raw, derr := s.rawFileDiff(ctx, repoRoot, scope, baseRef, f)
 		if derr != nil || strings.TrimSpace(raw) == "" {
 			continue
 		}
@@ -475,12 +476,19 @@ func clampScore(v, max float64) float64 {
 // changed file within the changeset. It runs the same git-diff selection as
 // MapGitDiff narrowed to one pathspec, so the per-file diff joins the enumerated
 // changeset exactly.
-func (s *Server) rawFileDiff(repoRoot, scope, baseRef, file string) (string, error) {
+func (s *Server) rawFileDiff(ctx context.Context, repoRoot, scope, baseRef, file string) (string, error) {
 	args := siblingDiffArgs(scope, baseRef)
 	args = append(args, "--", file)
-	cmd := exec.Command("git", args...)
-	cmd.Dir = repoRoot
-	out, err := cmd.Output()
+	// Route through gitcmd (the concurrency-gated chokepoint). Use the handler
+	// ctx so the subprocess is cancelled on session teardown; if it carries no
+	// deadline, bound it at 30s. Run returns raw stdout (no trailing trim) so
+	// the parsed diff is byte-identical to the pre-gitcmd output.
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+	}
+	out, err := gitcmd.Run(ctx, repoRoot, args...)
 	if err != nil {
 		// An empty diff for a path is not an error (e.g. mode-only change).
 		if len(out) == 0 {

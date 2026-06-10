@@ -1,15 +1,16 @@
 package mcp
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
+
+	"github.com/zzet/gortex/internal/gitcmd"
 )
 
 // registerCitationTools wires verify_citation — the substring-grounded
@@ -76,13 +77,13 @@ func (s *Server) handleVerifyCitation(ctx context.Context, req mcp.CallToolReque
 	// caller can persist a stable citation. `git rev-parse --verify`
 	// fails loudly when the ref doesn't resolve, which we surface as
 	// verified=false rather than ambiguous output.
-	fullSHA, shaErr := runGit(workTree, "rev-parse", "--verify", sha+"^{commit}")
+	fullSHA, shaErr := runGit(ctx, workTree, "rev-parse", "--verify", sha+"^{commit}")
 	if shaErr != nil {
 		return s.respondJSONOrTOON(ctx, req, citationFailure(sha, relPath, fmt.Sprintf("rev-parse %s: %v", sha, shaErr)))
 	}
 	fullSHA = strings.TrimSpace(fullSHA)
 
-	content, showErr := runGit(workTree, "show", fullSHA+":"+filepath.ToSlash(gitRelPath))
+	content, showErr := runGit(ctx, workTree, "show", fullSHA+":"+filepath.ToSlash(gitRelPath))
 	if showErr != nil {
 		return s.respondJSONOrTOON(ctx, req, map[string]any{
 			"verified":         false,
@@ -157,18 +158,21 @@ func substringMatchInfo(haystack, needle string) (firstLine, count int) {
 	return firstLine, count
 }
 
-// runGit executes `git <args...>` with cwd=dir and returns stdout.
-// Bounded by the caller's request context — git invocations are
-// expected to complete in milliseconds, but we still cancel on
-// session teardown.
-func runGit(dir string, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	var out, errBuf bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &errBuf
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("%w: %s", err, strings.TrimSpace(errBuf.String()))
+// runGit executes `git <args...>` with cwd=dir and returns raw stdout.
+// Routed through gitcmd (the concurrency-gated chokepoint) so it shares
+// the process-wide git limiter. Bounded by the caller's request context —
+// git invocations are expected to complete in milliseconds, but we still
+// cancel on session teardown; when the ctx carries no deadline we bound it
+// at 30s. Run returns raw stdout (callers TrimSpace themselves).
+func runGit(ctx context.Context, dir string, args ...string) (string, error) {
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
 	}
-	return out.String(), nil
+	out, err := gitcmd.Run(ctx, dir, args...)
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
 }

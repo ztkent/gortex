@@ -2,12 +2,14 @@ package analysis
 
 import (
 	"bufio"
+	"context"
 	"fmt"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/zzet/gortex/internal/gitcmd"
 	"github.com/zzet/gortex/internal/graph"
 )
 
@@ -40,10 +42,11 @@ type DiffResult struct {
 // repoRoot: absolute path to the repository root
 func MapGitDiff(g graph.Store, repoRoot, scope, baseRef string) (*DiffResult, error) {
 	args := buildDiffArgs(scope, baseRef)
-	cmd := exec.Command("git", args...)
-	cmd.Dir = repoRoot
-
-	output, err := cmd.Output()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	// gitcmd runs `git -C repoRoot args...`; use Run (raw stdout, no trailing
+	// trim) so the parsed diff stays byte-identical to the pre-gitcmd output.
+	output, err := gitcmd.Run(ctx, repoRoot, args...)
 	if err != nil {
 		// If git diff returns empty, that's fine
 		if len(output) == 0 {
@@ -252,10 +255,11 @@ func parseNewStart(line string) (int, bool) {
 // the diff's context width differs), so symbol overlap is unaffected.
 func MapGitDiffWithLines(g graph.Store, repoRoot, scope, baseRef string) (*DiffResult, map[string][]HunkLine, error) {
 	args := buildDiffArgsWithContext(scope, baseRef)
-	cmd := exec.Command("git", args...)
-	cmd.Dir = repoRoot
-
-	output, err := cmd.Output()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	// Run (raw stdout) keeps the trailing newline so the final hunk line is
+	// never dropped; gitcmd injects `-C repoRoot` for us.
+	output, err := gitcmd.Run(ctx, repoRoot, args...)
 	if err != nil {
 		if len(output) == 0 {
 			return &DiffResult{}, map[string][]HunkLine{}, nil
