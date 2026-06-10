@@ -16,12 +16,16 @@ type Price struct {
 }
 
 // defaultPricing is the built-in table used when no override is configured.
-// Values are list prices as of 2025-Q4. Users can override via
+// Input-token list prices in USD per 1M tokens, current as of Opus 4.8 /
+// Fable 5. Tokens saved are billed at the input rate. Users can override via
 // GORTEX_MODEL_PRICING_JSON='[{"model":"...","usd_per_m_input":N},...]'.
 var defaultPricing = []Price{
-	{"claude-opus-4", 15.00},
-	{"claude-sonnet-4", 3.00},
-	{"claude-haiku-4.5", 1.00},
+	{"claude-fable-5", 10.00},
+	{"claude-opus-4-8", 5.00},
+	{"claude-opus-4-7", 5.00},
+	{"claude-opus-4-6", 5.00},
+	{"claude-sonnet-4-6", 3.00},
+	{"claude-haiku-4-5", 1.00},
 	{"gpt-4o", 2.50},
 	{"gpt-4o-mini", 0.15},
 }
@@ -65,7 +69,7 @@ func CostAvoidedAll(tokensSaved int64) map[string]float64 {
 }
 
 // findPrice locates a pricing entry by case-insensitive substring match on
-// model name so callers can pass "opus" or "claude-opus-4" interchangeably.
+// model name so callers can pass "opus" or "claude-opus-4-8" interchangeably.
 func findPrice(name string) *Price {
 	if name == "" {
 		return nil
@@ -73,7 +77,7 @@ func findPrice(name string) *Price {
 	target := strings.ToLower(name)
 	prices := Pricing()
 	// Exact match first, longest substring second — avoids "claude" matching
-	// "claude-opus-4" when the user passed "claude-sonnet-4".
+	// "claude-opus-4-8" when the user passed "claude-sonnet-4-6".
 	for i := range prices {
 		if strings.EqualFold(prices[i].Model, name) {
 			return &prices[i]

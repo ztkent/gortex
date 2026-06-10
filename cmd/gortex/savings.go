@@ -26,6 +26,11 @@ var (
 	savingsUTC      bool
 )
 
+// defaultHeadlineModel is the model the headline "Cost avoided" figure is
+// priced against when the caller doesn't pass --model. Set to the model
+// gortex itself runs on so the dollar figure reflects real usage.
+const defaultHeadlineModel = "claude-opus-4-8"
+
 var savingsCmd = &cobra.Command{
 	Use:   "savings",
 	Short: "Show token-savings dashboard (Today / Last 7 days / All time) + cost avoided",
@@ -317,6 +322,12 @@ func pickHeadlineCost(costs map[string]float64, preferred string) (float64, stri
 	}
 	if len(costs) == 0 {
 		return 0, "n/a"
+	}
+	// Default the headline to the model gortex itself runs on, so the figure
+	// reflects real usage rather than the priciest entry in the table. Falls
+	// through to the highest-value pick when that model isn't priced.
+	if v, ok := costs[defaultHeadlineModel]; ok {
+		return v, defaultHeadlineModel
 	}
 	var bestName string
 	var bestVal float64
