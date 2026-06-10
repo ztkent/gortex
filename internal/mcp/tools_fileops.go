@@ -613,46 +613,12 @@ func (s *Server) handleWriteFile(ctx context.Context, req mcp.CallToolRequest) (
 	return s.respondJSONOrTOON(ctx, req, resp)
 }
 
-// matchLocationsHint returns a brief " (lines X, Y, Z)" hint listing up to
-// three line numbers where oldString matches in fileStr. Empty when there
-// are zero matches. Helps an agent choose a more unique fragment without
-// re-reading the file.
+// matchLocationsHint returns a brief " (first match lines X, Y, Z)" hint
+// listing up to three line numbers where oldString matches in fileStr
+// (EOL-tolerant). Empty when there are zero matches. Helps an agent choose
+// a more unique fragment without re-reading the file.
 func matchLocationsHint(fileStr, oldString string) string {
-	if oldString == "" {
-		return ""
-	}
-	const maxHits = 3
-	lines := []int{}
-	offset := 0
-	for offset < len(fileStr) {
-		idx := strings.Index(fileStr[offset:], oldString)
-		if idx < 0 {
-			break
-		}
-		absIdx := offset + idx
-		// Line number = 1 + count of '\n' before absIdx.
-		line := 1 + strings.Count(fileStr[:absIdx], "\n")
-		lines = append(lines, line)
-		if len(lines) >= maxHits {
-			break
-		}
-		offset = absIdx + len(oldString)
-		if len(oldString) == 0 {
-			offset++
-		}
-	}
-	if len(lines) == 0 {
-		return ""
-	}
-	parts := make([]string, len(lines))
-	for i, l := range lines {
-		parts[i] = fmt.Sprintf("%d", l)
-	}
-	suffix := ""
-	if strings.Count(fileStr, oldString) > maxHits {
-		suffix = ", ..."
-	}
-	return fmt.Sprintf(" (first match lines %s%s)", strings.Join(parts, ", "), suffix)
+	return matchSpansHint(fileStr, findEOLMatches(fileStr, oldString).spans)
 }
 
 // handleReadFile returns the full content of a file as a string,
