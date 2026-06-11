@@ -42,6 +42,14 @@ type GitWatcher struct {
 	fireTimer   *time.Timer
 	loopStarted bool
 	stopCalled  bool
+	// reconciling single-flights reconcile: a ref event landing while
+	// one is in flight sets rerun instead of spawning a second
+	// concurrent reconcile from the same stale base (each AfterFunc
+	// fires on its own goroutine, and lastSHA only advances at the
+	// END of a reconcile — overlapping runs would diff and apply the
+	// same range twice and race applyChanges/ResolveAll).
+	reconciling bool
+	rerun       bool
 	// drained is a test hook that fires after a reconcile completes
 	// with the number of files patched. nil in production.
 	drained func(int)
@@ -165,6 +173,30 @@ func (gw *GitWatcher) scheduleReconcile(trigger string) {
 // the end. Silently no-ops when HEAD hasn't moved — branches can
 // touch packed-refs without the resolved commit actually changing.
 func (gw *GitWatcher) reconcile(trigger string) {
+	// Single-flight: one reconcile at a time. A ref change observed
+	// mid-flight is coalesced into exactly one follow-up run that
+	// diffs the (now advanced) lastSHA against wherever HEAD ended
+	// up — so we always converge on the latest state without ever
+	// running two whole-graph passes concurrently.
+	gw.mu.Lock()
+	if gw.reconciling {
+		gw.rerun = true
+		gw.mu.Unlock()
+		return
+	}
+	gw.reconciling = true
+	gw.mu.Unlock()
+	defer func() {
+		gw.mu.Lock()
+		gw.reconciling = false
+		again := gw.rerun && !gw.stopCalled
+		gw.rerun = false
+		gw.mu.Unlock()
+		if again {
+			go gw.reconcile("coalesced")
+		}
+	}()
+
 	if gw.rebaseInProgress() {
 		// Defer until the rebase lands. The final rebase state
 		// either updates HEAD (triggering another fsnotify fire) or
