@@ -182,6 +182,7 @@ func (s *Server) critiqueFindingsFor(ctx context.Context, req mcp.CallToolReques
 		impact   map[string]*analysis.ImpactResult
 	)
 	repoPrefix := s.diffJoinPrefix(repoRoot)
+	var changedFiles []string
 	if diffText == "" {
 		diff, err := analysis.MapGitDiff(s.graph, repoRoot, repoPrefix, scope, baseRef)
 		if err != nil {
@@ -193,12 +194,14 @@ func (s *Server) critiqueFindingsFor(ctx context.Context, req mcp.CallToolReques
 		}
 		rulepack = s.reviewRulepackMatches(ctx, diff.ChangedFiles, allowedRepos)
 		impact = s.reviewImpact(diff.ChangedSymbols)
+		changedFiles = diff.ChangedFiles
 	}
 
 	suppStore, suppRepoKey := s.reviewSuppressions()
 	report, err := review.Run(ctx, s.graph, nil, review.Options{
 		RepoRoot:        repoRoot,
 		RepoPrefix:      repoPrefix,
+		CoverageKnown:   s.coverageKnownForDiff(repoPrefix, changedFiles),
 		Scope:           scope,
 		BaseRef:         baseRef,
 		Diff:            diffText,

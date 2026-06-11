@@ -380,6 +380,11 @@ func assessRisk(directDeps, transitiveDeps int) RiskLevel {
 	return RiskLow
 }
 
+// IsTestFile reports whether path looks like a test source file — the same
+// suffix set the impact traversal uses to collect covering tests, exported
+// for callers that need to probe whether a graph indexes tests at all.
+func IsTestFile(path string) bool { return isTestFile(path) }
+
 func isTestFile(path string) bool {
 	return containsAny(path,
 		"_test.go", ".test.ts", ".test.js", ".spec.ts", ".spec.js",

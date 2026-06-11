@@ -125,14 +125,17 @@ func renderHumanSummary(report *ReviewReport) string {
 		b.WriteString("\nFile risk:\n")
 		for _, fr := range report.FileRisk {
 			fmt.Fprintf(&b, "  %-8s %s (%d finding(s))", fr.Risk, fr.File, fr.Findings)
-			// Coverage evidence, when the impact analysis supplied it: why
-			// the tier is what it is, and whether tests stand behind the
-			// change.
-			if fr.Symbols > 0 {
-				if fr.Uncovered > 0 {
-					fmt.Fprintf(&b, " — %d affected, %d/%d changed symbols untested", fr.Affected, fr.Uncovered, fr.Symbols)
-				} else {
-					fmt.Fprintf(&b, " — %d affected, all %d changed symbols test-covered ✓", fr.Affected, fr.Symbols)
+			// Evidence, when the impact analysis supplied it: the blast
+			// radius behind the tier, and — when the graph indexes tests
+			// at all — whether tests stand behind the change.
+			if fr.Affected > 0 || fr.Symbols > 0 {
+				fmt.Fprintf(&b, " — %d affected", fr.Affected)
+				if fr.Symbols > 0 {
+					if fr.Uncovered > 0 {
+						fmt.Fprintf(&b, ", %d/%d changed symbols untested", fr.Uncovered, fr.Symbols)
+					} else {
+						fmt.Fprintf(&b, ", all %d changed symbols test-covered ✓", fr.Symbols)
+					}
 				}
 			}
 			b.WriteByte('\n')

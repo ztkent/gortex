@@ -91,6 +91,11 @@ type Server struct {
 	multiIndexer  *indexer.MultiIndexer
 	configManager *config.ConfigManager
 	activeProject string
+	// testIndexProbe caches, per repo prefix, which test-path fragments the
+	// graph carries symbols for (see testFragmentsIndexed). The answer only
+	// changes with a reindex under a different exclude set, so
+	// daemon-lifetime caching is safe.
+	testIndexProbe sync.Map
 	// scopeWorkspace / scopeProject default-scope every query at this
 	// server instance to a single (workspace, project) tuple. Set by
 	// `gortex server --workspace <slug> [--scope-project <slug>]`.

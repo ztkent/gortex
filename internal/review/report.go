@@ -117,7 +117,12 @@ func worseVerdict(a, b Verdict) Verdict {
 // "<prefix>/<rel>", while the diff's changed files are repo-relative. Without
 // stripping the prefix every file would surface twice — once with its real
 // impact tier and once as a LOW diff-only row.
-func rankFileRisk(diff *analysis.DiffResult, impact map[string]*analysis.ImpactResult, findings []Finding, repoPrefix string) []FileRisk {
+//
+// coverageKnown gates the coverage evidence: when the graph indexes no test
+// symbols at all, "no covering test" is blindness, not a finding — the rows
+// then carry no untested counts and the verdict keeps the conservative
+// ladder.
+func rankFileRisk(diff *analysis.DiffResult, impact map[string]*analysis.ImpactResult, findings []Finding, repoPrefix string, coverageKnown bool) []FileRisk {
 	norm := func(file string) string {
 		file = cleanPath(file)
 		if repoPrefix != "" {
@@ -153,21 +158,24 @@ func rankFileRisk(diff *analysis.DiffResult, impact map[string]*analysis.ImpactR
 				if ir != nil && ir.Risk != "" {
 					risk = string(ir.Risk)
 				}
-				// Coverage evidence: how far the worst changed symbol
-				// reaches and whether each changed symbol has a covering
-				// test. Only recorded when impact data exists at all —
-				// absent analysis must not read as "fully covered".
+				// Blast-radius evidence (how far the worst changed symbol
+				// reaches) is a graph fact and always recorded. Coverage
+				// evidence is recorded only when the graph indexes tests
+				// at all — an index that excludes test files must not
+				// read as "untested".
 				cov := coverByFile[file]
 				if cov == nil {
 					cov = &coverage{}
 					coverByFile[file] = cov
 				}
-				cov.symbols++
-				if ir == nil || len(ir.TestFiles) == 0 {
-					cov.uncovered++
-				}
 				if ir != nil && ir.TotalAffected > cov.affected {
 					cov.affected = ir.TotalAffected
+				}
+				if coverageKnown {
+					cov.symbols++
+					if ir == nil || len(ir.TestFiles) == 0 {
+						cov.uncovered++
+					}
 				}
 			}
 			byFile[file] = worseRisk(byFile[file], risk)

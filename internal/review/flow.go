@@ -28,6 +28,12 @@ type Options struct {
 	// multi-repo daemons key file paths as "<prefix>/<rel>" while git emits
 	// repo-relative paths. Empty in single-repo / unprefixed mode.
 	RepoPrefix string
+	// CoverageKnown reports whether the graph indexes test symbols for this
+	// repo at all. When false the per-file coverage evidence is unknowable —
+	// an index config that excludes "**/*_test.go" would otherwise make
+	// every change read as untested — so the rows carry no untested counts
+	// and the headline says "coverage unknown" instead.
+	CoverageKnown bool
 	// Scope selects the git diff range: "staged", "all", "compare", or
 	// "unstaged" (default). Ignored when Diff is set.
 	Scope string
@@ -383,7 +389,7 @@ func compress(opts Options, plan *reviewPlan, llmFindings []Finding, dropped int
 		WithSuppression(opts.Suppressions, opts.RepoKey).
 		Apply(merged)
 
-	fileRisk := rankFileRisk(plan.diff, opts.Impact, merged, opts.RepoPrefix)
+	fileRisk := rankFileRisk(plan.diff, opts.Impact, merged, opts.RepoPrefix, opts.CoverageKnown)
 	verdict := computeVerdict(merged, fileRisk)
 
 	bySeverity := map[string]int{}
@@ -452,22 +458,30 @@ func summarize(verdict Verdict, findings []Finding, fileRisk []FileRisk) string 
 	if len(findings) == 0 {
 		if verdict != VerdictApprove && len(fileRisk) > 0 {
 			worst := fileRisk[0].Risk // sorted worst-first
-			n, untested := 0, 0
+			n, untested, known := 0, 0, false
 			for _, fr := range fileRisk {
+				if fr.Symbols > 0 {
+					known = true
+				}
 				if fr.Risk != worst {
 					continue
 				}
 				n++
-				if fr.Symbols == 0 || fr.Uncovered > 0 {
+				if fr.Symbols > 0 && fr.Uncovered > 0 {
 					untested++
 				}
 			}
-			if untested > 0 {
+			switch {
+			case untested > 0:
 				return fmt.Sprintf("%s: no rule findings, but %d of %d changed file(s) carry %s blast-radius risk (%d without covering tests)",
 					verdict, n, len(fileRisk), worst, untested)
+			case known:
+				return fmt.Sprintf("%s: no rule findings; %d of %d changed file(s) carry %s blast-radius risk, all test-covered",
+					verdict, n, len(fileRisk), worst)
+			default:
+				return fmt.Sprintf("%s: no rule findings, but %d of %d changed file(s) carry %s blast-radius risk (test coverage unknown — the index carries no test symbols)",
+					verdict, n, len(fileRisk), worst)
 			}
-			return fmt.Sprintf("%s: no rule findings; %d of %d changed file(s) carry %s blast-radius risk, all test-covered",
-				verdict, n, len(fileRisk), worst)
 		}
 		return fmt.Sprintf("%s: no findings across %d changed file(s)", verdict, len(fileRisk))
 	}
