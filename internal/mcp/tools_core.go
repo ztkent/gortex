@@ -345,19 +345,36 @@ func subGraphToTOON(sg *query.SubGraph) (*mcp.CallToolResult, error) {
 // narrow. With no explicit narrowing the allow-set is every repo in
 // the session's workspace — not "all repos".
 //
+// gitDiffScopes are the diff-selection values the review-family tools
+// accept in their `scope` argument; they share the argument name with the
+// saved-scope filter and are reserved (never saved-scope names).
+var gitDiffScopes = map[string]bool{"unstaged": true, "staged": true, "all": true, "compare": true}
+
 // For an unbound session (embedded stdio / `gortex server
 // --workspace` / legacy) it falls back to resolveRepoFilterArgs with
 // the active-project default applied. A nil result there still means
 // "no filter — all repos".
 func (s *Server) resolveRepoFilter(ctx context.Context, req mcp.CallToolRequest) (map[string]bool, error) {
 	repo := req.GetString("repo", "")
+	// The selector may be a filesystem path (the CLI defaults to the
+	// caller's working directory) — normalize to the tracked prefix so the
+	// filter matches what the workspace knows the repo as.
+	if p := s.resolveRepoPrefix(repo); p != "" {
+		repo = p
+	}
 	project := req.GetString("project", "")
 	ref := req.GetString("ref", "")
 	workspaceArg := req.GetString("workspace", "")
 
 	// A named saved-scope supplies the repo allow-set when no explicit
-	// repo/project/ref narrows the call (see scopes.go).
+	// repo/project/ref narrows the call (see scopes.go). The review-family
+	// tools overload `scope` for git diff selection — those reserved values
+	// are never saved-scope names, otherwise every repo-less review call
+	// would fail with "unknown scope".
 	scopeArg := req.GetString("scope", "")
+	if gitDiffScopes[scopeArg] {
+		scopeArg = ""
+	}
 	var scopeRepos map[string]bool
 	if scopeArg != "" && repo == "" && project == "" && ref == "" {
 		sc, ok := s.lookupScope(scopeArg)

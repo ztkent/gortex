@@ -246,21 +246,13 @@ func (s *Server) handleSiblingDiffContext(ctx context.Context, req mcp.CallToolR
 	scope, baseRef := siblingDiffScope(req)
 
 	repo := strings.TrimSpace(req.GetString("repo", ""))
-	roots := s.collectRepoRoots(repo)
-	repoRoot := pickRepoRoot(roots, repo)
-	if repoRoot == "" {
-		if s.indexer != nil {
-			if root := s.indexer.RootPath(); root != "" {
-				repoRoot = root
-			}
-		}
-	}
+	repoRoot, repoPrefix := s.diffRepoScope(ctx, repo)
 	if repoRoot == "" {
 		return mcp.NewToolResultError("could not resolve a repository root for the changeset diff"), nil
 	}
 
 	// Enumerate the whole changeset.
-	diff, err := analysis.MapGitDiff(s.graph, repoRoot, s.diffJoinPrefix(repoRoot), scope, baseRef)
+	diff, err := analysis.MapGitDiff(s.graph, repoRoot, repoPrefix, scope, baseRef)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -544,18 +536,11 @@ func (s *Server) handleReview(ctx context.Context, req mcp.CallToolRequest) (*mc
 	scope, baseRef := siblingDiffScope(req)
 
 	repo := strings.TrimSpace(req.GetString("repo", ""))
-	roots := s.collectRepoRoots(repo)
-	repoRoot := pickRepoRoot(roots, repo)
-	if repoRoot == "" && s.indexer != nil {
-		if root := s.indexer.RootPath(); root != "" {
-			repoRoot = root
-		}
-	}
+	repoRoot, repoPrefix := s.diffRepoScope(ctx, repo)
 	// An on-disk review needs a working tree; a pasted-diff review does not.
 	if repoRoot == "" && diffText == "" {
 		return mcp.NewToolResultError("could not resolve a repository root for the changeset diff"), nil
 	}
-	repoPrefix := s.diffJoinPrefix(repoRoot)
 
 	// Compute the deterministic rulepack matches over the changed files, and the
 	// per-changed-symbol impact map, from the on-disk changeset. For a pasted
@@ -956,17 +941,10 @@ func (s *Server) handleReviewPack(ctx context.Context, req mcp.CallToolRequest) 
 	scope, baseRef := siblingDiffScope(req)
 
 	repo := strings.TrimSpace(req.GetString("repo", ""))
-	roots := s.collectRepoRoots(repo)
-	repoRoot := pickRepoRoot(roots, repo)
-	if repoRoot == "" && s.indexer != nil {
-		if root := s.indexer.RootPath(); root != "" {
-			repoRoot = root
-		}
-	}
+	repoRoot, repoPrefix := s.diffRepoScope(ctx, repo)
 	if repoRoot == "" && diffText == "" {
 		return mcp.NewToolResultError("could not resolve a repository root for the changeset diff"), nil
 	}
-	repoPrefix := s.diffJoinPrefix(repoRoot)
 
 	// Enumerate the changeset (on-disk path only — a pasted diff has no graph
 	// changeset, so the gates that need indexed symbols are skipped).

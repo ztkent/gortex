@@ -169,7 +169,7 @@ func (s *Server) handlePRReviewContext(ctx context.Context, req mcp.CallToolRequ
 	wantDiffCtx := wantSection("diff_context")
 	wantSimulate := wantSection("simulate")
 
-	repoRoot := s.prReviewRepoRoot(req)
+	repoRoot := s.prReviewRepoRoot(ctx, req)
 
 	scope, baseRef := siblingDiffScope(req)
 
@@ -300,17 +300,10 @@ func (s *Server) handlePRReviewContext(ctx context.Context, req mcp.CallToolRequ
 }
 
 // prReviewRepoRoot resolves the working-tree root for the changeset diff,
-// mirroring the review tools' resolution order: an explicit repo prefix's
-// root, then the single indexer's root.
-func (s *Server) prReviewRepoRoot(req mcp.CallToolRequest) string {
-	repo := strings.TrimSpace(req.GetString("repo", ""))
-	roots := s.collectRepoRoots(repo)
-	repoRoot := pickRepoRoot(roots, repo)
-	if repoRoot == "" && s.indexer != nil {
-		if root := s.indexer.RootPath(); root != "" {
-			repoRoot = root
-		}
-	}
+// mirroring the review tools' resolution order: an explicit repo selector
+// (prefix or path), the lone tracked repo, or the session's cwd-bound repo.
+func (s *Server) prReviewRepoRoot(ctx context.Context, req mcp.CallToolRequest) string {
+	repoRoot, _ := s.diffRepoScope(ctx, strings.TrimSpace(req.GetString("repo", "")))
 	return repoRoot
 }
 

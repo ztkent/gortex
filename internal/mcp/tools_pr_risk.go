@@ -60,12 +60,11 @@ func (s *Server) handlePRRisk(ctx context.Context, req mcp.CallToolRequest) (*mc
 			}
 		}
 	case base != "":
-		roots := s.collectRepoRoots(repo)
-		root := pickRepoRoot(roots, repo)
+		root, prefix := s.diffRepoScope(ctx, repo)
 		if root == "" {
 			return mcp.NewToolResultError("could not resolve a repository root for the base diff"), nil
 		}
-		diff, err := analysis.MapGitDiff(s.graph, root, s.diffJoinPrefix(root), "compare", base)
+		diff, err := analysis.MapGitDiff(s.graph, root, prefix, "compare", base)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("git diff against %q failed: %v", base, err)), nil
 		}

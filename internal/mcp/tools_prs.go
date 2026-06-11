@@ -251,8 +251,7 @@ func (s *Server) handleListPRs(ctx context.Context, req mcp.CallToolRequest) (*m
 		if !forge.Available(ctx) {
 			return s.respondJSONOrTOON(ctx, req, forgeUnavailablePayload())
 		}
-		roots := s.collectRepoRoots(repo)
-		repoRoot := pickRepoRoot(roots, repo)
+		repoRoot, _ := s.diffRepoScope(ctx, repo)
 		fetched, ferr := forgeList(ctx, repoRoot, forge.ListOpts{State: state, Limit: limit, WithDecision: true, WithCI: true})
 		if ferr != nil {
 			if errors.Is(ferr, forge.ErrRateLimited) {
@@ -467,24 +466,14 @@ func (s *Server) changedSymbolsForFiles(repoPrefix string, files []string) ([]st
 }
 
 // prJoinPrefix resolves the graph repo prefix for the forge-file → symbol
-// join: the caller's repo selector when it names a tracked repo, then the
-// prefix anchoring the picked repo root, then the session's cwd-bound repo
-// (the CLI dials the daemon with its working directory, so `gortex prs <N>`
-// run inside a tracked repo joins against that repo without an explicit
-// selector). Empty in single-repo / unprefixed mode.
+// join via the shared diff-handler scope resolution: the caller's repo
+// selector (prefix or path), the lone tracked repo, or the session's
+// cwd-bound repo (the CLI dials the daemon with its working directory, so
+// `gortex prs <N>` run inside a tracked repo joins against that repo
+// without an explicit selector). Empty in single-repo / unprefixed mode.
 func (s *Server) prJoinPrefix(ctx context.Context, repo string) string {
-	if p := s.resolveRepoPrefix(repo); p != "" {
-		return p
-	}
-	if p := s.diffJoinPrefix(pickRepoRoot(s.collectRepoRoots(repo), repo)); p != "" {
-		return p
-	}
-	if cwd := SessionCWDFromContext(ctx); cwd != "" && s.multiIndexer != nil {
-		if _, _, prefix, ok := s.multiIndexer.ScopeForCWD(cwd); ok {
-			return prefix
-		}
-	}
-	return ""
+	_, prefix := s.diffRepoScope(ctx, repo)
+	return prefix
 }
 
 // handleTriagePRs ranks a repository's open PRs by get_pr_impact score
@@ -514,8 +503,7 @@ func (s *Server) handleTriagePRs(ctx context.Context, req mcp.CallToolRequest) (
 		if !forge.Available(ctx) && len(filesByNumber) == 0 {
 			return s.respondJSONOrTOON(ctx, req, forgeUnavailablePayload())
 		}
-		roots := s.collectRepoRoots(repo)
-		repoRoot := pickRepoRoot(roots, repo)
+		repoRoot, _ := s.diffRepoScope(ctx, repo)
 		fetched, ferr := forgeList(ctx, repoRoot, forge.ListOpts{State: "open", Limit: limit, WithCI: true})
 		if ferr != nil {
 			if errors.Is(ferr, forge.ErrRateLimited) {
@@ -826,8 +814,7 @@ func (s *Server) fetchPRFiles(ctx context.Context, repo string, number int) (fil
 	if !forge.Available(ctx) {
 		return nil, forgeUnavailablePayload(), nil
 	}
-	roots := s.collectRepoRoots(repo)
-	repoRoot := pickRepoRoot(roots, repo)
+	repoRoot, _ := s.diffRepoScope(ctx, repo)
 	fetched, ferr := forgeFiles(ctx, repoRoot, number)
 	if ferr != nil {
 		if errors.Is(ferr, forge.ErrRateLimited) {

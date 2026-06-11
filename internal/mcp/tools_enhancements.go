@@ -231,6 +231,7 @@ func (s *Server) registerEnhancementTools() {
 			mcp.WithString("scope", mcp.Description("unstaged (default), staged, all, or compare")),
 			mcp.WithString("base_ref", mcp.Description("Branch/commit for compare scope (default: main)")),
 			mcp.WithBoolean("compact", mcp.Description("One-line-per-symbol condensed output")),
+			mcp.WithString("repo", mcp.Description("Repository prefix or path (multi-repo mode); defaults to the lone tracked repo or the session's cwd-bound repo")),
 		),
 		s.handleDiffContext,
 	)
@@ -2485,14 +2486,15 @@ func (s *Server) handleDiffContext(ctx context.Context, req mcp.CallToolRequest)
 	scope := req.GetString("scope", "unstaged")
 	baseRef := req.GetString("base_ref", "main")
 
-	repoRoot := "."
-	if s.indexer != nil {
-		if root := s.indexer.RootPath(); root != "" {
-			repoRoot = root
-		}
+	// Resolve the working tree: explicit repo selector, lone tracked repo,
+	// or the session's cwd-bound repo. The "." fallback keeps the standalone
+	// (indexer-less) server working from its own cwd.
+	repoRoot, repoPrefix := s.diffRepoScope(ctx, strings.TrimSpace(req.GetString("repo", "")))
+	if repoRoot == "" {
+		repoRoot = "."
 	}
 
-	diff, err := analysis.MapGitDiff(s.graph, repoRoot, s.diffJoinPrefix(repoRoot), scope, baseRef)
+	diff, err := analysis.MapGitDiff(s.graph, repoRoot, repoPrefix, scope, baseRef)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}

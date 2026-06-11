@@ -77,8 +77,7 @@ func (s *Server) handleConflictsPRs(ctx context.Context, req mcp.CallToolRequest
 		if !forge.Available(ctx) && len(filesByNumber) == 0 {
 			return s.respondJSONOrTOON(ctx, req, forgeUnavailablePayload())
 		}
-		roots := s.collectRepoRoots(repo)
-		repoRoot := pickRepoRoot(roots, repo)
+		repoRoot, _ := s.diffRepoScope(ctx, repo)
 		fetched, ferr := forgeList(ctx, repoRoot, forge.ListOpts{State: "open", Limit: limit, WithCI: true})
 		if ferr != nil {
 			if errors.Is(ferr, forge.ErrRateLimited) {

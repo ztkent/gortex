@@ -316,6 +316,38 @@ func (s *Server) diffJoinPrefix(repoRoot string) string {
 	return ""
 }
 
+// diffRepoScope resolves the working-tree root and graph repo prefix a
+// diff-driven handler operates on. An explicit selector (a repo prefix or a
+// filesystem path — the CLI defaults to the caller's working directory) is
+// normalized and honoured exclusively: when it names nothing tracked the
+// result is empty so the caller errors instead of silently diffing another
+// repo. With no selector the lone tracked repo wins, then the session's
+// cwd-bound repo (clients dial the daemon with their working directory).
+// Both empty means no resolvable working tree.
+func (s *Server) diffRepoScope(ctx context.Context, repo string) (repoRoot, repoPrefix string) {
+	if repo != "" {
+		if p := s.resolveRepoPrefix(repo); p != "" {
+			repo = p
+		}
+		root := pickRepoRoot(s.collectRepoRoots(repo), repo)
+		if root == "" {
+			return "", ""
+		}
+		return root, s.diffJoinPrefix(root)
+	}
+	if root := pickRepoRoot(s.collectRepoRoots(""), ""); root != "" {
+		return root, s.diffJoinPrefix(root)
+	}
+	if cwd := SessionCWDFromContext(ctx); cwd != "" && s.multiIndexer != nil {
+		if _, _, prefix, ok := s.multiIndexer.ScopeForCWD(cwd); ok && prefix != "" {
+			if root, ok := s.multiIndexer.RepoRoot(prefix); ok && root != "" {
+				return root, prefix
+			}
+		}
+	}
+	return "", ""
+}
+
 // resolveRepoPrefixOrReconcile resolves a path-or-prefix to a repo prefix
 // and reconciles persisted-config state into the in-memory MultiIndexer on
 // miss. Warmup can silently drop a repo (transient index failure, daemon

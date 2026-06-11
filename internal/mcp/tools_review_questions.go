@@ -222,11 +222,11 @@ func (s *Server) resolveReviewQuestionTargets(ctx context.Context, req mcp.CallT
 
 	case base != "":
 		repo := strings.TrimSpace(req.GetString("repo", ""))
-		repoRoot := pickRepoRoot(s.collectRepoRoots(repo), repo)
+		repoRoot, repoPrefix := s.diffRepoScope(ctx, repo)
 		if repoRoot == "" {
 			return nil, errReviewQuestionsNoRoot
 		}
-		diff, derr := analysis.MapGitDiff(s.graph, repoRoot, s.diffJoinPrefix(repoRoot), "compare", base)
+		diff, derr := analysis.MapGitDiff(s.graph, repoRoot, repoPrefix, "compare", base)
 		if derr != nil {
 			return nil, derr
 		}

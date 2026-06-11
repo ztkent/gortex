@@ -18,6 +18,9 @@ func (s *Server) registerPrompts() {
 			mcp.WithArgument("scope",
 				mcp.ArgumentDescription("Git diff scope: unstaged (default), staged, all, or compare"),
 			),
+			mcp.WithArgument("repo",
+				mcp.ArgumentDescription("Repository prefix or path (multi-repo mode); defaults to the lone tracked repo or the session's cwd-bound repo"),
+			),
 		),
 		s.handlePromptPreCommit,
 	)
@@ -70,14 +73,15 @@ func (s *Server) handlePromptPreCommit(ctx context.Context, req mcp.GetPromptReq
 		scope = "all"
 	}
 
-	repoRoot := "."
-	if s.indexer != nil {
-		if root := s.indexer.RootPath(); root != "" {
-			repoRoot = root
-		}
+	// Resolve the working tree: explicit repo argument, lone tracked repo,
+	// or the session's cwd-bound repo. The "." fallback keeps the standalone
+	// (indexer-less) server working from its own cwd.
+	repoRoot, repoPrefix := s.diffRepoScope(ctx, promptArg(req, "repo"))
+	if repoRoot == "" {
+		repoRoot = "."
 	}
 
-	diff, err := analysis.MapGitDiff(s.graph, repoRoot, s.diffJoinPrefix(repoRoot), scope, "main")
+	diff, err := analysis.MapGitDiff(s.graph, repoRoot, repoPrefix, scope, "main")
 	if err != nil {
 		return promptError("Could not analyze git changes: " + err.Error()), nil
 	}

@@ -71,8 +71,7 @@ func (s *Server) handleSuggestReviewers(ctx context.Context, req mcp.CallToolReq
 	}
 
 	repo := strings.TrimSpace(req.GetString("repo", ""))
-	roots := s.collectRepoRoots(repo)
-	repoRoot := pickRepoRoot(roots, repo)
+	repoRoot, repoPrefix := s.diffRepoScope(ctx, repo)
 
 	changedFiles, _, err := s.resolveReviewerChangeset(ctx, req, repoRoot)
 	if err != nil {
@@ -102,7 +101,6 @@ func (s *Server) handleSuggestReviewers(ctx context.Context, req mcp.CallToolReq
 	// Ownership signal — recent authors of the changed symbols / files.
 	// The changed-file paths are repo-relative (git / forge), so the node
 	// join is prefix-aware in multi-repo mode.
-	repoPrefix := s.diffJoinPrefix(repoRoot)
 	blame := blameRowsByID(s.graph)
 	authorCounts := map[string]int{}
 	for _, f := range changedFiles {

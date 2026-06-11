@@ -86,7 +86,7 @@ func (s *Server) handleCritiqueReview(ctx context.Context, req mcp.CallToolReque
 		})
 	}
 
-	repoRoot := s.prReviewRepoRoot(req)
+	repoRoot := s.prReviewRepoRoot(ctx, req)
 	diffText := strings.TrimSpace(req.GetString("diff", ""))
 
 	findings, err := s.critiqueFindingsFor(ctx, req, repoRoot)

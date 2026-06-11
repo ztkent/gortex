@@ -43,13 +43,7 @@ func (s *Server) handlePostReview(ctx context.Context, req mcp.CallToolRequest) 
 	}
 
 	repo := strings.TrimSpace(req.GetString("repo", ""))
-	roots := s.collectRepoRoots(repo)
-	repoRoot := pickRepoRoot(roots, repo)
-	if repoRoot == "" && s.indexer != nil {
-		if root := s.indexer.RootPath(); root != "" {
-			repoRoot = root
-		}
-	}
+	repoRoot, _ := s.diffRepoScope(ctx, repo)
 
 	findings, err := s.postReviewFindingsFor(ctx, req, repoRoot)
 	if err != nil {
