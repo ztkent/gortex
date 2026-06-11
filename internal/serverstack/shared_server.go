@@ -432,6 +432,10 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 	overlays := daemon.NewOverlayManager(daemon.OverlayIdleTTLFromEnv(0))
 	srv.SetOverlayManager(overlays)
 	s.Overlays = overlays
+	stopOverlayJanitor := overlays.StartJanitor(0, func(dropped int) {
+		logger.Info("overlay janitor: swept idle sessions", zap.Int("dropped", dropped))
+	})
+	s.cleanup = append(s.cleanup, stopOverlayJanitor)
 
 	if semMgr := idx.SemanticManager(); semMgr != nil {
 		srv.SetSemanticManager(semMgr)

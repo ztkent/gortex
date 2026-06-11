@@ -521,6 +521,45 @@ func (m *OverlayManager) SweepIdle() int {
 	return dropped
 }
 
+// StartJanitor launches the background sweeper that enforces IdleTTL.
+// Without it SweepIdle never runs and a session whose proxy vanished
+// without an observed disconnect pins its pushed buffers for the
+// daemon's lifetime. interval <= 0 derives a default from the TTL
+// (TTL/4, floored at one minute). onSweep, when non-nil, is invoked
+// with the dropped count after any sweep that removed sessions —
+// telemetry stays the caller's concern. The returned stop func
+// terminates the goroutine and is safe to call more than once. A
+// manager with expiry disabled (idleTTL <= 0) starts no goroutine
+// and returns a no-op stop.
+func (m *OverlayManager) StartJanitor(interval time.Duration, onSweep func(dropped int)) (stop func()) {
+	if m.idleTTL <= 0 {
+		return func() {}
+	}
+	if interval <= 0 {
+		interval = m.idleTTL / 4
+		if interval < time.Minute {
+			interval = time.Minute
+		}
+	}
+	done := make(chan struct{})
+	var once sync.Once
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-t.C:
+				if dropped := m.SweepIdle(); dropped > 0 && onSweep != nil {
+					onSweep(dropped)
+				}
+			case <-done:
+				return
+			}
+		}
+	}()
+	return func() { once.Do(func() { close(done) }) }
+}
+
 // ---------------------------------------------------------------------------
 // Branching surface: fork, list, switch, merge, drop_branch.
 // ---------------------------------------------------------------------------

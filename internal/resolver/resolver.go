@@ -761,23 +761,61 @@ func (r *Resolver) lookupDepModule(callerRepo, importPath string) *graph.Node {
 	return nil
 }
 
+// buildPassIndexes builds the four per-pass lookup indexes every
+// resolve pass needs and returns the matching teardown (which also
+// drops the lazily-built LSP index). Factored so entry points that
+// run several passes under one lock — the per-save ResolveFile +
+// ResolveIncomingForFile pair — build them once instead of once per
+// pass.
+func (r *Resolver) buildPassIndexes() (clear func()) {
+	r.buildDirIndexes()
+	r.buildDepModuleIndex()
+	r.buildProvidesForIndex()
+	r.buildReachabilityIndex()
+	return func() {
+		r.clearDirIndexes()
+		r.clearDepModuleIndex()
+		r.clearProvidesForIndex()
+		r.clearReachabilityIndex()
+		r.clearLSPIndex()
+	}
+}
+
 // ResolveFile resolves unresolved edges originating from a specific file.
 func (r *Resolver) ResolveFile(filePath string) *ResolveStats {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.buildDirIndexes()
-	defer r.clearDirIndexes()
-	r.buildDepModuleIndex()
-	defer r.clearDepModuleIndex()
-	r.buildProvidesForIndex()
-	defer r.clearProvidesForIndex()
-	r.buildReachabilityIndex()
-	defer r.clearReachabilityIndex()
-	defer r.clearLSPIndex()
+	clear := r.buildPassIndexes()
+	defer clear()
 
 	stats := &ResolveStats{}
+	r.resolveFileLocked(filePath, stats)
+	return stats
+}
 
+// ResolveFileAndIncoming runs the forward (this file's outgoing
+// references) and reverse (other files' references to symbols defined
+// here) passes under one lock with one build of the per-pass indexes.
+// The per-save hot path calls this instead of ResolveFile +
+// ResolveIncomingForFile back-to-back, which built and tore down the
+// same four indexes twice per save.
+func (r *Resolver) ResolveFileAndIncoming(filePath string) *ResolveStats {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	clear := r.buildPassIndexes()
+	defer clear()
+
+	stats := &ResolveStats{}
+	r.resolveFileLocked(filePath, stats)
+	r.resolveIncomingLocked(filePath, stats)
+	return stats
+}
+
+// resolveFileLocked is the forward-pass core. Caller holds r.mu and
+// has built the per-pass indexes.
+func (r *Resolver) resolveFileLocked(filePath string, stats *ResolveStats) {
 	// Get all nodes in the file, then check their outgoing edges.
 	// Single-threaded path — collect mutations into a batch and flush
 	// in one ReindexEdges call after the file's edges are walked, so a
@@ -839,8 +877,6 @@ func (r *Resolver) ResolveFile(filePath string) *ResolveStats {
 	r.bindGenericParamRefs()
 	r.attributeGoBuiltins()
 	r.attributeGoExternalCalls()
-
-	return stats
 }
 
 // ResolveIncomingForFile is the reverse of ResolveFile: instead of
@@ -859,15 +895,8 @@ func (r *Resolver) ResolveIncomingForFile(filePath string) *ResolveStats {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.buildDirIndexes()
-	defer r.clearDirIndexes()
-	r.buildDepModuleIndex()
-	defer r.clearDepModuleIndex()
-	r.buildProvidesForIndex()
-	defer r.clearProvidesForIndex()
-	r.buildReachabilityIndex()
-	defer r.clearReachabilityIndex()
-	defer r.clearLSPIndex()
+	clear := r.buildPassIndexes()
+	defer clear()
 
 	stats := &ResolveStats{}
 	r.resolveIncomingLocked(filePath, stats)
