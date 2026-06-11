@@ -72,6 +72,12 @@ CREATE TABLE IF NOT EXISTS edges (
 
 CREATE INDEX IF NOT EXISTS edges_by_from ON edges(from_id, kind);
 CREATE INDEX IF NOT EXISTS edges_by_to   ON edges(to_id, kind);
+-- edges_by_kind backs EdgesByKind / EdgesByKinds (resolver whole-graph
+-- passes probe single kinds like provides/imports on every file save);
+-- without it those are full edges-table scans — edges_by_from/to lead
+-- with an id column and the partial edges_external index only covers
+-- its own predicate.
+CREATE INDEX IF NOT EXISTS edges_by_kind ON edges(kind);
 
 CREATE TABLE IF NOT EXISTS file_mtimes (
     repo_prefix TEXT NOT NULL,
