@@ -191,7 +191,11 @@ func (s *SidecarStore) SavingsLegacyImportDone() bool {
 // totals from the cumulative savings.json and event rows from the
 // savings.jsonl log. Idempotent — guarded by a migration mark, which is
 // set even for an empty import so the file probing never repeats. The
-// caller owns reading (and afterwards renaming) the legacy files.
+// mark is checked and written inside the import transaction, so two
+// processes racing the first start (daemon + CLI) cannot both seed the
+// ledger: the loser either sees the winner's mark or aborts on the
+// write conflict. The caller owns reading (and afterwards renaming)
+// the legacy files.
 func (s *SidecarStore) ImportLegacySavings(buckets map[string]SavingsTotalsRow, firstSeen, lastUpdated time.Time, events []SavingsEvent) error {
 	if s == nil || s.migrationDone("", savingsLegacyMigrationKind) {
 		return nil
@@ -204,6 +208,19 @@ func (s *SidecarStore) ImportLegacySavings(buckets map[string]SavingsTotalsRow, 
 		return fmt.Errorf("persistence: savings import tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	// Re-check under the transaction — the cheap pre-check above races
+	// with other writers (in-process via writeMu it cannot, but another
+	// process opening the same database can).
+	var marked int
+	if err := tx.QueryRow(
+		`SELECT COUNT(1) FROM migration_marks WHERE repo_key = '' AND kind = ?`, savingsLegacyMigrationKind,
+	).Scan(&marked); err != nil {
+		return fmt.Errorf("persistence: savings import mark check: %w", err)
+	}
+	if marked > 0 {
+		return nil
+	}
 
 	for bucket, r := range buckets {
 		if err := upsertSavingsBucket(tx, bucket, r.Saved, r.Returned, r.Calls); err != nil {
@@ -236,11 +253,13 @@ func (s *SidecarStore) ImportLegacySavings(buckets map[string]SavingsTotalsRow, 
 			return fmt.Errorf("persistence: savings import meta: %w", err)
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return err
+	if _, err := tx.Exec(
+		`INSERT OR REPLACE INTO migration_marks (repo_key, kind, done_at) VALUES ('', ?, ?)`,
+		savingsLegacyMigrationKind, time.Now().UTC().UnixNano(),
+	); err != nil {
+		return fmt.Errorf("persistence: savings import mark: %w", err)
 	}
-	s.markMigrated("", savingsLegacyMigrationKind)
-	return nil
+	return tx.Commit()
 }
 
 // ResetSavings wipes the savings ledger (events, totals, meta). The
