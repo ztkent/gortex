@@ -65,7 +65,11 @@ func EstimateFromSample(totalChars int, sample string) int {
 	if sample == "" {
 		return totalChars / charsPerTokenFallback
 	}
-	sampleTokens := Count(sample)
+	// CachedCount, not Count: callers calibrate with a payload they have
+	// typically just counted — the disk cache turns this second pass
+	// over the same bytes into a hash lookup instead of a full BPE run
+	// (~200ms per MB).
+	sampleTokens := CachedCount(sample)
 	if sampleTokens == 0 || len(sample) == 0 {
 		return totalChars / charsPerTokenFallback
 	}

@@ -96,13 +96,14 @@ type sessionLocal struct {
 // is shared. parent, when non-nil, is the process-wide tokenStats
 // aggregate; every per-session record() call also bumps it so the
 // shared default reflects daemon-wide live activity.
-func newSessionLocal(persistent *savings.Store, repoPath string, parent *tokenStats) *sessionLocal {
+func newSessionLocal(id string, persistent *savings.Store, repoPath string, parent *tokenStats) *sessionLocal {
 	return &sessionLocal{
 		session: newSessionState(),
 		tokenStats: &tokenStats{
 			persistent: persistent,
 			repoPath:   repoPath,
 			parent:     parent,
+			sessionID:  id,
 		},
 	}
 }
@@ -155,7 +156,7 @@ func (m *sessionMap) get(id string) *sessionLocal {
 	defer m.mu.Unlock()
 	sl, ok := m.sessions[id]
 	if !ok {
-		sl = newSessionLocal(m.persistent, m.repoPath, m.parent)
+		sl = newSessionLocal(id, m.persistent, m.repoPath, m.parent)
 		m.sessions[id] = sl
 	}
 	return sl

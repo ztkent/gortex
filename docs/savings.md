@@ -2,9 +2,9 @@
 
 Gortex tracks how many tokens it saves compared to naive file reads — per-call, per-session, and cumulative across restarts:
 
-- **Per-call:** `get_symbol_source` and other source-reading tools include a `tokens_saved` field in the response, showing the difference between reading the full file vs the targeted symbol.
+- **Per-call:** every source-reading tool — `read_file`, `get_file_summary`, `get_editing_context`, `get_symbol_source`, `batch_symbols` (with `include_source`), `smart_context` — books an observation server-side: tokens actually returned vs the full-file read the response stands in for. The per-call value is deliberately not echoed in responses (agents don't act on it and it would burn tokens on every reply); it lands in the ledger.
 - **Session-level:** `graph_stats` returns a `token_savings` object with `calls_counted`, `tokens_returned`, `tokens_saved`, `efficiency_ratio`.
-- **Cumulative (cross-session):** `graph_stats` also returns `cumulative_savings` when persistence is wired — includes `first_seen`, `last_updated`, and `cost_avoided_usd` per model (Claude Opus/Sonnet/Haiku, GPT-4o, GPT-4o-mini). Backed by `~/.gortex/cache/savings.json` (top-line totals + per-repo + per-language) and a sibling `~/.gortex/cache/savings.jsonl` event log (one line per call) used to render the windowed buckets and the per-tool breakdown.
+- **Cumulative (cross-session):** `graph_stats` also returns `cumulative_savings` when persistence is wired — includes `first_seen`, `last_updated`, and `cost_avoided_usd` per model (Claude Opus/Sonnet/Haiku, GPT-4o, GPT-4o-mini). Backed by the machine-global sidecar database (`~/.gortex/sidecar.sqlite` — the same file that holds notes/memories): `savings_totals` carries top-line + per-repo + per-language aggregates and `savings_events` one session-tagged row per call, powering the windowed buckets and the per-tool breakdown. Each observation commits transactionally, so the ledger survives SIGKILLed MCP servers and concurrent writer processes. Flat-file ledgers from older releases (`~/.gortex/cache/savings.json` + `savings.jsonl`) are imported once on first open and renamed `*.bak`.
 
 `gortex savings` renders a three-bucket dashboard:
 
@@ -34,7 +34,7 @@ gortex savings --utc
 # Machine-readable output (mirrors the dashboard structure: buckets[].per_tool, cost_avoided_usd, etc.)
 gortex savings --json
 
-# Wipe cumulative totals and the JSONL event log
+# Wipe cumulative totals and the event history
 gortex savings --reset
 
 # Override pricing (JSON array of {model, usd_per_m_input})

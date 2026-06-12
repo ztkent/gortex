@@ -3,6 +3,7 @@ package mcp
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -532,6 +533,16 @@ func (s *Server) handleGetEditingContext(ctx context.Context, req mcp.CallToolRe
 		return notModifiedResult(etag), nil
 	}
 
+	// Server-side accounting only — an editing-context bundle stands in
+	// for reading the whole file before editing it.
+	ctxLang := ""
+	if fileNodeForScope != nil {
+		ctxLang = fileNodeForScope.Language
+	}
+	if payload, merr := json.Marshal(out); merr == nil {
+		s.recordFileBaselineSavings(ctx, "get_editing_context", fp, ctxLang, string(payload)+sourceCompressed)
+	}
+
 	// Omission notes: flag vendored/generated provenance and body
 	// compression so the model doesn't over-trust the payload.
 	omissions := pathOmissions(fp)
@@ -827,7 +838,7 @@ func (s *Server) handleGetSymbolSource(ctx context.Context, req mcp.CallToolRequ
 	// response). Aggregated stats remain available via the `savings` tool.
 	returned := tokens.CachedCountInt64(source)
 	fullFile := int64(tokens.EstimateFromSample(totalFileChars, source))
-	s.tokenStatsFor(ctx).record(node, "get_symbol_source", returned, fullFile)
+	s.tokenStatsFor(ctx).record(s.savingsAttributionNode(node), "get_symbol_source", returned, fullFile)
 
 	result := map[string]any{
 		"id":         node.ID,
@@ -1047,7 +1058,7 @@ func (s *Server) handleBatchSymbols(ctx context.Context, req mcp.CallToolRequest
 					entry["from_line"] = fromLine
 					returned := tokens.CachedCountInt64(source)
 					fullFile := int64(tokens.EstimateFromSample(totalFileChars, source))
-					s.tokenStatsFor(ctx).record(node, "batch_symbols", returned, fullFile)
+					s.tokenStatsFor(ctx).record(s.savingsAttributionNode(node), "batch_symbols", returned, fullFile)
 				}
 			}
 		}
@@ -1910,7 +1921,7 @@ func (s *Server) handleSmartContext(ctx context.Context, req mcp.CallToolRequest
 					sourcesEmbedded++
 					returned := tokens.CachedCountInt64(source)
 					fullFile := int64(tokens.EstimateFromSample(totalFileChars, source))
-					s.tokenStatsFor(ctx).record(sym, "smart_context", returned, fullFile)
+					s.tokenStatsFor(ctx).record(s.savingsAttributionNode(sym), "smart_context", returned, fullFile)
 				}
 			}
 		}

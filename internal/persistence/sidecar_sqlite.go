@@ -137,6 +137,31 @@ CREATE TABLE IF NOT EXISTS suppressions (
 	PRIMARY KEY (repo_key, identity_key)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_supp_updated ON suppressions (repo_key, last_hit DESC);
+
+CREATE TABLE IF NOT EXISTS savings_events (
+	id          INTEGER PRIMARY KEY AUTOINCREMENT,
+	ts          INTEGER NOT NULL DEFAULT 0,
+	session_id  TEXT NOT NULL DEFAULT '',
+	tool        TEXT NOT NULL DEFAULT '',
+	repo        TEXT NOT NULL DEFAULT '',
+	language    TEXT NOT NULL DEFAULT '',
+	returned    INTEGER NOT NULL DEFAULT 0,
+	saved       INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_savings_events_ts   ON savings_events (ts);
+CREATE INDEX IF NOT EXISTS idx_savings_events_tool ON savings_events (tool, ts);
+
+CREATE TABLE IF NOT EXISTS savings_totals (
+	bucket   TEXT NOT NULL PRIMARY KEY,
+	saved    INTEGER NOT NULL DEFAULT 0,
+	returned INTEGER NOT NULL DEFAULT 0,
+	calls    INTEGER NOT NULL DEFAULT 0
+) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS savings_meta (
+	key   TEXT NOT NULL PRIMARY KEY,
+	value INTEGER NOT NULL DEFAULT 0
+) WITHOUT ROWID;
 `
 
 // DefaultSidecarPath is the canonical location of the side-store DB:

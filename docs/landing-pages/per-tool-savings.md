@@ -2,7 +2,7 @@
 
 **Last regenerated**: 2026-05-18T22:20:29Z  ·  Source: `gortex savings
 --verbose --json` against the operator's cumulative store
-(`~/.gortex/cache/savings.json` + `~/.gortex/cache/savings.jsonl`).
+(the `~/.gortex/sidecar.sqlite` savings ledger).
 
 ## Headline
 

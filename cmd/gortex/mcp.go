@@ -15,7 +15,6 @@ import (
 	"github.com/zzet/gortex/internal/llm/conversationlog"
 	"github.com/zzet/gortex/internal/persistence"
 	"github.com/zzet/gortex/internal/platform"
-	"github.com/zzet/gortex/internal/savings"
 	"github.com/zzet/gortex/internal/server"
 	"github.com/zzet/gortex/internal/server/hub"
 	"github.com/zzet/gortex/internal/serverstack"
@@ -140,10 +139,14 @@ func runMCP(cmd *cobra.Command, args []string) error {
 	if sideStoreCacheDir == "" {
 		sideStoreCacheDir = platform.CacheDir()
 	}
-	savingsPath := savings.DefaultPath()
-	if mcpCacheDir != "" {
-		savingsPath = filepath.Join(mcpCacheDir, "savings.json")
-	}
+	// The savings ledger is machine-global — the same sidecar database
+	// every entry point writes and the `gortex savings` CLI reads.
+	// --cache-dir deliberately does NOT relocate it: users set that flag
+	// to move the graph cache, and quietly splitting the ledger away
+	// from the dashboard's default read path recreates the
+	// empty-dashboard failure mode. Isolation (tests, sandboxes) comes
+	// from XDG_DATA_HOME / XDG_CACHE_HOME, which both ledger paths
+	// honour.
 
 	ss, err := serverstack.NewSharedServer(serverstack.SharedServerConfig{
 		Lifecycle: serverstack.LifecycleOneshot,
@@ -166,7 +169,6 @@ func runMCP(cmd *cobra.Command, args []string) error {
 			FeedbackRepo: mcpIndex,
 			NotebookPath: mcpIndex,
 		},
-		SavingsPath: savingsPath,
 		SavingsRepo: mcpIndex,
 	})
 	if err != nil {
@@ -203,11 +205,6 @@ func runMCP(cmd *cobra.Command, args []string) error {
 			}
 		}
 	}
-
-	// Periodic savings flush. NewSharedServer flushes on Close (deferred
-	// above); this guards against a crash losing accumulated totals.
-	stopSavingsFlush := srv.StartPeriodicSavingsFlush(5 * time.Minute)
-	defer stopSavingsFlush()
 
 	fmt.Fprintf(os.Stderr, "[gortex] MCP server ready (transport: %s)\n", mcpTransport)
 

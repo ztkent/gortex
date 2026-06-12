@@ -14,6 +14,7 @@ import (
 	"github.com/zzet/gortex/internal/elide"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/indexer"
+	"github.com/zzet/gortex/internal/tokens"
 )
 
 // errPathUnresolved is returned when a relative path cannot be anchored to any
@@ -62,9 +63,19 @@ func (s *Server) resolveFilePath(rawPath string) (absPath, relPath string, err e
 	if s.multiIndexer != nil {
 		// Multi-repo mode requires a repo-prefixed path. Bare-relative
 		// paths are ambiguous; refuse rather than fall through to the
-		// daemon process CWD.
+		// daemon process CWD. With exactly one tracked repo there is no
+		// ambiguity — single-repo mode indexes unprefixed paths, so a
+		// bare-relative path anchors to the lone repo's root.
 		prefix := matchedRepoPrefix(s.multiIndexer, rawPath)
 		if prefix == "" {
+			if root, ok := s.multiIndexer.RepoRoot(""); ok {
+				abs := filepath.Clean(filepath.Join(root, rawPath))
+				if !pathContainedIn(abs, root) {
+					return "", "", fmt.Errorf("%w: %q resolves to %q, outside repo root %q", errPathEscape, rawPath, abs, root)
+				}
+				abs = worktreeRootedPath(abs, root, s.multiIndexer)
+				return abs, rawPath, nil
+			}
 			prefixes := s.multiIndexer.RepoPrefixes()
 			return "", "", fmt.Errorf("%w: path %q does not start with a known repo prefix; expected one of: %s/, or an absolute path",
 				errPathUnresolved, rawPath, strings.Join(prefixes, "/, "))
@@ -72,6 +83,19 @@ func (s *Server) resolveFilePath(rawPath string) (absPath, relPath string, err e
 		root, ok := s.multiIndexer.RepoRoot(prefix)
 		if !ok {
 			return "", "", fmt.Errorf("%w: repo prefix %q has no root path", errPathUnresolved, prefix)
+		}
+		// Collision guard for the lone unprefixed repo: its indexed
+		// paths are raw relative paths, so one whose first segment
+		// equals the repo's own prefix (repo "api" containing
+		// api/handlers.go) would be hijacked by the prefix-strip join.
+		// Prefer the raw join when that file actually exists.
+		if loneRoot, lok := s.multiIndexer.RepoRoot(""); lok && loneRoot == root {
+			raw := filepath.Clean(filepath.Join(loneRoot, rawPath))
+			if pathContainedIn(raw, loneRoot) {
+				if _, err := os.Stat(raw); err == nil {
+					return worktreeRootedPath(raw, loneRoot, s.multiIndexer), rawPath, nil
+				}
+			}
 		}
 		abs := filepath.Clean(filepath.Join(root, strings.TrimPrefix(rawPath, prefix+"/")))
 		if !pathContainedIn(abs, root) {
@@ -327,6 +351,64 @@ func (s *Server) resolveGraphPath(graphPath string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("%w: path=%q", errPathUnresolved, graphPath)
+}
+
+// fileAttributionNode synthesizes a node carrying just the repo prefix
+// and language of a file — enough for tokenStats.record to attribute an
+// observation to the right per-repo / per-language bucket when no real
+// symbol node is in hand.
+func (s *Server) fileAttributionNode(relPath, language string) *graph.Node {
+	prefix := ""
+	if s.multiIndexer != nil {
+		prefix = matchedRepoPrefix(s.multiIndexer, relPath)
+		// Lone-repo attribution applies only to repo-relative paths —
+		// an absolute path that matched no prefix points outside every
+		// tracked repo and must stay unattributed rather than polluting
+		// the lone repo's buckets.
+		if prefix == "" && !filepath.IsAbs(relPath) {
+			if prefixes := s.multiIndexer.RepoPrefixes(); len(prefixes) == 1 {
+				prefix = prefixes[0]
+			}
+		}
+	}
+	return &graph.Node{RepoPrefix: prefix, Language: language, FilePath: relPath}
+}
+
+// savingsAttributionNode fills the per-repo attribution for symbol
+// nodes minted in single-repo mode (RepoPrefix="") so symbol-tool
+// events land in the same per-repo bucket the read-family tools use.
+// The graph node itself is never mutated.
+func (s *Server) savingsAttributionNode(node *graph.Node) *graph.Node {
+	if node == nil || node.RepoPrefix != "" || s.multiIndexer == nil {
+		return node
+	}
+	prefixes := s.multiIndexer.RepoPrefixes()
+	if len(prefixes) != 1 {
+		return node
+	}
+	cp := *node
+	cp.RepoPrefix = prefixes[0]
+	return &cp
+}
+
+// recordFileBaselineSavings books a savings observation for a tool whose
+// response stands in for reading a whole file. payload is the response
+// content actually produced — used both for the returned-token count and
+// as the chars-per-token calibration sample — and the baseline is the
+// on-disk byte size of the file the agent would otherwise have read.
+// Best-effort accounting: files that don't resolve or stat book nothing.
+func (s *Server) recordFileBaselineSavings(ctx context.Context, tool, relPath, language, payload string) {
+	abs, err := s.resolveGraphPath(relPath)
+	if err != nil {
+		return
+	}
+	info, err := os.Stat(abs)
+	if err != nil || info.IsDir() {
+		return
+	}
+	returned := tokens.CachedCountInt64(payload)
+	fullFile := int64(tokens.EstimateFromSample(int(info.Size()), payload))
+	s.tokenStatsFor(ctx).record(s.fileAttributionNode(relPath, language), tool, returned, fullFile)
 }
 
 // repoRelative converts an absolute path to a repo-prefixed or root-relative
@@ -768,6 +850,22 @@ func (s *Server) handleReadFile(ctx context.Context, req mcp.CallToolRequest) (*
 		return notModifiedResult(etag), nil
 	}
 	result["etag"] = etag
+
+	// Server-side accounting only — read_file is the heaviest source
+	// fetch and must show up in the savings ledger even when nothing
+	// was saved (an uncompressed read returns the whole file, so
+	// returned == baseline and only the call is counted). Recorded
+	// after the conditional-fetch return so a not_modified turnaround
+	// books nothing and skips the tokenization entirely.
+	if !isBinary {
+		contentStr := string(content)
+		returned := tokens.CachedCountInt64(contentStr)
+		fullFile := returned
+		if bodiesElided || salienceTruncated {
+			fullFile = int64(tokens.EstimateFromSample(originalBytes, contentStr))
+		}
+		s.tokenStatsFor(ctx).record(s.fileAttributionNode(relPath, language), "read_file", returned, fullFile)
+	}
 
 	if s.isTOON(ctx, req) {
 		return returnTOON(result)

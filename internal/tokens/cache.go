@@ -18,6 +18,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/zzet/gortex/internal/platform"
 )
@@ -31,6 +33,17 @@ const tokenCacheFormat = "1"
 // than the tokenization it would save.
 const minCacheBytes = 2048
 
+// sweepEvery / sweepMaxAge bound the cache's growth: every sweepEvery-th
+// write prunes the shard directory just written of entries older than
+// sweepMaxAge. Entries are one content version each and never reused
+// once the content changes, so without a sweep the cache grows one
+// inode per unique payload forever. Read hits refresh the entry's
+// mtime, so the TTL approximates LRU for content that is still live.
+const (
+	sweepEvery  = 64
+	sweepMaxAge = 30 * 24 * time.Hour
+)
+
 // DiskCache is a content-addressed token-count cache backed by a
 // directory tree. It is safe for concurrent use — entries are written
 // atomically (temp + rename) and a torn or absent entry simply falls
@@ -38,6 +51,7 @@ const minCacheBytes = 2048
 type DiskCache struct {
 	dir      string
 	revision string
+	writes   atomic.Uint64
 }
 
 // DefaultTokenCacheDir returns the default cache location:
@@ -97,7 +111,8 @@ func (c *DiskCache) pathFor(key string) string {
 }
 
 func (c *DiskCache) read(key string) (int, bool) {
-	data, err := os.ReadFile(c.pathFor(key))
+	path := c.pathFor(key)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return 0, false
 	}
@@ -105,6 +120,10 @@ func (c *DiskCache) read(key string) (int, bool) {
 	if err != nil || n < 0 {
 		return 0, false
 	}
+	// Refresh the entry so the age sweep approximates LRU: content that
+	// is still being counted stays; content that stopped flowing ages out.
+	now := time.Now()
+	_ = os.Chtimes(path, now, now)
 	return n, true
 }
 
@@ -129,6 +148,30 @@ func (c *DiskCache) write(key string, n int) {
 	}
 	if err := os.Rename(tmpName, path); err != nil {
 		_ = os.Remove(tmpName)
+		return
+	}
+	if c.writes.Add(1)%sweepEvery == 0 {
+		c.sweepShard(filepath.Dir(path))
+	}
+}
+
+// sweepShard removes entries in one shard directory whose mtime is
+// older than sweepMaxAge. Best-effort and concurrent-safe by
+// construction: a deleted entry is just a future cache miss.
+func (c *DiskCache) sweepShard(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-sweepMaxAge)
+	for _, e := range entries {
+		info, ierr := e.Info()
+		if ierr != nil || info.IsDir() {
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			_ = os.Remove(filepath.Join(dir, e.Name()))
+		}
 	}
 }
 

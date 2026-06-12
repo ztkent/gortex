@@ -7,59 +7,33 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 )
 
-// Event is a single source-reading observation written to the JSONL log.
-// One line per call; the dashboard reads the tail of the file to compute
-// the Today / Last 7 days buckets the cumulative totals can't reconstruct
-// on their own.
+// Event is a single source-reading observation. The dashboard reads the
+// event history (Store.EventsSince) to compute the Today / Last 7 days
+// buckets the cumulative totals can't reconstruct on their own.
 //
-// Fields use compact JSON keys to keep the on-disk log small — the log can
-// grow to thousands of entries over a few weeks of heavy use.
+// Fields use compact JSON keys — they are also the line schema of the
+// flat-file era's savings.jsonl log, which LoadEvents still parses for
+// the one-shot legacy import.
 type Event struct {
-	TS       time.Time `json:"ts"`
-	Repo     string    `json:"repo,omitempty"`
-	Language string    `json:"lang,omitempty"`
-	Tool     string    `json:"tool,omitempty"`
-	Returned int64     `json:"returned"`
-	Saved    int64     `json:"saved"`
+	TS        time.Time `json:"ts"`
+	SessionID string    `json:"session,omitempty"`
+	Repo      string    `json:"repo,omitempty"`
+	Language  string    `json:"lang,omitempty"`
+	Tool      string    `json:"tool,omitempty"`
+	Returned  int64     `json:"returned"`
+	Saved     int64     `json:"saved"`
 }
 
-// appendEvent serializes ev as a single JSON line and appends it to path,
-// creating the file (and parent dir) when missing. O_APPEND makes the
-// write atomic for sane line sizes on POSIX, so multiple writers don't
-// corrupt each other's lines.
-func appendEvent(path string, ev Event) error {
-	if path == "" {
-		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
-
-	data, err := json.Marshal(ev)
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	_, err = f.Write(data)
-	return err
-}
-
-// LoadEvents reads the JSONL log at path and returns events with ts >=
-// since. since=zero returns everything. Returned events are in file
-// order (oldest first). Malformed lines are skipped silently — they
+// LoadEvents reads a flat-file era JSONL log at path and returns events
+// with ts >= since. since=zero returns everything. Returned events are in
+// file order (oldest first). Malformed lines are skipped silently — they
 // only happen when a previous gortex process crashed mid-write and the
-// dashboard should keep working anyway.
+// legacy import should keep working anyway.
 func LoadEvents(path string, since time.Time) ([]Event, error) {
 	if path == "" {
 		return nil, nil
@@ -194,40 +168,26 @@ func FilterDay(events []Event, day time.Time, loc *time.Location) []Event {
 }
 
 // BuildDashboard returns the three canonical buckets (Today / Last 7 days /
-// All time) using `now` as the reference clock and `loc` as the calendar
-// for the "Today" boundary. Pass eventsPath="" or a missing file to skip
-// reading the event log — All time then still works via storeAllTime.
-func BuildDashboard(eventsPath string, storeAllTime Totals, now time.Time, loc *time.Location) ([]Bucket, error) {
+// All time) from the last week's events (oldest first), using `now` as the
+// reference clock and `loc` as the calendar for the "Today" boundary.
+// storeAllTime supplies the All-time totals and allPerTool its per-tool
+// breakdown — both come from the ledger's aggregates, so callers never
+// materialize the full event history just to render the dashboard.
+func BuildDashboard(weekEvents []Event, storeAllTime Totals, allPerTool []ToolTotal, now time.Time, loc *time.Location) []Bucket {
 	if loc == nil {
 		loc = time.Local
 	}
-	// Lower bound for events we care about — anything older than 7 days
-	// is irrelevant to Today/7d, and All time comes from storeAllTime.
-	weekStart := now.Add(-7 * 24 * time.Hour)
-	events, err := LoadEvents(eventsPath, weekStart)
-	if err != nil {
-		return nil, err
-	}
+	weekEvents = FilterSince(weekEvents, now.Add(-7*24*time.Hour))
 
-	todayEvents := FilterDay(events, now, loc)
+	todayEvents := FilterDay(weekEvents, now, loc)
 	todayTotals, todayPerTool := AggregateByTool(todayEvents)
-	weekTotals, weekPerTool := AggregateByTool(events)
-
-	// All time per-tool requires a full scan — only do it when the log
-	// is reasonably small. The dashboard skips per-tool for All time when
-	// the log doesn't cover the full history (start_tracking < first
-	// event line) since the breakdown would be misleading.
-	allEvents, err := LoadEvents(eventsPath, time.Time{})
-	if err != nil {
-		return nil, err
-	}
-	_, allPerTool := AggregateByTool(allEvents)
+	weekTotals, weekPerTool := AggregateByTool(weekEvents)
 
 	return []Bucket{
 		{Label: "Today", Totals: todayTotals, PerTool: todayPerTool},
 		{Label: "Last 7 days", Totals: weekTotals, PerTool: weekPerTool},
 		{Label: "All time", Totals: storeAllTime, PerTool: allPerTool},
-	}, nil
+	}
 }
 
 // SavingsPercent returns the percentage of "full file size" tokens that

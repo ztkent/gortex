@@ -1,6 +1,7 @@
 package savings
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,24 @@ import (
 	"testing"
 	"time"
 )
+
+// appendLegacyEventLine writes one JSONL line the way the flat-file era
+// did — test fixture for the legacy reader.
+func appendLegacyEventLine(t *testing.T, path string, ev Event) {
+	t.Helper()
+	data, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	if _, err := f.Write(append(data, '\n')); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestEventsPathFor(t *testing.T) {
 	cases := []struct {
@@ -27,36 +46,29 @@ func TestEventsPathFor(t *testing.T) {
 	}
 }
 
-func TestAddObservation_AppendsEventLine(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "savings.json")
-
-	s, err := Open(path)
+func TestAddObservation_RecordsEvent(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "sidecar.sqlite"))
+	if err == nil {
+		t.Cleanup(func() { _ = s.Close() })
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.AddObservation("/repo-a", "go", "get_symbol_source", 100, 900)
-	s.AddObservation("/repo-b", "ts", "batch_symbols", 50, 50)
+	s.AddObservation(Observation{Repo: "/repo-a", Language: "go", Tool: "get_symbol_source", SessionID: "sess-1", Returned: 100, Saved: 900})
+	s.AddObservation(Observation{Repo: "/repo-b", Language: "ts", Tool: "batch_symbols", Returned: 50, Saved: 50})
 
-	logPath := EventsPathFor(path)
-	data, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("expected event log at %s: %v", logPath, err)
-	}
-	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
-	if got, want := len(lines), 2; got != want {
-		t.Fatalf("event log line count = %d, want %d\n%s", got, want, data)
-	}
-
-	evs, err := LoadEvents(logPath, time.Time{})
+	evs, err := s.EventsSince(time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got, want := len(evs), 2; got != want {
-		t.Fatalf("LoadEvents = %d, want %d", got, want)
+		t.Fatalf("EventsSince = %d, want %d", got, want)
 	}
 	if evs[0].Tool != "get_symbol_source" || evs[0].Saved != 900 || evs[0].Repo != "/repo-a" {
 		t.Errorf("event 0 = %+v", evs[0])
+	}
+	if evs[0].SessionID != "sess-1" {
+		t.Errorf("event 0 session = %q, want sess-1", evs[0].SessionID)
 	}
 	if evs[1].Tool != "batch_symbols" || evs[1].Returned != 50 || evs[1].Language != "ts" {
 		t.Errorf("event 1 = %+v", evs[1])
@@ -73,9 +85,7 @@ func TestLoadEvents_FiltersSince(t *testing.T) {
 		now.Add(-24 * time.Hour),
 		now.Add(-1 * time.Hour),
 	} {
-		if err := appendEvent(path, Event{TS: ts, Tool: "t", Saved: int64(i + 1) * 10}); err != nil {
-			t.Fatal(err)
-		}
+		appendLegacyEventLine(t, path, Event{TS: ts, Tool: "t", Saved: int64(i+1) * 10})
 	}
 
 	// since = now - 25h should drop the 48h-old one.
@@ -188,29 +198,24 @@ func TestFilterDay_LocalAndUTC(t *testing.T) {
 }
 
 func TestBuildDashboard_BucketsByWindow(t *testing.T) {
-	dir := t.TempDir()
-	logPath := filepath.Join(dir, "savings.jsonl")
-
 	now := time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC)
 	// 3 today events, 2 within 7d but not today, 1 outside 7d.
-	mustAppend := func(ts time.Time, tool string, saved int64) {
-		if err := appendEvent(logPath, Event{TS: ts, Tool: tool, Saved: saved, Returned: 10}); err != nil {
-			t.Fatal(err)
-		}
+	mk := func(ts time.Time, tool string, saved int64) Event {
+		return Event{TS: ts, Tool: tool, Saved: saved, Returned: 10}
 	}
-	mustAppend(now.Add(-2*time.Hour), "get_symbol_source", 100)
-	mustAppend(now.Add(-3*time.Hour), "get_symbol_source", 150)
-	mustAppend(now.Add(-30*time.Minute), "batch_symbols", 50)
-	mustAppend(now.Add(-3*24*time.Hour), "smart_context", 200)
-	mustAppend(now.Add(-5*24*time.Hour), "smart_context", 300)
-	mustAppend(now.Add(-30*24*time.Hour), "old_tool", 9999) // outside 7d
+	events := []Event{
+		mk(now.Add(-30*24*time.Hour), "old_tool", 9999), // outside 7d
+		mk(now.Add(-5*24*time.Hour), "smart_context", 300),
+		mk(now.Add(-3*24*time.Hour), "smart_context", 200),
+		mk(now.Add(-3*time.Hour), "get_symbol_source", 150),
+		mk(now.Add(-2*time.Hour), "get_symbol_source", 100),
+		mk(now.Add(-30*time.Minute), "batch_symbols", 50),
+	}
 
 	all := Totals{TokensSaved: 9999 + 300 + 200 + 50 + 150 + 100, TokensReturned: 60, CallsCounted: 6}
 
-	buckets, err := BuildDashboard(logPath, all, now, time.UTC)
-	if err != nil {
-		t.Fatal(err)
-	}
+	_, allPerTool := AggregateByTool(events)
+	buckets := BuildDashboard(events, all, allPerTool, now, time.UTC)
 	if len(buckets) != 3 {
 		t.Fatalf("buckets = %d, want 3", len(buckets))
 	}
@@ -242,13 +247,13 @@ func TestBuildDashboard_BucketsByWindow(t *testing.T) {
 		t.Errorf("buckets[2].Label = %q, want All time", all2.Label)
 	}
 	if all2.Totals != all {
-		t.Errorf("All time totals = %+v, want %+v (from store, not log)", all2.Totals, all)
+		t.Errorf("All time totals = %+v, want %+v (from store, not events)", all2.Totals, all)
 	}
-	// All time per-tool comes from a full log scan, so the 30-day-old
+	// All time per-tool covers the full history, so the 30-day-old
 	// event is included.
 	gotTools := map[string]bool{}
-	for _, t := range all2.PerTool {
-		gotTools[t.Tool] = true
+	for _, tt := range all2.PerTool {
+		gotTools[tt.Tool] = true
 	}
 	if !gotTools["old_tool"] {
 		t.Errorf("All-time per-tool missing the >7d event (got %v)", gotTools)
@@ -309,38 +314,11 @@ func TestBarString_DefaultsCellsTo16(t *testing.T) {
 	}
 }
 
-func TestReset_RemovesEventLog(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "savings.json")
-
-	s, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
+func TestEvents_ConcurrentWritersAllRecorded(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "sidecar.sqlite"))
+	if err == nil {
+		t.Cleanup(func() { _ = s.Close() })
 	}
-	s.AddObservation("/r", "go", "get_symbol_source", 10, 100)
-	_ = s.Flush()
-
-	logPath := EventsPathFor(path)
-	if _, err := os.Stat(logPath); err != nil {
-		t.Fatalf("expected event log at %s before reset: %v", logPath, err)
-	}
-
-	if err := s.Reset(); err != nil {
-		t.Fatalf("Reset: %v", err)
-	}
-	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
-		t.Errorf("event log should be removed after Reset, got err=%v", err)
-	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Errorf("cumulative file should be removed after Reset, got err=%v", err)
-	}
-}
-
-func TestAddObservation_EventLogIsConcurrentSafe(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "savings.json")
-
-	s, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -351,29 +329,35 @@ func TestAddObservation_EventLogIsConcurrentSafe(t *testing.T) {
 	for range writers {
 		wg.Go(func() {
 			for range per {
-				s.AddObservation("/r", "go", "tool", 1, 10)
+				s.AddObservation(Observation{Repo: "/r", Language: "go", Tool: "tool", Returned: 1, Saved: 10})
 			}
 		})
 	}
 	wg.Wait()
 
-	evs, err := LoadEvents(EventsPathFor(path), time.Time{})
+	evs, err := s.EventsSince(time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got, want := len(evs), writers*per; got != want {
-		t.Errorf("LoadEvents = %d, want %d (line interleaving lost events)", got, want)
+		t.Errorf("EventsSince = %d, want %d (concurrent observation lost)", got, want)
 	}
 }
 
-func TestEventLog_DisabledForInMemoryStore(t *testing.T) {
+func TestEventHistory_InMemoryStoreStaysInMemory(t *testing.T) {
 	s, err := Open("")
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.AddObservation("/r", "go", "tool", 1, 10)
-	// No path → no events file should be written anywhere.
-	if got := s.eventsPath; got != "" {
-		t.Errorf("in-memory store should have empty eventsPath, got %q", got)
+	s.AddObservation(Observation{Repo: "/r", Language: "go", Tool: "tool", Returned: 1, Saved: 10})
+	if s.sc != nil {
+		t.Fatal("empty-path store must not open a sidecar")
+	}
+	evs, err := s.EventsSince(time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evs) != 1 {
+		t.Errorf("in-memory event history = %d, want 1", len(evs))
 	}
 }

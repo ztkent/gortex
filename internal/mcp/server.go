@@ -543,6 +543,7 @@ type tokenStats struct {
 	persistent     *savings.Store
 	parent         *tokenStats // process-wide aggregate (nil for the root)
 	repoPath       string      // forwarded to savings for per-repo aggregation
+	sessionID      string      // rides on persisted events; "" for the shared default
 }
 
 // record adds a single savings observation. node is the symbol whose
@@ -563,6 +564,7 @@ func (ts *tokenStats) record(node *graph.Node, tool string, returned, fullFile i
 	store := ts.persistent
 	parent := ts.parent
 	fallbackRepo := ts.repoPath
+	sessionID := ts.sessionID
 	ts.mu.Unlock()
 
 	// Fan out to the process-wide aggregate so graph_stats called
@@ -591,11 +593,18 @@ func (ts *tokenStats) record(node *graph.Node, tool string, returned, fullFile i
 		language = node.Language
 	}
 
-	// Forward to the persistent store outside our lock — its own mutex guards
-	// concurrent writers, and flushing to disk shouldn't block new record()
-	// calls on the hot path.
+	// Forward to the persistent store outside our lock — its own
+	// synchronization guards concurrent writers, and the ledger write
+	// shouldn't block new record() calls on the hot path.
 	if store != nil {
-		store.AddObservation(repo, language, tool, returned, saved)
+		store.AddObservation(savings.Observation{
+			Repo:      repo,
+			Language:  language,
+			Tool:      tool,
+			SessionID: sessionID,
+			Returned:  returned,
+			Saved:     saved,
+		})
 	}
 }
 
@@ -1529,28 +1538,15 @@ func (s *Server) tokenStatsFor(ctx context.Context) *tokenStats {
 	return s.sessions.get(id).tokenStats
 }
 
-// FlushSavings forces any buffered savings observations to disk. Called on
-// server shutdown to minimize data loss on unclean exits.
+// FlushSavings is kept for shutdown-path compatibility. The sidecar-backed
+// ledger commits every observation as it is recorded, so there is nothing
+// buffered to write.
 func (s *Server) FlushSavings() error {
 	store := s.savingsStore()
 	if store == nil {
 		return nil
 	}
 	return store.Flush()
-}
-
-// StartPeriodicSavingsFlush starts a background ticker that flushes the
-// savings store every interval if there are pending observations. Returns
-// a stop function for clean shutdown. No-op when persistence isn't wired.
-//
-// This bounds on-crash data loss to roughly `interval` worth of observations
-// even when the call rate is too low to trip the every-N-observations flush.
-func (s *Server) StartPeriodicSavingsFlush(interval time.Duration) func() {
-	store := s.savingsStore()
-	if store == nil {
-		return func() {}
-	}
-	return store.StartPeriodicFlush(interval)
 }
 
 // savingsStore extracts the persistent savings store via tokenStats. Returns
@@ -1579,9 +1575,12 @@ func (s *Server) cumulativeSavingsSnapshot() map[string]any {
 		return nil
 	}
 
-	snap := store.Snapshot()
+	snap, err := store.Snapshot()
+	if err != nil && s.logger != nil {
+		s.logger.Warn("cumulative savings snapshot failed", zap.Error(err))
+	}
 	costs := savings.CostAvoidedAll(snap.Totals.TokensSaved)
-	return map[string]any{
+	out := map[string]any{
 		"first_seen":       snap.FirstSeen.Format(time.RFC3339),
 		"last_updated":     snap.LastUpdated.Format(time.RFC3339),
 		"tokens_saved":     snap.Totals.TokensSaved,
@@ -1589,6 +1588,10 @@ func (s *Server) cumulativeSavingsSnapshot() map[string]any {
 		"calls_counted":    snap.Totals.CallsCounted,
 		"cost_avoided_usd": costs,
 	}
+	if snap.DroppedObservations > 0 {
+		out["dropped_observations"] = snap.DroppedObservations
+	}
+	return out
 }
 
 // ExportContext generates a portable context briefing for the given task.

@@ -4,13 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/zzet/gortex/internal/persistence"
 	"github.com/zzet/gortex/internal/progress"
 	"github.com/zzet/gortex/internal/savings"
 	"github.com/zzet/gortex/internal/tui"
@@ -34,13 +34,22 @@ sessions: Today, Last 7 days, and All time. Each bucket shows a 16-cell
 saved/total bar, percentage saved, raw token counts, and the USD value of
 the tokens avoided (priced against popular models).
 
-Savings accumulate every time a source-reading MCP tool (get_symbol_source,
-batch_symbols, smart_context) returns a symbol or compressed view instead of
-a full-file read. Cumulative totals live at ~/.gortex/cache/savings.json and
-per-call events at the sibling ~/.gortex/cache/savings.jsonl — Today / 7-day
-buckets come from the JSONL log, All time from the cumulative file.
+Savings accumulate every time a source-reading MCP tool — read_file,
+get_file_summary, get_editing_context, get_symbol_source, batch_symbols,
+smart_context — returns a summary, symbol, or compressed view that stands
+in for a full-file read. The ledger lives in the machine-global sidecar
+database (~/.gortex/sidecar.sqlite); flat-file ledgers from older
+releases (savings.json / savings.jsonl under the cache dir) are imported
+once and renamed *.bak.
 
-Override the cache dir with --cache-dir, override pricing by exporting
+Percentages are computed over ALL recorded source fetches — including
+uncompressed read_file calls that returned the whole file and saved
+nothing — so the bars reflect how the agent actually reads, not just
+the best cases; per-tool rates live in --verbose.
+
+Override the ledger location with --cache-dir (reads that directory's
+sidecar.sqlite; the one-shot legacy import runs only against the
+default location), override pricing by exporting
 GORTEX_MODEL_PRICING_JSON, and pass --verbose for a per-tool breakdown
 inside each bucket.`,
 	RunE: runSavings,
@@ -49,8 +58,8 @@ inside each bucket.`,
 func init() {
 	savingsCmd.Flags().StringVar(&savingsModel, "model", "", "highlight one model in USD output (default: show all)")
 	savingsCmd.Flags().BoolVar(&savingsJSON, "json", false, "emit machine-readable JSON instead of the dashboard")
-	savingsCmd.Flags().BoolVar(&savingsReset, "reset", false, "wipe cumulative totals + event log and exit")
-	savingsCmd.Flags().StringVar(&savingsCacheDir, "cache-dir", "", "override graph cache directory (savings.json + savings.jsonl live here)")
+	savingsCmd.Flags().BoolVar(&savingsReset, "reset", false, "wipe cumulative totals + event history and exit")
+	savingsCmd.Flags().StringVar(&savingsCacheDir, "cache-dir", "", "override the ledger directory (its sidecar.sqlite holds the savings ledger)")
 	savingsCmd.Flags().BoolVarP(&savingsVerbose, "verbose", "v", false, "include per-tool breakdown for each bucket")
 	savingsCmd.Flags().IntVar(&savingsBarCells, "bar-width", 16, "number of cells in each bar (default 16, matching semble)")
 	savingsCmd.Flags().BoolVar(&savingsUTC, "utc", false, "bucket Today by UTC calendar (default: local time)")
@@ -58,54 +67,65 @@ func init() {
 }
 
 func runSavings(_ *cobra.Command, _ []string) error {
-	path := savings.DefaultPath()
+	dbPath := savings.DefaultDBPath()
 	if savingsCacheDir != "" {
-		path = filepath.Join(savingsCacheDir, "savings.json")
+		dbPath = persistence.DefaultSidecarPath(savingsCacheDir)
 	}
-	eventsPath := savings.EventsPathFor(path)
 
-	store, err := savings.Open(path)
+	store, err := savings.Open(dbPath)
 	if err != nil {
-		return fmt.Errorf("open savings store: %w", err)
+		return fmt.Errorf("open savings ledger: %w", err)
+	}
+	// Legacy flat-file import runs only against the default locations:
+	// pointing the dashboard at a directory with --cache-dir must never
+	// rename files there as a side effect of looking.
+	if savingsCacheDir == "" {
+		if ierr := store.ImportLegacy(savings.DefaultPath()); ierr != nil {
+			fmt.Fprintf(os.Stderr, "[gortex savings] legacy import failed: %v\n", ierr)
+		}
 	}
 
 	if savingsReset {
 		if err := store.Reset(); err != nil {
 			return fmt.Errorf("reset: %w", err)
 		}
-		fmt.Fprintf(os.Stderr, "[gortex savings] reset cumulative totals at %s\n", path)
-		if eventsPath != "" {
-			fmt.Fprintf(os.Stderr, "[gortex savings] removed event log at %s\n", eventsPath)
-		}
+		fmt.Fprintf(os.Stderr, "[gortex savings] reset cumulative totals + event history at %s\n", dbPath)
 		return nil
 	}
 
-	snap := store.Snapshot()
+	snap, serr := store.Snapshot()
+	if serr != nil {
+		// Surface it: an unreadable ledger must not masquerade as a
+		// fresh install's "nothing recorded yet" empty state.
+		fmt.Fprintf(os.Stderr, "[gortex savings] totals read failed: %v\n", serr)
+	}
 
 	loc := time.Local
 	if savingsUTC {
 		loc = time.UTC
 	}
-	buckets, err := savings.BuildDashboard(eventsPath, snap.Totals, time.Now(), loc)
+	now := time.Now()
+	events, err := store.EventsSince(now.Add(-7 * 24 * time.Hour))
 	if err != nil {
-		// Don't fail the whole command on event-log read errors — fall
-		// back to a dashboard with empty Today/7d buckets.
-		fmt.Fprintf(os.Stderr, "[gortex savings] event log read failed: %v\n", err)
-		buckets = []savings.Bucket{
-			{Label: "Today"},
-			{Label: "Last 7 days"},
-			{Label: "All time", Totals: snap.Totals},
-		}
+		// Don't fail the whole command on event read errors — fall back
+		// to a dashboard with empty Today/7d buckets.
+		fmt.Fprintf(os.Stderr, "[gortex savings] event history read failed: %v\n", err)
+		events = nil
 	}
+	allPerTool, err := store.ToolTotals(time.Time{})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[gortex savings] per-tool aggregate failed: %v\n", err)
+	}
+	buckets := savings.BuildDashboard(events, snap.Totals, allPerTool, now, loc)
 
 	if savingsJSON {
-		return emitSavingsJSON(snap, buckets, path, eventsPath)
+		return emitSavingsJSON(snap, buckets, dbPath)
 	}
-	emitSavingsDashboard(snap, buckets, path, eventsPath)
+	emitSavingsDashboard(snap, buckets, dbPath)
 	return nil
 }
 
-func emitSavingsJSON(snap savings.File, buckets []savings.Bucket, path, eventsPath string) error {
+func emitSavingsJSON(snap savings.File, buckets []savings.Bucket, path string) error {
 	bucketJSON := make([]map[string]any, 0, len(buckets))
 	for _, b := range buckets {
 		entry := map[string]any{
@@ -133,14 +153,17 @@ func emitSavingsJSON(snap savings.File, buckets []savings.Bucket, path, eventsPa
 
 	out := map[string]any{
 		"path":             path,
-		"events_path":      eventsPath,
-		"first_seen":       snap.FirstSeen.Format(time.RFC3339),
-		"last_updated":     snap.LastUpdated.Format(time.RFC3339),
 		"tokens_saved":     snap.Totals.TokensSaved,
 		"tokens_returned":  snap.Totals.TokensReturned,
 		"calls_counted":    snap.Totals.CallsCounted,
 		"cost_avoided_usd": savings.CostAvoidedAll(snap.Totals.TokensSaved),
 		"buckets":          bucketJSON,
+	}
+	if !snap.FirstSeen.IsZero() {
+		out["first_seen"] = snap.FirstSeen.Format(time.RFC3339)
+	}
+	if !snap.LastUpdated.IsZero() {
+		out["last_updated"] = snap.LastUpdated.Format(time.RFC3339)
 	}
 	if len(snap.PerRepo) > 0 {
 		out["per_repo"] = snap.PerRepo
@@ -161,7 +184,7 @@ func emitSavingsJSON(snap savings.File, buckets []savings.Bucket, path, eventsPa
 // On a TTY we wrap the header in a styled banner + stat-strip card; on a
 // non-TTY (output piped into grep / a file) we preserve the bare text
 // header so script parsers keep matching.
-func emitSavingsDashboard(snap savings.File, buckets []savings.Bucket, path, eventsPath string) {
+func emitSavingsDashboard(snap savings.File, buckets []savings.Bucket, path string) {
 	tty := progress.IsTTY(os.Stdout) && !noProgress
 
 	if tty {
@@ -173,9 +196,6 @@ func emitSavingsDashboard(snap savings.File, buckets []savings.Bucket, path, eve
 		fmt.Println(banner)
 		fmt.Println()
 		fmt.Println("  " + progress.Row("store", path, 14))
-		if eventsPath != "" {
-			fmt.Println("  " + progress.Row("event log", eventsPath, 14))
-		}
 		if !snap.FirstSeen.IsZero() {
 			fmt.Println("  " + progress.Row("tracking since", snap.FirstSeen.Format("2006-01-02 15:04"), 14))
 		}
@@ -186,9 +206,6 @@ func emitSavingsDashboard(snap savings.File, buckets []savings.Bucket, path, eve
 		fmt.Println("Gortex Token Savings")
 		fmt.Println("====================")
 		fmt.Printf("Store:          %s\n", path)
-		if eventsPath != "" {
-			fmt.Printf("Event log:      %s\n", eventsPath)
-		}
 		if !snap.FirstSeen.IsZero() {
 			fmt.Printf("Tracking since: %s\n", snap.FirstSeen.Format("2006-01-02 15:04"))
 		}
@@ -203,13 +220,14 @@ func emitSavingsDashboard(snap savings.File, buckets []savings.Bucket, path, eve
 	headline, headlineModel := pickHeadlineCost(costs, savingsModel)
 	fmt.Println()
 	if snap.Totals.CallsCounted == 0 {
+		hint := "savings record when the agent reads code through gortex (read_file, get_file_summary, get_editing_context, get_symbol_source, smart_context, …)"
 		if tty {
 			fmt.Println("  " + progress.StyleHint.Render("◌  no source-reading tool calls recorded yet"))
-			fmt.Println("     " + progress.Caption("run `gortex mcp` and use get_symbol_source / batch_symbols / smart_context"))
+			fmt.Println("     " + progress.Caption(hint))
 			fmt.Println()
 		} else {
 			fmt.Println("No source-reading tool calls recorded yet.")
-			fmt.Println("Run `gortex mcp` and use get_symbol_source / batch_symbols / smart_context.")
+			fmt.Println("Savings record when the agent reads code through gortex (read_file, get_file_summary, get_editing_context, get_symbol_source, smart_context, ...).")
 		}
 		return
 	}
