@@ -41,6 +41,16 @@ type RepoMetadata struct {
 	// needs this remembered flag to know a vanished root was a
 	// worktree and may be garbage-collected.
 	IsWorktree bool
+	// Unprefixed records that this repo was indexed in single-repo
+	// mode: its nodes carry RepoPrefix="" and raw relative file paths.
+	// The empty-prefix resolution fallback (RepoRoot, ResolveFilePath)
+	// honours only a lone repo that actually minted unprefixed nodes —
+	// without the provenance check, stale unprefixed nodes surviving a
+	// track/untrack transition would resolve against whatever repo
+	// happens to be the lone one. Eviction also branches on it:
+	// unprefixed nodes are invisible to the byRepo bucket EvictRepo
+	// walks, so UntrackRepo must evict them file-by-file.
+	Unprefixed bool
 }
 
 // MultiIndexer orchestrates indexing across multiple repositories.
@@ -667,11 +677,84 @@ func (mi *MultiIndexer) indexSingleRepo(entry config.RepoEntry) (map[string]*Ind
 		ParseErrors:   result.Errors,
 		FileMtimes:    idx.FileMtimes(),
 		IsWorktree:    ResolveWorktree(absPath).IsWorktree,
+		Unprefixed:    true,
 	}
 	mi.indexers[prefix] = idx
 	mi.mu.Unlock()
 
 	return map[string]*IndexResult{prefix: result}, nil
+}
+
+// migrateLoneUnprefixedRepoCtx re-mints the formerly-lone repo's nodes
+// with its real prefix the moment a second repo joins. Without it, the
+// first repo's unprefixed nodes become unreachable (the empty-prefix
+// fallback disarms at two repos) until a cold reindex. Ordering is
+// crash-safe: the prefixed re-index lands first, the stale unprefixed
+// nodes are evicted after — an interruption leaves both ID forms
+// resolvable rather than neither.
+func (mi *MultiIndexer) migrateLoneUnprefixedRepoCtx(ctx context.Context) {
+	mi.mu.RLock()
+	var oldPrefix string
+	var oldMeta *RepoMetadata
+	if len(mi.repos) == 1 {
+		for p, m := range mi.repos {
+			if m != nil && m.Unprefixed && m.RootPath != "" {
+				oldPrefix, oldMeta = p, m
+			}
+		}
+	}
+	mi.mu.RUnlock()
+	if oldMeta == nil {
+		return
+	}
+
+	cfg := mi.configMgr.GetRepoConfig(oldPrefix)
+	idx := mi.newPerRepoIndexer(cfg.Index)
+	idx.SetRepoPrefix(oldPrefix)
+	entry := config.RepoEntry{Path: oldMeta.RootPath, Name: oldPrefix}
+	if mi.configMgr != nil {
+		for _, e := range mi.configMgr.Global().Repos {
+			if e.Path == oldMeta.RootPath {
+				entry = e
+				break
+			}
+		}
+	}
+	idx.SetWorkspaceID(resolveWorkspaceID(&entry, cfg, oldPrefix))
+	idx.SetProjectID(resolveProjectID(&entry, cfg, oldPrefix))
+
+	result, err := idx.IndexCtx(ctx, oldMeta.RootPath)
+	if err != nil {
+		mi.logger.Warn("re-prefixing lone repo failed; its unprefixed nodes stay until a reindex",
+			zap.String("prefix", oldPrefix), zap.Error(err))
+		return
+	}
+
+	// The prefixed nodes are live; now drop the unprefixed originals.
+	// They are invisible to EvictRepo (no byRepo bucket entry), so evict
+	// per file — unprefixed paths cannot collide with prefixed ones.
+	for path := range oldMeta.FileMtimes {
+		mi.graph.EvictFile(path)
+	}
+
+	mi.mu.Lock()
+	mi.repos[oldPrefix] = &RepoMetadata{
+		RepoPrefix:    oldPrefix,
+		RootPath:      oldMeta.RootPath,
+		Identity:      oldMeta.Identity,
+		LastIndexTime: time.Now(),
+		FileCount:     result.FileCount,
+		NodeCount:     result.NodeCount,
+		EdgeCount:     result.EdgeCount,
+		ParseErrors:   result.Errors,
+		FileMtimes:    idx.FileMtimes(),
+		IsWorktree:    oldMeta.IsWorktree,
+	}
+	mi.indexers[oldPrefix] = idx
+	mi.mu.Unlock()
+
+	mi.logger.Info("re-minted lone repo with its prefix for multi-repo mode",
+		zap.String("prefix", oldPrefix), zap.Int("nodes", result.NodeCount))
 }
 
 // readGoModModule reads the module path from a go.mod file.
@@ -1110,6 +1193,13 @@ func (mi *MultiIndexer) TrackRepoCtx(ctx context.Context, entry config.RepoEntry
 	}
 	willBeMultiRepo := len(mi.repos)+1 >= 2 || totalConfigured >= 2
 
+	// A second repo joining a live single-repo daemon flips the graph
+	// into prefixed-ID mode, but the first repo's nodes were minted
+	// unprefixed — re-mint them before they become unreachable.
+	if willBeMultiRepo {
+		mi.migrateLoneUnprefixedRepoCtx(ctx)
+	}
+
 	idx := mi.newPerRepoIndexer(cfg.Index)
 	if willBeMultiRepo {
 		idx.SetRepoPrefix(prefix)
@@ -1143,6 +1233,7 @@ func (mi *MultiIndexer) TrackRepoCtx(ctx context.Context, entry config.RepoEntry
 		ParseErrors:   result.Errors,
 		FileMtimes:    idx.FileMtimes(),
 		IsWorktree:    ResolveWorktree(absPath).IsWorktree,
+		Unprefixed:    !willBeMultiRepo,
 	}
 	mi.indexers[prefix] = idx
 	mi.mu.Unlock()
@@ -1226,6 +1317,13 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 	}
 	willBeMultiRepo := len(mi.repos)+1 >= 2 || totalConfigured >= 2
 
+	// Same transition guard as TrackRepoCtx: an already-reconciled
+	// lone repo with unprefixed nodes must be re-minted before this
+	// second repo flips the graph into prefixed-ID mode.
+	if willBeMultiRepo {
+		mi.migrateLoneUnprefixedRepoCtx(ctx)
+	}
+
 	idx := mi.newPerRepoIndexer(cfg.Index)
 	if willBeMultiRepo {
 		idx.SetRepoPrefix(prefix)
@@ -1287,6 +1385,7 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 		ParseErrors:   result.Errors,
 		FileMtimes:    idx.FileMtimes(),
 		IsWorktree:    ResolveWorktree(absPath).IsWorktree,
+		Unprefixed:    !willBeMultiRepo,
 	}
 	mi.indexers[prefix] = idx
 	mi.mu.Unlock()
@@ -1399,7 +1498,20 @@ func (mi *MultiIndexer) UntrackRepo(repoPrefix string) (int, int) {
 	delete(mi.indexers, repoPrefix)
 	mi.mu.Unlock()
 
-	nodesRemoved, edgesRemoved := mi.graph.EvictRepo(repoPrefix)
+	var nodesRemoved, edgesRemoved int
+	if meta.Unprefixed {
+		// Single-repo-mode nodes carry RepoPrefix="" and never enter the
+		// byRepo bucket EvictRepo walks — evict them file-by-file off the
+		// recorded file set instead, or they linger in the graph and a
+		// later lone repo would mis-resolve them.
+		for path := range meta.FileMtimes {
+			n, e := mi.graph.EvictFile(path)
+			nodesRemoved += n
+			edgesRemoved += e
+		}
+	} else {
+		nodesRemoved, edgesRemoved = mi.graph.EvictRepo(repoPrefix)
+	}
 
 	// Remove from global config.
 	if meta.RootPath != "" {
@@ -1677,7 +1789,23 @@ func (mi *MultiIndexer) ResolveFilePath(prefixedPath string) string {
 		}
 	}
 	if bestPrefix == "" {
+		// Single-repo mode mints unprefixed graph paths; resolve them
+		// against the lone registered repo instead of failing.
+		if meta := mi.loneRepoLocked(); meta != nil && meta.RootPath != "" {
+			return filepath.Join(meta.RootPath, prefixedPath)
+		}
 		return ""
+	}
+	// Collision guard for the lone unprefixed repo: its graph paths are
+	// raw relative paths, so one whose first segment happens to equal
+	// the repo's own prefix (repo "api" containing api/handlers.go)
+	// would be hijacked by the prefix-strip join. Prefer the raw join
+	// when that file actually exists on disk.
+	if meta := mi.loneRepoLocked(); meta != nil && meta.RootPath != "" {
+		raw := filepath.Join(meta.RootPath, prefixedPath)
+		if _, err := os.Stat(raw); err == nil {
+			return raw
+		}
 	}
 	return filepath.Join(bestRoot, strings.TrimPrefix(prefixedPath, bestPrefix+"/"))
 }
@@ -1699,17 +1827,46 @@ func (mi *MultiIndexer) RepoPrefixes() []string {
 // RepoRoot returns the local filesystem root for the given repo prefix.
 // ok is true only when the prefix is registered AND meta.RootPath is non-empty.
 // Caller is responsible for joining repo-relative file paths against the root.
+//
+// The empty prefix resolves to the lone registered repo when exactly one is
+// tracked: single-repo mode indexes nodes without a repo prefix (see
+// indexSingleRepo) while registering its metadata under the repo's real
+// prefix, so every node the single-repo indexer mints carries RepoPrefix=""
+// — refusing the empty prefix would orphan all of them. With two or more
+// repos the empty prefix is ambiguous and stays a miss.
 func (mi *MultiIndexer) RepoRoot(repoPrefix string) (string, bool) {
-	if repoPrefix == "" {
-		return "", false
-	}
 	mi.mu.RLock()
 	defer mi.mu.RUnlock()
+	if repoPrefix == "" {
+		if meta := mi.loneRepoLocked(); meta != nil && meta.RootPath != "" {
+			return meta.RootPath, true
+		}
+		return "", false
+	}
 	meta, ok := mi.repos[repoPrefix]
 	if !ok || meta == nil || meta.RootPath == "" {
 		return "", false
 	}
 	return meta.RootPath, true
+}
+
+// loneRepoLocked returns the metadata of the only registered repo when
+// exactly one repo is tracked AND that repo was indexed unprefixed
+// (single-repo mode). The provenance check matters: after a 1→2→1
+// track/untrack sequence the lone survivor can be a prefixed repo, and
+// stale unprefixed nodes from the departed repo must keep failing
+// closed instead of resolving against the wrong checkout. Caller must
+// hold mi.mu.
+func (mi *MultiIndexer) loneRepoLocked() *RepoMetadata {
+	if len(mi.repos) != 1 {
+		return nil
+	}
+	for _, meta := range mi.repos {
+		if meta != nil && meta.Unprefixed {
+			return meta
+		}
+	}
+	return nil
 }
 
 // LinkedWorktreeRoots returns the on-disk roots of every tracked linked

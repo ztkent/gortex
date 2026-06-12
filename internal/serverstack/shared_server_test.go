@@ -22,12 +22,18 @@ func TestNewSharedServer_OneshotMemory(t *testing.T) {
 	}
 
 	ss, err := NewSharedServer(SharedServerConfig{
-		Lifecycle:    LifecycleOneshot,
-		Index:        repo,
-		Config:       config.Default(),
+		Lifecycle:  LifecycleOneshot,
+		Index:      repo,
+		Config:     config.Default(),
 		Logger:     zap.NewNop(),
 		Version:    "test",
 		SideStores: SideStores{NotesDir: t.TempDir(), NotesRepo: "test"},
+		// Pin the savings ledger + legacy-import probe to temp paths:
+		// with both empty the constructor opens the REAL machine-global
+		// sidecar and imports (renaming!) the developer's real flat-file
+		// ledger — a unit test must never mutate ~/.gortex.
+		SavingsPath:       filepath.Join(t.TempDir(), "sidecar.sqlite"),
+		SavingsLegacyJSON: filepath.Join(t.TempDir(), "savings.json"),
 	})
 	if err != nil {
 		t.Fatalf("NewSharedServer: %v", err)

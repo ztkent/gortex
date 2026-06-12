@@ -109,6 +109,42 @@ func TestOverlayManager_SweepIdleHonoursTTL(t *testing.T) {
 	require.False(t, m.Has(id))
 }
 
+func TestOverlayManager_StartJanitorSweepsAndStops(t *testing.T) {
+	m := NewOverlayManager(20 * time.Millisecond)
+	id := m.Register("ws")
+	require.True(t, m.Has(id))
+
+	swept := make(chan int, 1)
+	stop := m.StartJanitor(10*time.Millisecond, func(dropped int) {
+		select {
+		case swept <- dropped:
+		default:
+		}
+	})
+	defer stop()
+
+	select {
+	case dropped := <-swept:
+		require.Equal(t, 1, dropped, "janitor must reap the idle session")
+	case <-time.After(2 * time.Second):
+		t.Fatal("janitor never swept the idle session")
+	}
+	require.False(t, m.Has(id))
+
+	// stop is idempotent and terminates the goroutine.
+	stop()
+	stop()
+}
+
+func TestOverlayManager_StartJanitorDisabledTTL(t *testing.T) {
+	m := NewOverlayManager(0)
+	stop := m.StartJanitor(time.Millisecond, func(int) {
+		t.Error("janitor must not run when expiry is disabled")
+	})
+	stop()
+	stop()
+}
+
 // TestOverlayManager_SnapshotForBumpsLastUsed proves the load-bearing
 // "reads count as activity" guarantee: a session that only queries
 // (no further Push) keeps its lease alive as long as the view-build

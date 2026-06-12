@@ -147,6 +147,10 @@ The ` + "`analyze`" + ` MCP tool is a unified dispatcher. Pass ` + "`kind: \"<na
 
 The ` + "`gortex enrich blame|coverage|releases|all`" + ` CLI hydrates the graph with the metadata that the ` + "`stale_*`" + `, ` + "`coverage*`" + `, ` + "`ownership`" + `, and ` + "`releases`" + ` analyzers need.
 
+### PR / Change Review
+
+Review a diff through the graph instead of hand-walking each gate. ` + "`analyze`" + ` with ` + "`kind: \"review\"`" + ` runs the idiomatic / correctness rulepack (NPE, thread-safety check-then-act, N+1, logic-error; Go + Python) with a graph-grounded false-positive-reduction pass. The ` + "`review`" + ` / ` + "`review_pack`" + ` MCP tools (or ` + "`gortex review [--diff|--base <ref>] [--audience agent|human]`" + `) return one fused packet — verdict + ` + "`file:line`" + ` findings + cost. For a queue of open PRs, ` + "`list_prs`" + ` / ` + "`triage_prs`" + ` / ` + "`pr_risk`" + ` / ` + "`get_pr_impact`" + ` / ` + "`suggest_reviewers`" + ` (or ` + "`gortex prs --triage`" + `) rank by graph-derived blast radius and route reviewers.
+
 ### Token Economy
 
 For list-shaped responses (` + "`search_symbols`" + `, ` + "`find_usages`" + `, ` + "`analyze`" + `, ` + "`batch_symbols`" + `, ` + "`get_callers`" + `, ` + "`get_call_chain`" + `, ` + "`get_dependencies`" + `, ` + "`get_dependents`" + `, ` + "`find_implementations`" + `, ` + "`get_file_summary`" + `, ` + "`get_editing_context`" + `, ` + "`smart_context`" + `, ` + "`contracts`" + `), pick a wire format. Order of preference: **gcx > toon > json**.
@@ -397,6 +401,16 @@ The ` + "`analyze`" + ` MCP tool is a unified dispatcher. Supported ` + "`kind`"
 | Manually tracking API routes/services | ` + "`contracts`" + ` (default ` + "`action: \"list\"`" + `) — lists HTTP, gRPC, GraphQL, topic, WebSocket, env, OpenAPI; filter by ` + "`repo`" + `, ` + "`project`" + `, or ` + "`ref`" + ` |
 | Guessing if APIs match across repos   | ` + "`contracts`" + ` with ` + "`action: \"check\"`" + ` — detects orphan providers/consumers and mismatches; scope with ` + "`repo`" + ` / ` + "`project`" + ` / ` + "`ref`" + ` |
 | Assessing what breaks before editing a route handler | ` + "`api_impact(route|file)`" + ` — one fused report: response shape, consumers + accessed fields, response-shape mismatches, middleware, execution flows, blast radius (callers + tests to run), fused risk |
+
+### PR / Change Review
+
+A graph-grounded change-review surface walks a diff (staged / branch / pasted patch / PR) through the graph so findings ride on real callers / contracts / coverage / guards, not style nits — instead of hand-walking each gate yourself.
+
+| Instead of...                         | You MUST use...                          |
+|---------------------------------------|------------------------------------------|
+| Eyeballing a diff for correctness bugs | ` + "`analyze`" + ` with ` + "`kind: \"review\"`" + ` — idiomatic / correctness rulepack (NPE, thread-safety check-then-act, N+1, logic-error; Go + Python) with a graph-grounded false-positive-reduction pass |
+| Hand-walking detect_changes / diff_context / verify_change / contracts / check_guards one call at a time | ` + "`review`" + ` / ` + "`review_pack`" + ` (MCP) — one fused review packet (verdict + ` + "`file:line`" + ` findings + cost), or the ` + "`gortex review [--diff|--base <ref>] [--audience agent|human] [--post]`" + ` CLI for a terse machine-first verdict |
+| Triaging which open PRs need attention | ` + "`list_prs`" + ` / ` + "`triage_prs`" + ` / ` + "`pr_risk`" + ` / ` + "`get_pr_impact`" + ` / ` + "`conflicts_prs`" + ` / ` + "`suggest_reviewers`" + ` (MCP), or the ` + "`gortex prs`" + ` CLI (` + "`--triage`" + ` / ` + "`--conflicts`" + ` / ` + "`--worktrees`" + `) — graph-ranked PR queue, blast radius, reviewer routing |
 
 ### CPG-lite Dataflow
 

@@ -427,6 +427,72 @@ type Config struct {
 	// openai / ollama / claudecli); env vars GORTEX_LLM_* override file
 	// values; see internal/llm/config.go::Config.MergeEnv.
 	LLM llm.Config `mapstructure:"llm" yaml:"llm,omitempty"`
+	// Review tunes the PR-review surface: the layered path-glob rule
+	// list, the gating thresholds applied to surfaced findings, the
+	// depth-selection bounds, and the posting gate. Empty by default;
+	// the embedded default rules apply when no rule is configured.
+	Review ReviewConfig `mapstructure:"review" yaml:"review,omitempty"`
+}
+
+// ReviewConfig is the `review:` block. It carries every knob the
+// PR-review layers read: the path-glob rule list (resolved by
+// review.RuleResolver), the gating thresholds applied to surfaced
+// findings, the depth-selection bounds, and the comment-posting gate.
+// The whole struct lands here so later layers only read these fields.
+type ReviewConfig struct {
+	// Rules is the ordered path-glob rule list. The first rule whose
+	// glob matches a changed file selects its severity floor and
+	// rulepack; an empty list falls through to the embedded defaults.
+	Rules []ReviewRule `mapstructure:"rules" yaml:"rules,omitempty"`
+	// MinConfidence drops any finding scored below this confidence
+	// (0..1). Zero keeps every finding.
+	MinConfidence float64 `mapstructure:"min_confidence" yaml:"min_confidence,omitempty"`
+	// MinSeverity is the minimum severity floor — info | warning |
+	// error | critical. Findings below it are dropped. Empty keeps all.
+	MinSeverity string `mapstructure:"min_severity" yaml:"min_severity,omitempty"`
+	// Categories, when set, restricts surfaced findings to these
+	// categories. Empty keeps every category.
+	Categories []string `mapstructure:"categories" yaml:"categories,omitempty"`
+	// MaxFindings caps how many findings are surfaced. Zero is no cap.
+	MaxFindings int `mapstructure:"max_findings" yaml:"max_findings,omitempty"`
+	// QuickMaxLines is the changed-line ceiling under which a review
+	// runs in the quick (shallow) mode. Zero uses the built-in default.
+	QuickMaxLines int `mapstructure:"quick_max_lines" yaml:"quick_max_lines,omitempty"`
+	// DeepMinLines is the changed-line floor at or above which a review
+	// escalates to the deep mode. Zero uses the built-in default.
+	DeepMinLines int `mapstructure:"deep_min_lines" yaml:"deep_min_lines,omitempty"`
+	// DeepMinFiles is the changed-file floor at or above which a review
+	// escalates to the deep mode. Zero uses the built-in default.
+	DeepMinFiles int `mapstructure:"deep_min_files" yaml:"deep_min_files,omitempty"`
+	// Post gates comment posting.
+	Post ReviewPostConfig `mapstructure:"post" yaml:"post,omitempty"`
+}
+
+// ReviewPostConfig gates how review findings are posted back. Posting
+// to a public or forked repository is opt-in.
+type ReviewPostConfig struct {
+	// AllowPublic permits posting comments on public / fork repos.
+	// Off by default so a misconfigured token never leaks comments.
+	AllowPublic bool `mapstructure:"allow_public" yaml:"allow_public,omitempty"`
+}
+
+// ReviewRule is one path-glob review rule. Path is a gitignore-style
+// glob (so `**` works); the first rule whose Path matches a changed
+// file selects its Severity floor and Rulepack. A Disabled rule is
+// skipped during resolution.
+type ReviewRule struct {
+	// Name is the human-readable rule identifier.
+	Name string `mapstructure:"name" yaml:"name,omitempty"`
+	// Path is the gitignore-style glob the changed file is matched
+	// against (e.g. `**/*_test.go`, `internal/auth/**`, `**`).
+	Path string `mapstructure:"path" yaml:"path,omitempty"`
+	// Severity is an optional severity floor for findings grounded to
+	// a file this rule selects — info | warning | error | critical.
+	Severity string `mapstructure:"severity" yaml:"severity,omitempty"`
+	// Rulepack names the detector bundle to run for a matched file.
+	Rulepack string `mapstructure:"rulepack" yaml:"rulepack,omitempty"`
+	// Disabled skips this rule entirely during resolution.
+	Disabled bool `mapstructure:"disabled" yaml:"disabled,omitempty"`
 }
 
 type IndexConfig struct {

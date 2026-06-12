@@ -91,11 +91,40 @@ type CompletionRequest struct {
 	Tools []ToolSpec
 }
 
+// TokenUsage carries the token accounting for a single completion: the
+// prompt (input) tokens billed, the generated (output) tokens, and the
+// prompt-cache read / write tokens when the provider reports them. A
+// provider that does not surface usage leaves every field zero.
+type TokenUsage struct {
+	InputTokens      int `json:"input_tokens"`
+	OutputTokens     int `json:"output_tokens"`
+	CacheReadTokens  int `json:"cache_read_tokens"`
+	CacheWriteTokens int `json:"cache_write_tokens"`
+}
+
+// Add folds u' into u in place, accumulating each token field. Used by
+// the agent loop to sum usage across the tool-calling steps of one run.
+func (u *TokenUsage) Add(other TokenUsage) {
+	u.InputTokens += other.InputTokens
+	u.OutputTokens += other.OutputTokens
+	u.CacheReadTokens += other.CacheReadTokens
+	u.CacheWriteTokens += other.CacheWriteTokens
+}
+
+// IsZero reports whether no usage was recorded — the signal a provider
+// could not report token counts (subprocess / not-yet-decoded HTTP).
+func (u TokenUsage) IsZero() bool {
+	return u.InputTokens == 0 && u.OutputTokens == 0 &&
+		u.CacheReadTokens == 0 && u.CacheWriteTokens == 0
+}
+
 // CompletionResponse is a Provider's single-turn output. Text is the
 // raw model text — JSON conforming to the requested Shape when Shape
-// is not ShapeFreeform.
+// is not ShapeFreeform. Usage carries the provider's token accounting
+// when it reports one (zero otherwise).
 type CompletionResponse struct {
-	Text string
+	Text  string
+	Usage TokenUsage
 }
 
 // Provider is a single-turn LLM completion backend. The agent loop and

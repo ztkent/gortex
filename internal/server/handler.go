@@ -65,6 +65,16 @@ type Handler struct {
 	streamable    *streamable.Transport  // nil when the MCP 2026 Streamable HTTP path is off
 	readOnly      bool                   // self-advertised /v1/health write posture
 	capabilities  []string               // self-advertised federation caps; nil => baseline
+
+	// Conversation-log inspection. convDir enables the /v1/conversations*
+	// routes (empty => the sink is off and the routes report no sessions).
+	// convAllow extends the loopback allowlist the route-scoped
+	// DNS-rebind guard honors; convTokenFn supplies the configured auth
+	// token so the guard can let a valid token-authed non-loopback
+	// request pass (cooperating with --http-auth-token, not duplicating it).
+	convDir     string
+	convAllow   []string
+	convTokenFn func() string
 }
 
 // NewHandler creates an HTTP handler that dispatches to MCP tools.
@@ -142,6 +152,13 @@ func (h *Handler) registerRoutes() {
 	h.mux.HandleFunc("GET /v1/contracts/validate", h.handleContractsValidate)
 	h.mux.HandleFunc("GET /v1/communities", h.handleCommunities)
 	h.mux.HandleFunc("GET /v1/guards", h.handleGuards)
+	// Agent-conversation session inspection. These routes egress raw LLM
+	// I/O, so each one applies the route-scoped DNS-rebind guard
+	// (guardConversationRoute) internally — the guard is NOT in
+	// ServeHTTP, so other routes are unaffected.
+	h.mux.HandleFunc("GET /v1/conversations", h.handleConversations)
+	h.mux.HandleFunc("GET /v1/conversations/ui", h.handleConversationsUI)
+	h.mux.HandleFunc("GET /v1/conversations/{session}", h.handleConversationSession)
 	// Workspace roster discovery. The daemon side calls this when it
 	// doesn't yet know which server owns a given workspace; the
 	// response lets the daemon's lookup path skip a roundtrip on every

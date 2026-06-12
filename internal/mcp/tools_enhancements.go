@@ -130,7 +130,7 @@ func (s *Server) registerEnhancementTools() {
 	// analyze — unified graph analysis tool (dead_code, hotspots, cycles, would_create_cycle)
 	s.addTool(
 		mcp.NewTool("analyze",
-			mcp.WithDescription("Unified graph analysis. kind=dead_code: symbols with zero incoming edges. kind=hotspots: high-complexity symbols by fan-in/out. kind=cycles: circular dependency chains. kind=would_create_cycle: check if a new edge would form a cycle (requires from_id, to_id). kind=todos: list KindTodo nodes with optional tag/assignee/ticket/has_assignee filters. kind=blame: run `git blame` against the indexed repo and stamp meta.last_authored on every symbol-level node. kind=coverage: parse a Go cover.out profile (path via `profile` arg) and stamp meta.coverage_pct on every executable symbol. kind=stale_code: list symbols whose meta.last_authored is older than the threshold (requires blame-enriched graph). kind=ownership: group blame metadata by author email — symbol count, files touched, oldest/newest timestamps; supports path_prefix scoping (requires blame-enriched graph). kind=coverage_gaps: list symbols whose meta.coverage_pct falls in [min_pct, max_pct) — sorted ascending so the most undertested code surfaces first (requires coverage-enriched graph). kind=unsafe_patterns: bundled scan for panic-prone / undefined-behaviour primitives across every supported language — Go panic, Rust .unwrap/.expect/panic!/todo!/unimplemented!/unreachable!/assert!/unsafe blocks, Python assert, JS/TS throw — aggregated into one row-per-site response with a per-detector summary. Filters: language, detector, severity, path_prefix, limit, exclude_tests. kind=sast / kind=hygiene: Bandit-parity SAST rule library — 190+ structural rules across Python / Go / JS+TS / Java / Ruby / PHP / Rust, each carrying CWE + OWASP + tags metadata. Per-detector summary + per-CWE rollup. Filters: language, detector, severity, cwe, tag, path_prefix, limit, exclude_tests, kinds_only. kind=health_score: composite per-symbol health value (0..100) + A..F grade aggregated from coverage_pct, complexity (fan-in/out + community-crossings), recency (last_authored), and session churn. Per-axis breakdown surfaced on every row; missing axes are skipped (not zero-imputed). Always returns a population distribution (mean / median / std_dev / Gini coefficient over inequality of risk + per-grade counts). Pass roll_up='file' or 'repo' for per-file / per-repo averages with min/max bands and per-grade counts. Filters: path_prefix, kinds, grade, min_score, max_score, min_axes, limit, roll_up. Sorted ascending so worst symbols surface first. kind=impact: composite per-symbol change-impact score (0..100, higher = more impactful) plus a risk label, ranking symbols by blast radius from five axes — PageRank centrality, transitive reach, cyclomatic complexity, git co-change coupling, and community span. Per-axis breakdown on every row. Filters: ids, path_prefix, kinds, min_score, max_score, limit. kind=bottlenecks: rank functions by computation-bottleneck risk from index-time per-function metrics (cyclomatic + cognitive complexity, max loop depth) plus interprocedural signals computed over the call graph — transitive_loop_depth (deepest nested-loop chain across calls, a hidden-O(n^k) detector) and recursion (unguarded when recursive with no branching base case). Each row carries a score and human-readable reasons. Filters: path_prefix, kinds, min_score, limit. kind=named: run a named query bundle — a reusable, named selection of structural detectors. Pass name=<bundle> to fan every selected detector across the codebase and aggregate matches; omit name to list every bundle. Ten bundles ship built-in (sql-injection, command-injection, hardcoded-secrets, weak-crypto, xss, unsafe-deserialization, path-traversal, ssrf, xxe, debug-leftovers); a repo defines its own in .gortex.yaml::queries. Filters: name, language, severity, path_prefix, limit, exclude_tests. kind=tests_as_edges: a first-class view over the EdgeTests test→code edge layer. group_by=symbol (default) lists each tested symbol with the tests covering it; group_by=test inverts it to each test with the symbols it exercises. Always carries a summary of the edge layer's size. Filters: group_by, path_prefix, limit. kind=connectivity_health: a graph-EXTRACTION quality diagnostic — reports isolated nodes (zero edges of ANY kind, structural edges included), leaf / source-only / sink-only counts, effective-vs-nominal graph size and ratio, plus a per-node-kind breakdown and a dead-weight-by-file ranking that localises extraction gaps. Distinct from kind=dead_code: dead_code finds unreachable CODE (zero incoming usage edges, safe to delete); connectivity_health finds mis-EXTRACTED nodes (a normally indexed symbol always carries a structural edge, so an isolated node means the indexer failed, not that the code is unused). Filter: limit (caps dead_weight_by_file). kind=retrieval_log: mine the append-only retrieval query log (every search_symbols / smart_context / find_usages / search_text … call: question, corpus, nodes_returned, duration_ms, zero-result signal) for offline recall tuning — surfaces the top zero-result queries (the highest-signal candidates for synonym expansion or index gaps) plus per-tool latency (p50/p95) and result-size rollups. Filters: limit, tool, zero_only, since, top, include_recent. Gated by GORTEX_QUERY_LOG_DISABLE."),
+			mcp.WithDescription("Unified graph analysis. kind=dead_code: symbols with zero incoming edges. kind=hotspots: high-complexity symbols by fan-in/out. kind=cycles: circular dependency chains. kind=would_create_cycle: check if a new edge would form a cycle (requires from_id, to_id). kind=todos: list KindTodo nodes with optional tag/assignee/ticket/has_assignee filters. kind=blame: run `git blame` against the indexed repo and stamp meta.last_authored on every symbol-level node. kind=coverage: parse a Go cover.out profile (path via `profile` arg) and stamp meta.coverage_pct on every executable symbol. kind=stale_code: list symbols whose meta.last_authored is older than the threshold (requires blame-enriched graph). kind=ownership: group blame metadata by author email — symbol count, files touched, oldest/newest timestamps; supports path_prefix scoping (requires blame-enriched graph). kind=coverage_gaps: list symbols whose meta.coverage_pct falls in [min_pct, max_pct) — sorted ascending so the most undertested code surfaces first (requires coverage-enriched graph). kind=unsafe_patterns: bundled scan for panic-prone / undefined-behaviour primitives across every supported language — Go panic, Rust .unwrap/.expect/panic!/todo!/unimplemented!/unreachable!/assert!/unsafe blocks, Python assert, JS/TS throw — aggregated into one row-per-site response with a per-detector summary. Filters: language, detector, severity, path_prefix, limit, exclude_tests. kind=sast / kind=hygiene: Bandit-parity SAST rule library — 190+ structural rules across Python / Go / JS+TS / Java / Ruby / PHP / Rust, each carrying CWE + OWASP + tags metadata. Per-detector summary + per-CWE rollup. Filters: language, detector, severity, cwe, tag, path_prefix, limit, exclude_tests, kinds_only. kind=review: idiomatic / correctness rule library for Go + Python (nil-deref-prone type assertions, inverted error checks, check-then-act races, query-in-loop N+1) carrying error/warning severity. Undecidable rows (N+1, check-then-act) are refined by a graph-grounding post-pass that drops sites the resolved call / loop metadata refutes. Same row shape + filters as sast. kind=health_score: composite per-symbol health value (0..100) + A..F grade aggregated from coverage_pct, complexity (fan-in/out + community-crossings), recency (last_authored), and session churn. Per-axis breakdown surfaced on every row; missing axes are skipped (not zero-imputed). Always returns a population distribution (mean / median / std_dev / Gini coefficient over inequality of risk + per-grade counts). Pass roll_up='file' or 'repo' for per-file / per-repo averages with min/max bands and per-grade counts. Filters: path_prefix, kinds, grade, min_score, max_score, min_axes, limit, roll_up. Sorted ascending so worst symbols surface first. kind=impact: composite per-symbol change-impact score (0..100, higher = more impactful) plus a risk label, ranking symbols by blast radius from five axes — PageRank centrality, transitive reach, cyclomatic complexity, git co-change coupling, and community span. Per-axis breakdown on every row. Filters: ids, path_prefix, kinds, min_score, max_score, limit. kind=bottlenecks: rank functions by computation-bottleneck risk from index-time per-function metrics (cyclomatic + cognitive complexity, max loop depth) plus interprocedural signals computed over the call graph — transitive_loop_depth (deepest nested-loop chain across calls, a hidden-O(n^k) detector) and recursion (unguarded when recursive with no branching base case). Each row carries a score and human-readable reasons. Filters: path_prefix, kinds, min_score, limit. kind=named: run a named query bundle — a reusable, named selection of structural detectors. Pass name=<bundle> to fan every selected detector across the codebase and aggregate matches; omit name to list every bundle. Ten bundles ship built-in (sql-injection, command-injection, hardcoded-secrets, weak-crypto, xss, unsafe-deserialization, path-traversal, ssrf, xxe, debug-leftovers); a repo defines its own in .gortex.yaml::queries. Filters: name, language, severity, path_prefix, limit, exclude_tests. kind=tests_as_edges: a first-class view over the EdgeTests test→code edge layer. group_by=symbol (default) lists each tested symbol with the tests covering it; group_by=test inverts it to each test with the symbols it exercises. Always carries a summary of the edge layer's size. Filters: group_by, path_prefix, limit. kind=connectivity_health: a graph-EXTRACTION quality diagnostic — reports isolated nodes (zero edges of ANY kind, structural edges included), leaf / source-only / sink-only counts, effective-vs-nominal graph size and ratio, plus a per-node-kind breakdown and a dead-weight-by-file ranking that localises extraction gaps. Distinct from kind=dead_code: dead_code finds unreachable CODE (zero incoming usage edges, safe to delete); connectivity_health finds mis-EXTRACTED nodes (a normally indexed symbol always carries a structural edge, so an isolated node means the indexer failed, not that the code is unused). Filter: limit (caps dead_weight_by_file). kind=retrieval_log: mine the append-only retrieval query log (every search_symbols / smart_context / find_usages / search_text … call: question, corpus, nodes_returned, duration_ms, zero-result signal) for offline recall tuning — surfaces the top zero-result queries (the highest-signal candidates for synonym expansion or index gaps) plus per-tool latency (p50/p95) and result-size rollups. Filters: limit, tool, zero_only, since, top, include_recent. Gated by GORTEX_QUERY_LOG_DISABLE."),
 			mcp.WithString("kind", mcp.Required(), mcp.Description("Analysis kind: dead_code | hotspots | cycles | would_create_cycle | todos | blame | coverage | stale_code | ownership | coverage_gaps | stale_flags | releases | cgo_users | wasm_users | orphan_tables | unreferenced_tables | coverage_summary | channel_ops | goroutine_spawns | field_writers | race_writes | unclosed_channels | unsafe_patterns | sast | hygiene | health_score | annotation_users | config_readers | event_emitters | pubsub | string_emitters | error_surface | log_events | sql_rebuild | external_calls | routes | models | components | k8s_resources | images | kustomize | cross_repo | dbt_models | impact | bottlenecks | named | tests_as_edges | connectivity_health | retrieval_log")),
 			mcp.WithString("framework", mcp.Description("(dbt_models) Filter to one transformation framework — dbt or sqlmesh")),
 			mcp.WithString("materialized", mcp.Description("(dbt_models) Substring match on the model materialization — table, view, incremental, …")),
@@ -231,6 +231,7 @@ func (s *Server) registerEnhancementTools() {
 			mcp.WithString("scope", mcp.Description("unstaged (default), staged, all, or compare")),
 			mcp.WithString("base_ref", mcp.Description("Branch/commit for compare scope (default: main)")),
 			mcp.WithBoolean("compact", mcp.Description("One-line-per-symbol condensed output")),
+			mcp.WithString("repo", mcp.Description("Repository prefix or path (multi-repo mode); defaults to the lone tracked repo or the session's cwd-bound repo")),
 		),
 		s.handleDiffContext,
 	)
@@ -770,6 +771,8 @@ func (s *Server) handleAnalyze(ctx context.Context, req mcp.CallToolRequest) (*m
 		return s.handleAnalyzeUnsafePatterns(ctx, req)
 	case "sast", "hygiene":
 		return s.handleAnalyzeSAST(ctx, req, kind)
+	case "review":
+		return s.handleAnalyzeSAST(ctx, req, "review")
 	case "domain":
 		return s.handleAnalyzeSAST(ctx, req, "domain")
 	case "health_score":
@@ -851,7 +854,7 @@ func (s *Server) handleAnalyze(ctx context.Context, req mcp.CallToolRequest) (*m
 	case "kcore":
 		return s.handleAnalyzeKCore(ctx, req)
 	default:
-		return mcp.NewToolResultError("unknown analyze kind: " + kind + " (expected: dead_code, hotspots, cycles, would_create_cycle, todos, blame, coverage, stale_code, ownership, coverage_gaps, stale_flags, releases, cgo_users, wasm_users, orphan_tables, unreferenced_tables, coverage_summary, channel_ops, goroutine_spawns, field_writers, race_writes, unclosed_channels, unsafe_patterns, sast, hygiene, health_score, annotation_users, config_readers, env_var_users, sql_call_sites, fixes_history, edge_audit, domain, event_emitters, pubsub, string_emitters, error_surface, log_events, sql_rebuild, external_calls, resolution_outcomes, retrieval_log, routes, models, components, k8s_resources, images, kustomize, cross_repo, dbt_models, impact, bottlenecks, named, tests_as_edges, connectivity_health, pagerank, louvain, wcc, scc, kcore)"), nil
+		return mcp.NewToolResultError("unknown analyze kind: " + kind + " (expected: dead_code, hotspots, cycles, would_create_cycle, todos, blame, coverage, stale_code, ownership, coverage_gaps, stale_flags, releases, cgo_users, wasm_users, orphan_tables, unreferenced_tables, coverage_summary, channel_ops, goroutine_spawns, field_writers, race_writes, unclosed_channels, unsafe_patterns, sast, hygiene, review, health_score, annotation_users, config_readers, env_var_users, sql_call_sites, fixes_history, edge_audit, domain, event_emitters, pubsub, string_emitters, error_surface, log_events, sql_rebuild, external_calls, resolution_outcomes, retrieval_log, routes, models, components, k8s_resources, images, kustomize, cross_repo, dbt_models, impact, bottlenecks, named, tests_as_edges, connectivity_health, pagerank, louvain, wcc, scc, kcore)"), nil
 	}
 }
 
@@ -2483,14 +2486,15 @@ func (s *Server) handleDiffContext(ctx context.Context, req mcp.CallToolRequest)
 	scope := req.GetString("scope", "unstaged")
 	baseRef := req.GetString("base_ref", "main")
 
-	repoRoot := "."
-	if s.indexer != nil {
-		if root := s.indexer.RootPath(); root != "" {
-			repoRoot = root
-		}
+	// Resolve the working tree: explicit repo selector, lone tracked repo,
+	// or the session's cwd-bound repo. The "." fallback keeps the standalone
+	// (indexer-less) server working from its own cwd.
+	repoRoot, repoPrefix := s.diffRepoScope(ctx, strings.TrimSpace(req.GetString("repo", "")))
+	if repoRoot == "" {
+		repoRoot = "."
 	}
 
-	diff, err := analysis.MapGitDiff(s.graph, repoRoot, scope, baseRef)
+	diff, err := analysis.MapGitDiff(s.graph, repoRoot, repoPrefix, scope, baseRef)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -2896,6 +2900,10 @@ type batchEditResult struct {
 	FilePath string `json:"path"`
 	Status   string `json:"status"` // "applied", "failed", "skipped"
 	Error    string `json:"error,omitempty"`
+	// EOLNormalized is true when the fragment only matched through the
+	// CRLF<->LF-tolerant fallback and the replacement was written with the
+	// file's own line terminators.
+	EOLNormalized bool `json:"eol_normalized,omitempty"`
 }
 
 // batchEditItemsSchema is the JSON Schema for one batch_edit item: a
@@ -2912,7 +2920,7 @@ func batchEditItemsSchema() map[string]any {
 				"properties": map[string]any{
 					"op":         map[string]any{"const": "edit_symbol", "description": "Operation kind (optional; inferred as edit_symbol when omitted and `id` is present)."},
 					"id":         map[string]any{"type": "string", "description": "Symbol ID, e.g. pkg/foo.go::Bar."},
-					"old_source": map[string]any{"type": "string", "description": "Exact fragment to replace within the symbol's source."},
+					"old_source": map[string]any{"type": "string", "description": "Exact fragment to replace within the symbol's source. CRLF/LF line-ending differences against the file are tolerated."},
 					"new_source": map[string]any{"type": "string", "description": "Replacement fragment."},
 				},
 				"required": []any{"id", "old_source", "new_source"},
@@ -2923,7 +2931,7 @@ func batchEditItemsSchema() map[string]any {
 				"properties": map[string]any{
 					"op":          map[string]any{"const": "edit_file", "description": "Operation kind. Required to select a file edit."},
 					"path":        map[string]any{"type": "string", "description": "File path (repo-relative or absolute)."},
-					"old_string":  map[string]any{"type": "string", "description": "Exact text to replace; must be unique unless replace_all is set."},
+					"old_string":  map[string]any{"type": "string", "description": "Exact text to replace; must be unique unless replace_all is set. CRLF/LF line-ending differences against the file are tolerated."},
 					"new_string":  map[string]any{"type": "string", "description": "Replacement text."},
 					"replace_all": map[string]any{"type": "boolean", "description": "Replace every occurrence instead of requiring uniqueness."},
 				},
@@ -3130,6 +3138,10 @@ func (s *Server) handleBatchEdit(ctx context.Context, req mcp.CallToolRequest) (
 // the file, and re-indexes. Semantics match the legacy single-op batch_edit.
 func (s *Server) applyBatchSymbolEdit(ctx context.Context, edit batchEditItem) batchEditResult {
 	res := batchEditResult{Op: "edit_symbol", SymbolID: edit.SymbolID}
+	if edit.OldSource == edit.NewSource {
+		res.Status, res.Error = "failed", "old_source and new_source are identical"
+		return res
+	}
 	node := s.engineFor(ctx).GetSymbol(edit.SymbolID)
 	if node == nil {
 		res.Status, res.Error = "failed", "symbol not found: "+edit.SymbolID
@@ -3157,23 +3169,61 @@ func (s *Server) applyBatchSymbolEdit(ctx context.Context, edit batchEditItem) b
 		return res
 	}
 	symbolSource := strings.Join(lines[node.StartLine-1:node.EndLine], "\n")
-	if !strings.Contains(symbolSource, edit.OldSource) {
+	effectiveStart := node.StartLine
+	if findEOLMatches(symbolSource, edit.OldSource).count == 0 {
+		// Expand the window upward over preceding doc comments and blank
+		// lines — mirrors handleEditSymbol (agents often include the doc
+		// comment because get_symbol_source returns context above the
+		// symbol).
+		expandedStart := node.StartLine - 1
+		for expandedStart > 0 {
+			trimmed := strings.TrimSpace(lines[expandedStart-1])
+			if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "/*") ||
+				strings.HasPrefix(trimmed, "*") || trimmed == "" {
+				expandedStart--
+			} else {
+				break
+			}
+		}
+		if expandedStart < node.StartLine-1 {
+			expanded := strings.Join(lines[expandedStart:node.EndLine], "\n")
+			if findEOLMatches(expanded, edit.OldSource).count > 0 {
+				symbolSource = expanded
+				effectiveStart = expandedStart + 1
+			}
+		}
+	}
+	if findEOLMatches(symbolSource, edit.OldSource).count == 0 {
 		res.Status, res.Error = "failed", "old_source not found within symbol"
 		return res
 	}
 	symbolStart := 0
-	for i := 0; i < node.StartLine-1 && i < len(lines); i++ {
+	for i := 0; i < effectiveStart-1 && i < len(lines); i++ {
 		symbolStart += len(lines[i]) + 1
 	}
 	symbolEnd := min(symbolStart+len(symbolSource), len(fileStr))
-	offset := strings.Index(fileStr[symbolStart:symbolEnd], edit.OldSource)
-	if offset < 0 {
+	// EOL-tolerant region match: spans are byte offsets into the raw
+	// region, so the splice below always lands on the real on-disk bytes.
+	regionMatches := findEOLMatches(fileStr[symbolStart:symbolEnd], edit.OldSource)
+	if len(regionMatches.spans) == 0 {
 		res.Status, res.Error = "failed", "old_source not found in symbol region"
 		return res
 	}
-	editStart := symbolStart + offset
-	editEnd := editStart + len(edit.OldSource)
-	newContent := fileStr[:editStart] + edit.NewSource + fileStr[editEnd:]
+	span := regionMatches.spans[0]
+	editStart := symbolStart + span.start
+	editEnd := symbolStart + span.end
+	effectiveNew := edit.NewSource
+	if regionMatches.normalized {
+		// Rewrite new_source's terminators to the matched region's own
+		// style so the splice never introduces mixed line endings.
+		effectiveNew = adaptToDominantEOL(edit.NewSource, fileStr[editStart:editEnd])
+		res.EOLNormalized = true
+	}
+	newContent := fileStr[:editStart] + effectiveNew + fileStr[editEnd:]
+	if regionMatches.normalized && newContent == fileStr {
+		res.Status, res.Error = "failed", "old_source and new_source are identical after line-ending normalization"
+		return res
+	}
 	if writeErr := os.WriteFile(absPath, []byte(newContent), 0o644); writeErr != nil {
 		res.Status, res.Error = "failed", fmt.Sprintf("could not write file: %v", writeErr)
 		return res
@@ -3210,7 +3260,8 @@ func (s *Server) applyBatchFileEdit(edit batchEditItem) batchEditResult {
 		return res
 	}
 	fileStr := string(content)
-	count := strings.Count(fileStr, edit.OldString)
+	matches := findEOLMatches(fileStr, edit.OldString)
+	count := matches.count
 	if count == 0 {
 		res.Status, res.Error = "failed", "old_string not found in file"
 		return res
@@ -3218,13 +3269,28 @@ func (s *Server) applyBatchFileEdit(edit batchEditItem) batchEditResult {
 	if count > 1 && !edit.ReplaceAll {
 		res.Status, res.Error = "failed", fmt.Sprintf(
 			"old_string matches %d locations%s. Provide a larger fragment for uniqueness or set replace_all=true.",
-			count, matchLocationsHint(fileStr, edit.OldString))
+			count, matchSpansHint(fileStr, matches.spans))
 		return res
 	}
 	var newContent string
-	if edit.ReplaceAll {
+	switch {
+	case matches.normalized:
+		// The CRLF<->LF fallback matched: splice the real byte spans and
+		// write new_string with each region's own line terminators so the
+		// edit never introduces mixed endings.
+		limit := 1
+		if edit.ReplaceAll {
+			limit = -1
+		}
+		newContent = spliceSpansEOL(fileStr, matches.spans, edit.NewString, limit)
+		if newContent == fileStr {
+			res.Status, res.Error = "failed", "old_string and new_string are identical after line-ending normalization"
+			return res
+		}
+		res.EOLNormalized = true
+	case edit.ReplaceAll:
 		newContent = strings.ReplaceAll(fileStr, edit.OldString, edit.NewString)
-	} else {
+	default:
 		newContent = strings.Replace(fileStr, edit.OldString, edit.NewString, 1)
 	}
 	perm := os.FileMode(0o644)

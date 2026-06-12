@@ -14,6 +14,7 @@ import (
 func restoreSeams() {
 	isDaemonRunning = daemon.IsRunning
 	spawnDaemon = spawnDetachedDaemon
+	stopIntentActive = daemon.StopIntentActive
 }
 
 // isolateSpawnLock points the spawn lock + fail marker at a fresh temp
@@ -46,6 +47,43 @@ func TestEnsureDaemon_AutostartOff(t *testing.T) {
 	spawnDaemon = func() error { t.Fatal("no spawn when autostart is off"); return nil }
 	if d := ensureDaemonReady(false); d != daemonUnavailable {
 		t.Fatalf("want daemonUnavailable, got %d", d)
+	}
+}
+
+func TestEnsureDaemon_StopIntentSuppressesAutostart(t *testing.T) {
+	defer restoreSeams()
+	var spawned int32
+	isDaemonRunning = func() bool { return false }
+	stopIntentActive = func() bool { return true }
+	spawnDaemon = func() error { atomic.AddInt32(&spawned, 1); return nil }
+	// Autostart is on, but the user explicitly stopped the daemon: it must
+	// stay down rather than be resurrected by the proxy's autostart path.
+	if d := ensureDaemonReady(true); d != daemonUnavailable {
+		t.Fatalf("stop-intent must suppress autostart => daemonUnavailable, got %d", d)
+	}
+	if atomic.LoadInt32(&spawned) != 0 {
+		t.Fatal("a deliberately-stopped daemon must not be auto-respawned")
+	}
+}
+
+func TestEnsureDaemon_RealStopIntentMarkerSuppresses(t *testing.T) {
+	isolateSpawnLock(t) // points XDG_CACHE_HOME at a fresh temp dir
+	defer restoreSeams()
+	stopIntentActive = daemon.StopIntentActive // exercise the real FS-backed check
+	var spawned int32
+	isDaemonRunning = func() bool { return false }
+	spawnDaemon = func() error { atomic.AddInt32(&spawned, 1); return nil }
+	if err := daemon.MarkStopIntent(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { daemon.ClearStopIntent() })
+	// End-to-end: the real marker write + real read must agree on the path and
+	// suppress the spawn — not just the stubbed seam.
+	if d := ensureDaemonReady(true); d != daemonUnavailable {
+		t.Fatalf("a real stop-intent marker must suppress autostart, got %d", d)
+	}
+	if atomic.LoadInt32(&spawned) != 0 {
+		t.Fatal("must not spawn while a real stop-intent marker is present")
 	}
 }
 

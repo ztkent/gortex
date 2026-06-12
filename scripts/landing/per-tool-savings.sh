@@ -42,7 +42,7 @@ cat > "$OUT" <<EOF
 
 **Last regenerated**: $generated_at  ·  Source: \`gortex savings
 --verbose --json\` against the operator's cumulative store
-(\`~/.cache/gortex/savings.json\` + \`~/.cache/gortex/savings.jsonl\`).
+(the \`~/.gortex/sidecar.sqlite\` savings ledger).
 
 ## Headline
 

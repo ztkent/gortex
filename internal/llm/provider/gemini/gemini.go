@@ -97,11 +97,20 @@ type apiResponse struct {
 	Candidates []struct {
 		Content apiContent `json:"content"`
 	} `json:"candidates"`
-	Error *struct {
+	UsageMetadata *apiUsageMetadata `json:"usageMetadata"`
+	Error         *struct {
 		Code    int    `json:"code"`
 		Message string `json:"message"`
 		Status  string `json:"status"`
 	} `json:"error"`
+}
+
+// apiUsageMetadata is the generateContent token accounting. cachedContent
+// tokens, when present, are the share served from Gemini's context cache.
+type apiUsageMetadata struct {
+	PromptTokenCount        int `json:"promptTokenCount"`
+	CandidatesTokenCount    int `json:"candidatesTokenCount"`
+	CachedContentTokenCount int `json:"cachedContentTokenCount"`
 }
 
 // Complete implements llm.Provider.
@@ -120,16 +129,27 @@ func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (llm
 		return llm.CompletionResponse{}, fmt.Errorf("gemini: marshal request: %w", err)
 	}
 
-	// The HTTP round-trip and parse run inside httpx.Complete, which
-	// retries an HTTP-200-but-empty response (a transient upstream
-	// truncation) with bounded backoff.
-	text, err := httpx.Complete(ctx, "gemini", func(ctx context.Context) httpx.Result {
+	// The HTTP round-trip and parse run inside httpx.CompleteWithUsage,
+	// which retries an HTTP-200-but-empty response (a transient upstream
+	// truncation) with bounded backoff and carries back the decoded
+	// token usage from the winning attempt.
+	text, usage, err := httpx.CompleteWithUsage(ctx, "gemini", func(ctx context.Context) httpx.Result {
 		return p.attempt(ctx, raw)
 	})
 	if err != nil {
 		return llm.CompletionResponse{}, err
 	}
-	return llm.CompletionResponse{Text: text}, nil
+	return llm.CompletionResponse{Text: text, Usage: toTokenUsage(usage)}, nil
+}
+
+// toTokenUsage maps the provider-neutral httpx.Usage onto llm.TokenUsage.
+func toTokenUsage(u httpx.Usage) llm.TokenUsage {
+	return llm.TokenUsage{
+		InputTokens:      u.InputTokens,
+		OutputTokens:     u.OutputTokens,
+		CacheReadTokens:  u.CacheReadTokens,
+		CacheWriteTokens: u.CacheWriteTokens,
+	}
 }
 
 // attempt issues one generateContent request and extracts the reply. A
@@ -177,7 +197,22 @@ func (p *Provider) attempt(ctx context.Context, raw []byte) httpx.Result {
 	if text == "" {
 		return httpx.Result{Hollow: true}
 	}
-	return httpx.Result{Text: text}
+	return httpx.Result{Text: text, Usage: usageFrom(parsed.UsageMetadata)}
+}
+
+// usageFrom maps the generateContent usageMetadata onto httpx.Usage. The
+// cached-content share is reported as CacheReadTokens (a subset of
+// promptTokenCount, which stays the full input count). A nil block yields
+// zero usage. Gemini does not report cache-write tokens.
+func usageFrom(u *apiUsageMetadata) httpx.Usage {
+	if u == nil {
+		return httpx.Usage{}
+	}
+	return httpx.Usage{
+		InputTokens:     u.PromptTokenCount,
+		OutputTokens:    u.CandidatesTokenCount,
+		CacheReadTokens: u.CachedContentTokenCount,
+	}
 }
 
 // splitMessages pulls every RoleSystem message into the top-level

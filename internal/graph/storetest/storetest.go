@@ -165,6 +165,7 @@ func testAddGetNode(t *testing.T, factory Factory) {
 	got := s.GetNode("a.go::Foo")
 	if got == nil {
 		t.Fatalf("GetNode returned nil for inserted node")
+		return
 	}
 	if got.Name != "Foo" || got.FilePath != "a.go" || got.Kind != graph.KindFunction {
 		t.Fatalf("round-trip mismatch: %+v", got)
@@ -805,6 +806,7 @@ func testMetaPreserved(t *testing.T, factory Factory) {
 	got := s.GetNode("a.go::Foo")
 	if got == nil {
 		t.Fatalf("GetNode returned nil")
+		return
 	}
 	if got.Meta == nil {
 		t.Fatalf("Meta not preserved")
@@ -1201,6 +1203,7 @@ func testSymbolBundleSearcher(t *testing.T, factory Factory) {
 	for _, b := range bundles {
 		if b.Node == nil {
 			t.Fatalf("bundle has nil node: %+v", b)
+			continue
 		}
 		gotIDs[b.Node.ID] = b
 	}
@@ -1997,6 +2000,7 @@ func testNodesByKindsScanner(t *testing.T, factory Factory) {
 	}
 	if fn1Got == nil {
 		t.Fatalf("Fn1 missing from result")
+		return
 	}
 	if pct, _ := fn1Got.Meta["coverage_pct"].(float64); pct != 42.5 {
 		t.Fatalf("Fn1.Meta.coverage_pct = %v, want 42.5", fn1Got.Meta["coverage_pct"])
@@ -3168,6 +3172,7 @@ func testFileEditingContext(t *testing.T, factory Factory) {
 	res := scan.FileEditingContext("a.go", []graph.NodeKind{graph.KindFunction, graph.KindMethod})
 	if res == nil {
 		t.Fatalf("FileEditingContext returned nil for a.go")
+		return
 	}
 	if res.FileNode == nil || res.FileNode.ID != "a.go" {
 		t.Fatalf("FileNode missing or wrong: %+v", res.FileNode)

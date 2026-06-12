@@ -64,6 +64,15 @@ var hotEagerTools = map[string]bool{
 	"batch_edit":    true,
 	"move_symbol":   true,
 	"inline_symbol": true,
+
+	// Review engine — eager because a reviewing agent reaches for these on
+	// the first turn of a review task; a discovery round-trip would regress
+	// that hot path. Registered as a group by registerReviewTools.
+	"sibling_diff_context": true,
+	"review":               true,
+	"review_pack":          true,
+	"suppress_finding":     true,
+	"post_review":          true,
 }
 
 // LazyToolsSearchName is the well-known name of the discovery tool the

@@ -41,8 +41,8 @@ func captureStdout(t *testing.T, fn func()) string {
 
 func TestPickHeadlineCost_RespectsModelFlag(t *testing.T) {
 	costs := map[string]float64{
-		"claude-opus-4":   0.50,
-		"claude-sonnet-4": 0.10,
+		"claude-opus-4":    0.50,
+		"claude-sonnet-4":  0.10,
 		"claude-haiku-4.5": 0.03,
 	}
 	val, name := pickHeadlineCost(costs, "claude-sonnet-4")
@@ -156,7 +156,7 @@ func TestEmitSavingsDashboard_RendersThreeBuckets(t *testing.T) {
 			savingsVerbose = oldVerbose
 			savingsBarCells = oldCells
 		}()
-		emitSavingsDashboard(snap, buckets, "/tmp/savings.json", "/tmp/savings.jsonl")
+		emitSavingsDashboard(snap, buckets, "/tmp/sidecar.sqlite")
 	})
 
 	for _, want := range []string{
@@ -165,8 +165,8 @@ func TestEmitSavingsDashboard_RendersThreeBuckets(t *testing.T) {
 		"Today",
 		"Last 7 days",
 		"All time",
-		"█", // at least one filled bar cell
-		"░", // at least one empty bar cell
+		"█",                 // at least one filled bar cell
+		"░",                 // at least one empty bar cell
 		"get_symbol_source", // verbose per-tool table
 		"smart_context",
 		"Cost avoided per model (all time):",
@@ -187,7 +187,7 @@ func TestEmitSavingsDashboard_EmptyTotals(t *testing.T) {
 		{Label: "All time"},
 	}
 	out := captureStdout(t, func() {
-		emitSavingsDashboard(snap, buckets, "/tmp/savings.json", "")
+		emitSavingsDashboard(snap, buckets, "/tmp/sidecar.sqlite")
 	})
 	if !strings.Contains(out, "No source-reading tool calls recorded yet") {
 		t.Errorf("empty totals should show the no-data hint, got:\n%s", out)
@@ -195,5 +195,10 @@ func TestEmitSavingsDashboard_EmptyTotals(t *testing.T) {
 	// Should not print any bucket rows when there's no data.
 	if strings.Contains(out, "█") {
 		t.Errorf("empty totals should not render bars, got:\n%s", out)
+	}
+	// An empty ledger has never tracked anything — the dashboard must not
+	// claim a "tracking since" moment (the zero FirstSeen stays hidden).
+	if strings.Contains(out, "Tracking since") {
+		t.Errorf("empty ledger must not print a tracking-since line, got:\n%s", out)
 	}
 }

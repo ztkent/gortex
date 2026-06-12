@@ -17,6 +17,7 @@ Gortex exposes a knowledge-graph query surface over the [Model Context Protocol]
 - [Proactive safety](#proactive-safety)
 - [Code quality](#code-quality)
 - [Code generation](#code-generation)
+- [PR review](#pr-review)
 - [Multi-repo management](#multi-repo-management)
 - [Live editor buffers (overlay sessions)](#live-editor-buffers-overlay-sessions)
 - [Speculative execution](#speculative-execution)
@@ -134,8 +135,8 @@ Four additional push channels modeled on `subscribe_diagnostics` — per-session
 | `find_import_path` | Correct import path for a symbol |
 | `explain_change_impact` | Risk-tiered blast radius with affected processes. A zero-edge target carries the "likely unused" vs "possible extraction gap" caveat |
 | `get_recent_changes` | Files/symbols changed since timestamp |
-| `edit_symbol` | Edit a symbol's source directly by ID — no Read needed. Optional `base_sha` content-hash guard refuses the write when the on-disk SHA has drifted; every success carries `new_sha` so the next edit can pipeline without re-reading |
-| `edit_file` | Edit any file (markdown, config, spec, template, source) by exact string replacement — accepts absolute paths or repo-rooted paths. Same `base_sha` / `new_sha` drift guard. Kills Read-before-Edit for files not in the graph |
+| `edit_symbol` | Edit a symbol's source directly by ID — no Read needed. Line-ending tolerant: an LF-authored `old_source` matches a CRLF file (and vice versa) and the replacement adopts the file's endings (`eol_normalized: true` rides on the response). Optional `base_sha` content-hash guard refuses the write when the on-disk SHA has drifted; every success carries `new_sha` so the next edit can pipeline without re-reading |
+| `edit_file` | Edit any file (markdown, config, spec, template, source) by exact string replacement — accepts absolute paths or repo-rooted paths. Line-ending tolerant: an LF-authored `old_string` matches a CRLF file (and vice versa) and the replacement is written with the file's own endings (`eol_normalized: true` rides on the response). Same `base_sha` / `new_sha` drift guard. Kills Read-before-Edit for files not in the graph |
 | `write_file` | Create or overwrite any file — atomic temp+rename, re-indexes on write. Same `base_sha` / `new_sha` drift guard |
 | `rename_symbol` | Coordinated multi-file rename with all references |
 | `move_symbol` | Relocate a function / method / type / variable / const to another file. Cross-package moves rewrite every qualified reference, drop the source import, add the target import, synthesise the target file if missing. Go for now |
@@ -208,6 +209,29 @@ Gortex captures every large tool response into a bounded per-session ring; these
 | `batch_edit` | Apply multiple edits in dependency order, re-index between steps |
 | `diff_context` | Git diff enriched with callers, callees, community, processes, per-file risk |
 | `prefetch_context` | Predict needed symbols from task description and recent activity. Accepts `max_bytes` / `max_tokens` budget caps |
+
+## PR review
+
+A graph-grounded pull-request review surface. The forge-data tools self-serve PR data via the daemon's own forge client (needs `GH_TOKEN` / `GITHUB_TOKEN` in the daemon environment), or accept caller-supplied data to skip the network; all are read-only. The review gate is AST-grounded — the deterministic correctness rulepack runs over the changeset and a graph-grounding pass drops false positives, with an opt-in LLM fold-in. The CLI exposes the same surface as `gortex prs` / `gortex review` ([cli.md](cli.md#pull-request-review)).
+
+| Tool | Description |
+|------|-------------|
+| `list_prs` | List a repo's PRs with a one-shot review-state classification — a state label (DRAFT / BASE_MISMATCH / CHANGES_REQUESTED / APPROVED / STALE / READY), a normalized CI rollup (NONE / FAILURE / PENDING / SUCCESS), and merge blockers. Pass `prs` to classify an already-fetched set with no network call |
+| `get_pr_impact` | Graph-joined blast radius + risk score for one PR — maps the PR's changed files to symbols, scores five risk axes (blast-radius flow, caller fan-in, coverage gap, security keywords, community span), groups the affected surface by community and caller/test file. `receipt: true` emits a privacy-safe review receipt |
+| `triage_prs` | Rank a repo's open PRs by graph-derived review priority — `get_pr_impact` per PR ordered by composite risk (deterministic; `use_llm` re-ranks with one compact LLM pass + per-PR rationale). Decides which PR to review first |
+| `pr_risk` | PR-level composite risk score for a set of changed symbols — five 0-100 axes into one score + a LOW/MEDIUM/HIGH/CRITICAL level and an ordered `review_priorities` list. Pass `ids` (mapped symbol IDs) or `base` (a git ref — changed set from the diff) |
+| `conflicts_prs` | Surface merge-order conflict risk — maps each open PR to the graph communities it touches and reports the communities touched by more than one PR, with colliding PR numbers, a suggested safe merge order, and a conflict-risk score. Plan a merge train that minimises rebases |
+| `suggest_reviewers` | Rank the people / teams best placed to review a changeset — blends CODEOWNERS matches, recent authorship of the changed symbols, and co-change experts into one ranked list with per-reviewer reasons. Pass `ids`, `base`, or `number` |
+| `suggested_review_questions` | Prioritised, symbol-anchored review questions mapping the changeset to graph anomalies — bridge / hub_risk / surprising / thin_community / untested_hotspot — each tied to a symbol id + file + line with a HIGH/MEDIUM/LOW severity |
+| `pr_review_context` | Deterministic, LLM-free PR-review rollup in one call — composes `diff_context`, `verify_change`, `simulate_chain` (gated on an explicit overlay session), and `audit_agent_config` into a composite PASS / WARN / BLOCK verdict. The cheap counterpart to `review_pack` |
+| `sibling_diff_context` | Raw unified diff of the OTHER changed files in a changeset — the sibling changes a per-symbol / per-file review view filters out, ranked by relatedness to the focus (shared community/process → co-change → directory proximity) |
+| `review` | Review a changeset → line-anchored inline comments + a BLOCK/REVIEW/APPROVE verdict. Runs the deterministic correctness rulepack (graph-grounded to drop false positives) over the changeset (`base` / `scope`, or a pasted `diff`); `use_llm` folds in LLM findings relocated to exact lines |
+| `review_pack` | The single AST-grounded PR-review entrypoint — folds the graph-grounded review, per-symbol semantic classification, per-file risk, contract-impact + guard/architecture checks, and impacted test targets into one envelope, with a derived `verification_command` and a privacy-safe receipt |
+| `critique_review` | Second, adversarial self-critique pass over a prior review's findings — asks the LLM (grounded in the diff) which findings are genuine vs false positives, returns the kept set, the dropped set each with a reason, and a revised verdict. Conservative: a disabled LLM keeps everything |
+| `post_review` | Post review findings as inline comments on a GitHub PR / GitLab MR — each anchored to its file + line, batched into one review. Every body is secret-redacted before any payload is built; public / fork PRs require `confirm_public: true`; `dry_run: true` returns the would-post payloads with no network call |
+| `suppress_finding` | Durably silence a review finding as a false positive (or `list` / `remove`) for the current repo — keyed over rule / category / symbol / file / source text so it survives the finding shifting lines. A permanent per-repo never-flag-again list (sidecar-backed) |
+
+`analyze` also takes `kind: "review"` — the idiomatic/correctness rulepack (NPE / thread-safety check-then-act / N+1 / logic-error, Go + Python) with the same graph-grounded false-positive-reduction post-pass that backs the `review` tool.
 
 ## Multi-repo management
 

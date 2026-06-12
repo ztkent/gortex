@@ -86,11 +86,21 @@ type SharedServerConfig struct {
 	// SemanticMode selects the goanalysis provider mode: "callgraph"
 	// builds the call graph; anything else (default) type-checks.
 	SemanticMode string
-	// SavingsPath overrides the token-savings store path; empty uses the
-	// default (~/.gortex/cache/savings.json). SavingsRepo scopes the
-	// accumulated totals (empty = workspace-global).
-	SavingsPath string
-	SavingsRepo string
+	// SavingsPath overrides the token-savings ledger database; empty
+	// defaults to the machine-global sidecar under the data dir
+	// (savings.DefaultDBPath() — the same database the `gortex savings`
+	// CLI reads), independent of SideStores: deriving it from a per-mode
+	// side-store dir would split the ledger between writer and reader.
+	// Tests MUST set it (with SavingsLegacyJSON) to temp paths or the
+	// constructor mutates the developer's real ledger. SavingsRepo
+	// scopes the accumulated totals (empty = workspace-global).
+	// SavingsLegacyJSON names the flat-file era's cumulative
+	// savings.json to import once — its sibling .jsonl event log rides
+	// along; empty uses the historical default location under the
+	// cache dir.
+	SavingsPath       string
+	SavingsLegacyJSON string
+	SavingsRepo       string
 }
 
 // SideStores configures where the agent-authored knowledge stores
@@ -432,6 +442,10 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 	overlays := daemon.NewOverlayManager(daemon.OverlayIdleTTLFromEnv(0))
 	srv.SetOverlayManager(overlays)
 	s.Overlays = overlays
+	stopOverlayJanitor := overlays.StartJanitor(0, func(dropped int) {
+		logger.Info("overlay janitor: swept idle sessions", zap.Int("dropped", dropped))
+	})
+	s.cleanup = append(s.cleanup, stopOverlayJanitor)
 
 	if semMgr := idx.SemanticManager(); semMgr != nil {
 		srv.SetSemanticManager(semMgr)
@@ -444,15 +458,27 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 	srv.InitFeedback(sideCfg.FeedbackDir, sideCfg.FeedbackRepo)
 	srv.InitNotes(sideCfg.NotesDir, sideCfg.NotesRepo)
 	srv.InitMemories(sideCfg.NotesDir, sideCfg.NotesRepo)
+	srv.InitSuppressions(sideCfg.NotesDir, sideCfg.NotesRepo)
 	srv.InitNotebook(sideCfg.NotebookPath)
 	srv.InitCombo(sideCfg.FeedbackDir, sideCfg.FeedbackRepo, gortexmcp.ModeAI)
 	srv.InitFrecency(sideCfg.FeedbackDir, sideCfg.FeedbackRepo, gortexmcp.ModeAI)
 
+	// The savings ledger is machine-global: every entry point defaults to
+	// the same sidecar database the `gortex savings` CLI reads. Deriving
+	// it from a per-mode side-store dir would split the ledger between
+	// writer and reader — the failure mode the flat files had.
 	savingsPath := cfg.SavingsPath
 	if savingsPath == "" {
-		savingsPath = savings.DefaultPath()
+		savingsPath = savings.DefaultDBPath()
 	}
 	if savingsStore, err := savings.Open(savingsPath); err == nil {
+		legacyJSON := cfg.SavingsLegacyJSON
+		if legacyJSON == "" {
+			legacyJSON = savings.DefaultPath()
+		}
+		if ierr := savingsStore.ImportLegacy(legacyJSON); ierr != nil {
+			logger.Warn("serverstack: legacy savings import failed", zap.Error(ierr))
+		}
 		srv.InitSavings(savingsStore, cfg.SavingsRepo)
 		s.cleanup = append(s.cleanup, func() { _ = srv.FlushSavings() })
 	} else {

@@ -3,12 +3,11 @@ package indexer
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
+	"github.com/zzet/gortex/internal/gitcmd"
 	"go.uber.org/zap"
 )
 
@@ -313,12 +312,7 @@ func (p *Poller) pollFilesystem() int {
 // with no .git directory yields an empty string and no error from the
 // caller's perspective — the poller simply skips the HEAD check.
 func pollerHeadSHA(repoPath string) (string, error) {
-	cmd := exec.Command("git", "-C", repoPath, "rev-parse", "HEAD")
-	out, err := cmd.Output()
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(out)), nil
+	return gitcmd.Output(context.Background(), repoPath, "rev-parse", "HEAD")
 }
 
 // pollerDiffNameStatus runs `git diff --name-status -M -C -z` between
@@ -326,9 +320,8 @@ func pollerHeadSHA(repoPath string) (string, error) {
 // NUL-delimited parser so rename / copy detection behaves identically
 // on the fallback path.
 func pollerDiffNameStatus(ctx context.Context, repoPath, oldSHA, newSHA string) ([]gitChange, error) {
-	cmd := exec.CommandContext(ctx, "git", "-C", repoPath,
+	out, err := gitcmd.Run(ctx, repoPath,
 		"diff", "--name-status", "-M", "-C", "-z", oldSHA, newSHA)
-	out, err := cmd.Output()
 	if err != nil {
 		return nil, err
 	}

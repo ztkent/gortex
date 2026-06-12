@@ -377,3 +377,64 @@ func TestSidecar_MigrateSkippedWhenTableNonEmpty(t *testing.T) {
 	require.Len(t, rows, 1, "import must be skipped when the table already has rows")
 	assert.Equal(t, "nt-existing", rows[0].ID)
 }
+
+func TestSidecar_SuppressionsRoundTrip(t *testing.T) {
+	st := openTempSidecar(t)
+	now := time.Now().UTC().Truncate(time.Nanosecond)
+	in := SuppressionEntry{
+		IdentityKey: "ik-abc",
+		Rule:        "nil-deref",
+		Category:    "nil-deref",
+		File:        "pkg/x.go",
+		SymbolID:    "pkg/x.go::Foo",
+		Reason:      "guarded by a prior nil check",
+		Author:      "me@zzet.org",
+		HitCount:    0,
+		Created:     now,
+	}
+	require.NoError(t, st.UpsertSuppression("rk", in))
+
+	// LoadSuppression hits.
+	got, ok := st.LoadSuppression("rk", "ik-abc")
+	require.True(t, ok)
+	assert.Equal(t, in.IdentityKey, got.IdentityKey)
+	assert.Equal(t, in.Rule, got.Rule)
+	assert.Equal(t, in.Category, got.Category)
+	assert.Equal(t, in.File, got.File)
+	assert.Equal(t, in.SymbolID, got.SymbolID)
+	assert.Equal(t, in.Reason, got.Reason)
+	assert.Equal(t, in.Author, got.Author)
+	assert.WithinDuration(t, now, got.Created, time.Microsecond)
+
+	// Missing identity → clean miss, not an error.
+	_, ok = st.LoadSuppression("rk", "nope")
+	assert.False(t, ok)
+
+	// Scope isolation: another repo_key sees nothing.
+	_, ok = st.LoadSuppression("other", "ik-abc")
+	assert.False(t, ok)
+
+	// LoadSuppressions for the repo.
+	all, err := st.LoadSuppressions("rk")
+	require.NoError(t, err)
+	require.Len(t, all, 1)
+	assert.Equal(t, "ik-abc", all[0].IdentityKey)
+
+	// Bump hit twice and confirm counters advance.
+	require.NoError(t, st.BumpSuppressionHit("rk", "ik-abc", now.Add(time.Second)))
+	require.NoError(t, st.BumpSuppressionHit("rk", "ik-abc", now.Add(2*time.Second)))
+	bumped, ok := st.LoadSuppression("rk", "ik-abc")
+	require.True(t, ok)
+	assert.Equal(t, int64(2), bumped.HitCount)
+	assert.WithinDuration(t, now.Add(2*time.Second), bumped.LastHit, time.Microsecond)
+
+	// Bumping a missing row is a no-op, not an error.
+	require.NoError(t, st.BumpSuppressionHit("rk", "nope", now))
+
+	// Delete.
+	require.NoError(t, st.DeleteSuppression("rk", "ik-abc"))
+	_, ok = st.LoadSuppression("rk", "ik-abc")
+	assert.False(t, ok)
+	// Deleting a missing row is not an error.
+	require.NoError(t, st.DeleteSuppression("rk", "ik-abc"))
+}

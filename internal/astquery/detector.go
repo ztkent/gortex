@@ -16,6 +16,12 @@ const (
 	CategoryHygiene     = "hygiene"
 	CategoryCorrectness = "correctness"
 	CategoryPerformance = "performance"
+	// CategoryReview groups idiomatic / correctness rules (nil-deref,
+	// check-then-act, n-plus-one, logic errors) surfaced through the
+	// review path. Kept distinct from hygiene so these carry
+	// error/warning severity and feed the graph-grounding post-pass
+	// that runs one layer up (the detectors themselves stay pure-AST).
+	CategoryReview = "review"
 )
 
 // Detector is one named structural rule. The Languages map carries

@@ -131,10 +131,22 @@ type apiResponse struct {
 			Content string `json:"content"`
 		} `json:"message"`
 	} `json:"choices"`
+	Usage *apiUsage `json:"usage"`
 	Error *struct {
 		Type    string `json:"type"`
 		Message string `json:"message"`
 	} `json:"error"`
+}
+
+// apiUsage is the Chat Completions token accounting. prompt_tokens
+// includes the cached prefix; prompt_tokens_details.cached_tokens
+// breaks out the share served from the prompt cache.
+type apiUsage struct {
+	PromptTokens        int `json:"prompt_tokens"`
+	CompletionTokens    int `json:"completion_tokens"`
+	PromptTokensDetails struct {
+		CachedTokens int `json:"cached_tokens"`
+	} `json:"prompt_tokens_details"`
 }
 
 // Complete implements llm.Provider. The body is marshalled once; the
@@ -188,7 +200,7 @@ func (c *Client) Complete(ctx context.Context, req llm.CompletionRequest) (llm.C
 		return llm.CompletionResponse{}, fmt.Errorf("%s: marshal request: %w", c.label(), err)
 	}
 
-	text, err := httpx.Complete(ctx, c.label(), func(ctx context.Context) httpx.Result {
+	text, usage, err := httpx.CompleteWithUsage(ctx, c.label(), func(ctx context.Context) httpx.Result {
 		return c.attempt(ctx, raw)
 	})
 	if err != nil {
@@ -202,7 +214,17 @@ func (c *Client) Complete(ctx context.Context, req llm.CompletionRequest) (llm.C
 		}
 		text = extracted
 	}
-	return llm.CompletionResponse{Text: text}, nil
+	return llm.CompletionResponse{Text: text, Usage: toTokenUsage(usage)}, nil
+}
+
+// toTokenUsage maps the provider-neutral httpx.Usage onto llm.TokenUsage.
+func toTokenUsage(u httpx.Usage) llm.TokenUsage {
+	return llm.TokenUsage{
+		InputTokens:      u.InputTokens,
+		OutputTokens:     u.OutputTokens,
+		CacheReadTokens:  u.CacheReadTokens,
+		CacheWriteTokens: u.CacheWriteTokens,
+	}
 }
 
 func (c *Client) label() string {
@@ -251,7 +273,22 @@ func (c *Client) attempt(ctx context.Context, raw []byte) httpx.Result {
 	if text == "" {
 		return httpx.Result{Hollow: true}
 	}
-	return httpx.Result{Text: text}
+	return httpx.Result{Text: text, Usage: usageFrom(parsed.Usage)}
+}
+
+// usageFrom maps the Chat Completions usage block onto httpx.Usage. The
+// cached-prompt share is reported as CacheReadTokens (a subset of
+// prompt_tokens, which stays the full input count). A nil block yields
+// zero usage. OpenAI's API does not report cache-write tokens.
+func usageFrom(u *apiUsage) httpx.Usage {
+	if u == nil {
+		return httpx.Usage{}
+	}
+	return httpx.Usage{
+		InputTokens:     u.PromptTokens,
+		OutputTokens:    u.CompletionTokens,
+		CacheReadTokens: u.PromptTokensDetails.CachedTokens,
+	}
 }
 
 // mapMessages flattens the provider-neutral conversation onto OpenAI

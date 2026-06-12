@@ -9,16 +9,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/zzet/gortex/internal/persistence"
 	"github.com/zzet/gortex/internal/savings"
 )
 
 func TestHumanDuration(t *testing.T) {
 	cases := map[time.Duration]string{
-		24 * time.Hour:       "24h",
-		7 * 24 * time.Hour:   "7d",
-		30 * 24 * time.Hour:  "30d",
-		2 * time.Hour:        "2h",
-		90 * time.Minute:     "1h30m0s",
+		24 * time.Hour:      "24h",
+		7 * 24 * time.Hour:  "7d",
+		30 * 24 * time.Hour: "30d",
+		2 * time.Hour:       "2h",
+		90 * time.Minute:    "1h30m0s",
 	}
 	for in, want := range cases {
 		if got := humanDuration(in); got != want {
@@ -142,25 +143,38 @@ func TestLoadHistory_EmptyStore(t *testing.T) {
 }
 
 func TestLoadHistory_SinceZeroUsesCumulative(t *testing.T) {
-	// Populate a store with a known total, then call loadHistory with
+	// Populate a ledger with a known total, then call loadHistory with
 	// since=0. The result must come from the cumulative snapshot, not
-	// a JSONL scan.
+	// an event scan.
 	dir := t.TempDir()
-	path := filepath.Join(dir, "savings.json")
-	store, err := savings.Open(path)
+	store, err := savings.Open(persistence.DefaultSidecarPath(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.AddObservation("/r", "go", "get_symbol_source", 50, 500)
-	if err := store.Flush(); err != nil {
-		t.Fatal(err)
-	}
+	store.AddObservation(savings.Observation{Repo: "/r", Language: "go", Tool: "get_symbol_source", Returned: 50, Saved: 500})
 	h, err := loadHistory(dir, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if h.Calls != 1 || h.Saved != 500 {
-		t.Errorf("since=0 should reflect cumulative store, got %+v", h)
+		t.Errorf("since=0 should reflect cumulative ledger, got %+v", h)
+	}
+}
+
+func TestLoadHistory_WindowFiltersEvents(t *testing.T) {
+	dir := t.TempDir()
+	store, err := savings.Open(persistence.DefaultSidecarPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.AddObservation(savings.Observation{Repo: "/r", Language: "go", Tool: "read_file", Returned: 10, Saved: 90})
+
+	h, err := loadHistory(dir, 24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.Calls != 1 || h.Saved != 90 {
+		t.Errorf("fresh event should fall inside a 24h window, got %+v", h)
 	}
 }
 
@@ -226,4 +240,3 @@ func TestGainCmd_Registered(t *testing.T) {
 		t.Errorf("rootCmd missing `gain`; have %v", subs)
 	}
 }
-

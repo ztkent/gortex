@@ -29,6 +29,7 @@ package blame
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -36,6 +37,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/zzet/gortex/internal/gitcmd"
 	"github.com/zzet/gortex/internal/graph"
 )
 
@@ -61,13 +63,12 @@ func Run(repoRoot, relPath string) (map[int]Author, error) {
 // pinning to `origin/main` so feature-branch work-in-progress doesn't
 // pollute the persisted data.
 func RunAt(repoRoot, rev, relPath string) (map[int]Author, error) {
-	args := []string{"-C", repoRoot, "blame", "-p"}
+	args := []string{"blame", "-p"}
 	if rev != "" {
 		args = append(args, rev)
 	}
 	args = append(args, "--", relPath)
-	cmd := exec.Command("git", args...)
-	out, err := cmd.Output()
+	out, err := gitcmd.Run(context.Background(), repoRoot, args...)
 	if err != nil {
 		return nil, fmt.Errorf("git blame %s: %w", relPath, err)
 	}

@@ -58,6 +58,18 @@ func CostAvoided(tokensSaved int64, name string) float64 {
 	return float64(tokensSaved) * p.USDPerMInput / 1_000_000.0
 }
 
+// ModelRate returns the USD-per-1M-token input rate for the named model
+// (case-insensitive, substring — see findPrice), or 0 when no pricing row
+// matches. Callers that need a ProviderPricing-shaped rate card (the
+// review cost block) use this to derive one from the built-in table.
+func ModelRate(name string) float64 {
+	p := findPrice(name)
+	if p == nil {
+		return 0
+	}
+	return p.USDPerMInput
+}
+
 // CostAvoidedAll returns the cost across every entry in the pricing table,
 // keyed by model name — useful for the CLI's multi-model summary.
 func CostAvoidedAll(tokensSaved int64) map[string]float64 {

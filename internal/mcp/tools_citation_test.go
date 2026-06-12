@@ -61,7 +61,7 @@ func initTestRepo(t *testing.T, dir, file, contents string) string {
 		}
 	}
 
-	sha, err := runGit(dir, "rev-parse", "HEAD")
+	sha, err := runGit(context.Background(), dir, "rev-parse", "HEAD")
 	require.NoError(t, err)
 	return strings.TrimSpace(sha)
 }

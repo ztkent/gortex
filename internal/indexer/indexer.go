@@ -2769,15 +2769,15 @@ func (idx *Indexer) indexFile(filePath string, resolve bool) error {
 	}
 
 	if resolve {
-		idx.resolver.ResolveFile(graphPath)
-		// Reverse pass: bind callers in OTHER files that reference a
-		// symbol (re)defined here. ResolveFile above only fixed this
-		// file's OUTGOING edges; a symbol newly defined or changed here
-		// leaves callers elsewhere pointing at the unresolved stub
+		// Forward pass (this file's outgoing references) plus the
+		// reverse pass binding callers in OTHER files that reference a
+		// symbol (re)defined here — a symbol newly defined or changed
+		// here leaves callers elsewhere pointing at the unresolved stub
 		// restubIncomingRefs left when the prior concrete node was
 		// evicted. Scoped to this file's names — not a whole-graph
-		// ResolveAll.
-		idx.resolver.ResolveIncomingForFile(graphPath)
+		// ResolveAll — and run as one combined pass so the resolver's
+		// per-pass indexes are built once per save, not twice.
+		idx.resolver.ResolveFileAndIncoming(graphPath)
 		// CPG-lite dataflow placeholders for this file: inter-
 		// procedural callees may have just been lifted by
 		// ResolveFile, so re-run the dataflow materialisation pass

@@ -124,6 +124,90 @@ func TestGitWatcher_BranchSwitchReconciles(t *testing.T) {
 		"after checkout feature, Beta must be indexed")
 }
 
+// TestGitWatcher_ReconcileSingleFlight proves overlapping reconciles
+// coalesce instead of running concurrently from the same stale base:
+// a reconcile arriving while one is in flight only marks a rerun, and
+// the in-flight run's completion replays exactly one follow-up that
+// converges on the latest HEAD (and no-ops when HEAD didn't move).
+func TestGitWatcher_ReconcileSingleFlight(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git binary not available in PATH")
+	}
+
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init", "-q", "-b", "main")
+	runGit(t, repoDir, "config", "user.email", "test@example.com")
+	runGit(t, repoDir, "config", "user.name", "Test")
+	runGit(t, repoDir, "config", "commit.gpgsign", "false")
+
+	writeFile(t, filepath.Join(repoDir, "a.go"), "package main\nfunc Alpha() {}\n")
+	runGit(t, repoDir, "add", ".")
+	runGit(t, repoDir, "commit", "-q", "-m", "main: Alpha")
+
+	g := graph.New()
+	idx := New(g, newTestRegistry(), config.IndexConfig{Workers: 1}, zap.NewNop())
+	idx.search = search.NewBM25()
+	idx.SetRootPath(repoDir)
+	_, err := idx.IndexCtx(testCtx(), repoDir)
+	require.NoError(t, err)
+
+	gw, err := NewGitWatcher(repoDir, idx, zap.NewNop())
+	require.NoError(t, err)
+	gw.lastSHA, err = gw.currentSHA(testCtx())
+	require.NoError(t, err)
+
+	drained := make(chan int, 2)
+	gw.drained = func(n int) { drained <- n }
+
+	// A reconcile arriving while one is in flight must coalesce: it
+	// leaves the graph and lastSHA untouched and records the rerun.
+	gw.mu.Lock()
+	gw.reconciling = true
+	gw.mu.Unlock()
+	gw.reconcile("overlapping")
+	gw.mu.Lock()
+	require.True(t, gw.rerun, "overlapping reconcile must coalesce into a rerun")
+	gw.reconciling = false
+	gw.mu.Unlock()
+	select {
+	case <-drained:
+		t.Fatal("coalesced reconcile must not apply changes")
+	default:
+	}
+
+	// Move HEAD, then run the real reconcile with the rerun flag still
+	// set: it applies the branch switch, and its completion replays
+	// exactly one follow-up that no-ops on the unchanged HEAD.
+	runGit(t, repoDir, "checkout", "-q", "-b", "feature")
+	require.NoError(t, os.Remove(filepath.Join(repoDir, "a.go")))
+	writeFile(t, filepath.Join(repoDir, "b.go"), "package main\nfunc Beta() {}\n")
+	runGit(t, repoDir, "add", "-A")
+	runGit(t, repoDir, "commit", "-q", "-m", "feature: Beta replaces Alpha")
+
+	gw.reconcile("real")
+
+	select {
+	case n := <-drained:
+		require.GreaterOrEqual(t, n, 1, "real reconcile must touch files")
+	case <-time.After(5 * time.Second):
+		t.Fatal("reconcile did not complete")
+	}
+	assert.Empty(t, g.GetFileNodes("a.go"), "Alpha must be evicted")
+	assert.NotEmpty(t, g.GetFileNodes("b.go"), "Beta must be indexed")
+
+	// The replayed follow-up settles without applying anything.
+	require.Eventually(t, func() bool {
+		gw.mu.Lock()
+		defer gw.mu.Unlock()
+		return !gw.reconciling && !gw.rerun
+	}, 5*time.Second, 10*time.Millisecond, "coalesced follow-up must settle")
+	select {
+	case <-drained:
+		t.Fatal("follow-up reconcile on unchanged HEAD must not apply changes")
+	default:
+	}
+}
+
 // TestGitWatcher_NoopWhenHeadUnchanged covers the "ref file touched
 // but commit unchanged" case — e.g., a git gc that packs refs without
 // moving any branch. The watcher should read the current SHA, find

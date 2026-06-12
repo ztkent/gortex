@@ -328,7 +328,7 @@ func routingSkillTaxonomy(name string) (tags []string, category string) {
 	switch topic {
 	case "explore", "onboarding", "cross-repo-usage", "dataflow-trace":
 		category = "navigation"
-	case "impact", "co-change", "architecture-review", "quality-audit", "pr-review", "episode-replay":
+	case "impact", "co-change", "architecture-review", "quality-audit", "pr-review", "pr-review-agent", "episode-replay":
 		category = "analysis"
 	case "debug", "incident-investigation":
 		category = "debugging"

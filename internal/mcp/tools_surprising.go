@@ -54,13 +54,6 @@ func (s *Server) handleGetSurprisingConnections(ctx context.Context, req mcp.Cal
 	}
 	pathPrefix := strings.TrimSpace(req.GetString("path_prefix", ""))
 
-	// Communities resolve cross-community; missing community result
-	// just disables that signal rather than failing the call.
-	var nodeToComm map[string]string
-	if cr := s.getCommunities(); cr != nil {
-		nodeToComm = cr.NodeToComm
-	}
-
 	// Build a fast scoped-node index. We still need ALL kinds here —
 	// edges in the surprise tally can land on any node, not just
 	// function/method. Use scopedNodes' single bulk pull rather than
@@ -68,6 +61,52 @@ func (s *Server) handleGetSurprisingConnections(ctx context.Context, req mcp.Cal
 	scopedSet := make(map[string]*graph.Node, 1024)
 	for _, n := range s.scopedNodes(ctx) {
 		scopedSet[n.ID] = n
+	}
+
+	rows := s.collectSurprisingEdges(ctx, scopedSet, pathPrefix, minScore, hubThreshold, rareKindPct)
+
+	truncated := false
+	if len(rows) > limit {
+		rows = rows[:limit]
+		truncated = true
+	}
+
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
+		"connections": rows,
+		"total":       len(rows),
+		"truncated":   truncated,
+		"thresholds": map[string]any{
+			"limit":         limit,
+			"min_score":     minScore,
+			"hub_threshold": hubThreshold,
+			"rare_kind_pct": rareKindPct,
+		},
+		"signal_weights": surprisingSignalWeights(),
+	})
+}
+
+// collectSurprisingEdges runs the anomaly-mining pass over the scoped
+// node set and returns the scored rows, sorted highest-score-first.
+// It is the shared core behind both the get_surprising_connections
+// tool and the surprising category of suggested_review_questions: the
+// caller passes the scoped node index (a single bulk pull it already
+// holds) plus the tuning thresholds, and gets back every edge whose
+// composite score clears minScore. The caller owns the limit/truncate
+// step — this returns the full sorted set so a downstream consumer can
+// pick its own cap.
+func (s *Server) collectSurprisingEdges(
+	_ context.Context,
+	scopedSet map[string]*graph.Node,
+	pathPrefix string,
+	minScore float64,
+	hubThreshold int,
+	rareKindPct float64,
+) []surprisingEdgeRow {
+	// Communities resolve cross-community; missing community result
+	// just disables that signal rather than failing the call.
+	var nodeToComm map[string]string
+	if cr := s.getCommunities(); cr != nil {
+		nodeToComm = cr.NodeToComm
 	}
 
 	// Kind tally — short-circuit the AllEdges scan when the backend
@@ -164,24 +203,7 @@ func (s *Server) handleGetSurprisingConnections(ctx context.Context, req mcp.Cal
 		return rows[i].To < rows[j].To
 	})
 
-	truncated := false
-	if len(rows) > limit {
-		rows = rows[:limit]
-		truncated = true
-	}
-
-	return s.respondJSONOrTOON(ctx, req, map[string]any{
-		"connections": rows,
-		"total":       len(rows),
-		"truncated":   truncated,
-		"thresholds": map[string]any{
-			"limit":         limit,
-			"min_score":     minScore,
-			"hub_threshold": hubThreshold,
-			"rare_kind_pct": rareKindPct,
-		},
-		"signal_weights": surprisingSignalWeights(),
-	})
+	return rows
 }
 
 // scoreSurprisingEdge fires the five composite signals and returns

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/zzet/gortex/internal/llm"
 )
@@ -57,13 +58,30 @@ type Agent struct {
 	tools    map[string]Tool
 	names    []string       // sorted, stable iteration order
 	specs    []llm.ToolSpec // sorted by name; handed to the provider
+
+	// compactor bounds a long multi-turn conversation by folding older
+	// rounds into a rolling summary. Nil (the default) disables compaction
+	// entirely — Run then behaves exactly as it did before the compactor
+	// existed. Installed via WithCompactor.
+	compactor *RollingCompactor
+
+	// lastUsage is the summed token usage of the most recent Run — the
+	// per-step provider usage accumulated across the tool-calling loop,
+	// plus any tokens the rolling-summary compactor spent. Zero for a
+	// provider that does not report usage. Read via LastUsage.
+	//
+	// usageMu guards lastUsage because the compactor may attribute a
+	// background summarizer's usage from a separate goroutine.
+	usageMu   sync.Mutex
+	lastUsage llm.TokenUsage
 }
 
 // New builds an Agent over a provider and a tool set. The synthetic
 // final_answer tool is appended automatically. Returns an error for a
 // nil provider or a malformed tool (empty name, reserved name, nil
-// Run).
-func New(provider llm.Provider, tools []Tool) (*Agent, error) {
+// Run). Optional AgentOptions (e.g. WithCompactor) tune behaviour; an
+// Agent built with no options behaves exactly as before.
+func New(provider llm.Provider, tools []Tool, opts ...AgentOption) (*Agent, error) {
 	if provider == nil {
 		return nil, errors.New("agent: nil provider")
 	}
@@ -96,21 +114,43 @@ func New(provider llm.Provider, tools []Tool) (*Agent, error) {
 		specs[i] = llm.ToolSpec{Name: n, Description: reg[n].Description}
 	}
 
-	return &Agent{provider: provider, tools: reg, names: names, specs: specs}, nil
+	a := &Agent{provider: provider, tools: reg, names: names, specs: specs}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(a)
+		}
+	}
+	return a, nil
 }
 
 // Run executes the tool-calling loop until the model invokes
 // final_answer or maxSteps is reached. The transcript captures every
 // call/result/final step in order.
 func (a *Agent) Run(ctx context.Context, systemExtras, userQuestion string, maxSteps int) (answer string, transcript []Step, err error) {
+	// runCtx is the parent of any background summarizer the compactor
+	// spawns; the deferred cancel guarantees no summarizer outlives this
+	// Run (and a summary that lands after cancellation is dropped — see
+	// RollingCompactor.maybeCompact). The subsequent wait drains the
+	// goroutine so neither it nor its usage attribution leaks past Run.
+	runCtx, cancel := context.WithCancel(ctx)
+	defer func() {
+		cancel()
+		if a.compactor != nil {
+			a.compactor.wait()
+		}
+	}()
+
 	conv := []llm.Message{
 		{Role: llm.RoleSystem, Content: a.systemPrompt(systemExtras)},
 		{Role: llm.RoleUser, Content: userQuestion},
 	}
 	seen := map[string]struct{}{}
+	a.usageMu.Lock()
+	a.lastUsage = llm.TokenUsage{}
+	a.usageMu.Unlock()
 
 	for step := range maxSteps {
-		resp, gerr := a.provider.Complete(ctx, llm.CompletionRequest{
+		resp, gerr := a.provider.Complete(runCtx, llm.CompletionRequest{
 			Messages:  conv,
 			MaxTokens: stepMaxTokens,
 			Shape:     llm.ShapeToolCall,
@@ -119,6 +159,10 @@ func (a *Agent) Run(ctx context.Context, systemExtras, userQuestion string, maxS
 		if gerr != nil {
 			return "", transcript, fmt.Errorf("step %d generate: %w", step, gerr)
 		}
+		a.usageMu.Lock()
+		a.lastUsage.Add(resp.Usage)
+		stepUsage := a.lastUsage
+		a.usageMu.Unlock()
 
 		raw := strings.TrimSpace(resp.Text)
 		call, perr := parseToolCall(raw)
@@ -155,6 +199,7 @@ func (a *Agent) Run(ctx context.Context, systemExtras, userQuestion string, maxS
 				llm.Message{Role: llm.RoleAssistant, Content: raw},
 				llm.Message{Role: llm.RoleTool, Content: loopResult, ToolName: call.Tool},
 			)
+			conv = a.compactConversation(runCtx, conv, stepUsage)
 			continue
 		}
 		seen[key] = struct{}{}
@@ -169,8 +214,36 @@ func (a *Agent) Run(ctx context.Context, systemExtras, userQuestion string, maxS
 			llm.Message{Role: llm.RoleAssistant, Content: raw},
 			llm.Message{Role: llm.RoleTool, Content: result, ToolName: call.Tool},
 		)
+		conv = a.compactConversation(runCtx, conv, stepUsage)
 	}
 	return "", transcript, fmt.Errorf("agent: exceeded %d steps without final_answer", maxSteps)
+}
+
+// compactConversation runs the rolling-summary compactor over conv after a
+// round has been appended. It is a no-op when no compactor is installed (or
+// the conversation is still under the high-water mark), so short loops are
+// untouched. The compactor attributes any summarizer tokens it spends into
+// a.lastUsage under a.usageMu.
+func (a *Agent) compactConversation(runCtx context.Context, conv []llm.Message, stepUsage llm.TokenUsage) []llm.Message {
+	if a.compactor == nil || !a.compactor.enabled() {
+		return conv
+	}
+	size := estimateConvTokens(conv, stepUsage)
+	compacted, _ := a.compactor.maybeCompact(runCtx, conv, size, &a.lastUsage, &a.usageMu)
+	return compacted
+}
+
+// LastUsage returns the token usage summed across the steps of the most
+// recent Run, including any tokens the rolling-summary compactor spent.
+// Zero before the first Run, or when the provider does not report usage
+// (subprocess / not-yet-decoded HTTP providers).
+func (a *Agent) LastUsage() llm.TokenUsage {
+	if a == nil {
+		return llm.TokenUsage{}
+	}
+	a.usageMu.Lock()
+	defer a.usageMu.Unlock()
+	return a.lastUsage
 }
 
 // systemPrompt assembles the agent's system message: the tool-call

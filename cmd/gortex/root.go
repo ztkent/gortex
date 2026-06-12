@@ -85,12 +85,13 @@ func assignCommandGroups() {
 		&cobra.Group{ID: "setup", Title: "Setup & configuration:"},
 	)
 	groupOf := map[string]string{
-		"mcp": "serve",
+		"mcp":    "serve",
 		"daemon": "engine", "track": "engine", "untrack": "engine",
 		"repos": "engine", "status": "engine", "proxy": "engine", "workspace": "engine",
 		"query": "query", "context": "query", "audit": "query", "wiki": "query",
-		"docs": "query", "export": "query", "wakeup": "query",
-		"index": "index", "enrich": "index", "db": "index",
+		"docs": "query", "export": "query", "wakeup": "query", "prs": "query",
+		"review": "query",
+		"index":  "index", "enrich": "index", "db": "index",
 		"init": "setup", "install": "setup", "uninstall": "setup", "agents": "setup",
 		"hook": "setup", "githook": "setup", "config": "setup",
 		"provider": "setup", "plugin": "setup", "cloud": "setup",

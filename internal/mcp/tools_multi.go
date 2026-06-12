@@ -277,7 +277,7 @@ func (s *Server) buildActiveProjectPayload(ctx context.Context) map[string]any {
 // resolveRepoPrefixOrReconcile when drift between persisted config and
 // in-memory state could produce a false miss.
 func (s *Server) resolveRepoPrefix(pathOrPrefix string) string {
-	if s.multiIndexer == nil {
+	if s.multiIndexer == nil || pathOrPrefix == "" {
 		return ""
 	}
 
@@ -296,6 +296,56 @@ func (s *Server) resolveRepoPrefix(pathOrPrefix string) string {
 	}
 
 	return ""
+}
+
+// diffJoinPrefix resolves the graph repo prefix used to join repo-relative
+// diff / forge file paths to indexed nodes: multi-repo daemons key file
+// paths as "<prefix>/<rel>" while git and forge APIs emit repo-relative
+// paths. repoRoot is the already-resolved working-tree root. Returns "" in
+// single-repo / unprefixed mode, where the raw lookup already matches.
+func (s *Server) diffJoinPrefix(repoRoot string) string {
+	if repoRoot == "" {
+		return ""
+	}
+	if p := s.resolveRepoPrefix(repoRoot); p != "" {
+		return p
+	}
+	if s.indexer != nil && s.indexer.RootPath() == repoRoot {
+		return s.indexer.RepoPrefix()
+	}
+	return ""
+}
+
+// diffRepoScope resolves the working-tree root and graph repo prefix a
+// diff-driven handler operates on. An explicit selector (a repo prefix or a
+// filesystem path — the CLI defaults to the caller's working directory) is
+// normalized and honoured exclusively: when it names nothing tracked the
+// result is empty so the caller errors instead of silently diffing another
+// repo. With no selector the lone tracked repo wins, then the session's
+// cwd-bound repo (clients dial the daemon with their working directory).
+// Both empty means no resolvable working tree.
+func (s *Server) diffRepoScope(ctx context.Context, repo string) (repoRoot, repoPrefix string) {
+	if repo != "" {
+		if p := s.resolveRepoPrefix(repo); p != "" {
+			repo = p
+		}
+		root := pickRepoRoot(s.collectRepoRoots(repo), repo)
+		if root == "" {
+			return "", ""
+		}
+		return root, s.diffJoinPrefix(root)
+	}
+	if root := pickRepoRoot(s.collectRepoRoots(""), ""); root != "" {
+		return root, s.diffJoinPrefix(root)
+	}
+	if cwd := SessionCWDFromContext(ctx); cwd != "" && s.multiIndexer != nil {
+		if _, _, prefix, ok := s.multiIndexer.ScopeForCWD(cwd); ok && prefix != "" {
+			if root, ok := s.multiIndexer.RepoRoot(prefix); ok && root != "" {
+				return root, prefix
+			}
+		}
+	}
+	return "", ""
 }
 
 // resolveRepoPrefixOrReconcile resolves a path-or-prefix to a repo prefix

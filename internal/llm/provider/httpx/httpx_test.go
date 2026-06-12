@@ -83,6 +83,50 @@ func TestComplete_TerminalErrorIsNotRetried(t *testing.T) {
 	}
 }
 
+func TestCompleteWithUsage_CarriesUsageFromWinningAttempt(t *testing.T) {
+	want := Usage{InputTokens: 100, OutputTokens: 20, CacheReadTokens: 40, CacheWriteTokens: 5}
+	text, usage, err := CompleteWithUsage(context.Background(), "test", func(context.Context) Result {
+		return Result{Text: "answer", Usage: want}
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if text != "answer" {
+		t.Errorf("text=%q want %q", text, "answer")
+	}
+	if usage != want {
+		t.Errorf("usage=%+v want %+v", usage, want)
+	}
+}
+
+func TestComplete_DropsUsageButStaysCompatible(t *testing.T) {
+	// The backward-compatible Complete wrapper returns only (string,
+	// error) — existing callers compile unchanged — and silently drops
+	// the per-attempt usage.
+	text, err := Complete(context.Background(), "test", func(context.Context) Result {
+		return Result{Text: "answer", Usage: Usage{InputTokens: 100, OutputTokens: 20}}
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if text != "answer" {
+		t.Errorf("text=%q want %q", text, "answer")
+	}
+}
+
+func TestCompleteWithUsage_TerminalErrorYieldsZeroUsage(t *testing.T) {
+	sentinel := errors.New("boom")
+	_, usage, err := CompleteWithUsage(context.Background(), "test", func(context.Context) Result {
+		return Result{Err: sentinel}
+	})
+	if !errors.Is(err, sentinel) {
+		t.Errorf("error=%v want sentinel", err)
+	}
+	if usage != (Usage{}) {
+		t.Errorf("usage=%+v want zero on error", usage)
+	}
+}
+
 func TestComplete_StopsOnCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var calls int

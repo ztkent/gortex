@@ -152,7 +152,17 @@ type apiResponse struct {
 	Output struct {
 		Message apiMessage `json:"message"`
 	} `json:"output"`
-	Message string `json:"message"` // AWS error body shape
+	Usage   *apiUsage `json:"usage"`
+	Message string    `json:"message"` // AWS error body shape
+}
+
+// apiUsage is the Converse API token accounting. cacheReadInputTokens /
+// cacheWriteInputTokens are present only for models with prompt caching.
+type apiUsage struct {
+	InputTokens           int `json:"inputTokens"`
+	OutputTokens          int `json:"outputTokens"`
+	CacheReadInputTokens  int `json:"cacheReadInputTokens"`
+	CacheWriteInputTokens int `json:"cacheWriteInputTokens"`
 }
 
 // Complete implements llm.Provider.
@@ -186,16 +196,27 @@ func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (llm
 		return llm.CompletionResponse{}, fmt.Errorf("bedrock: marshal request: %w", err)
 	}
 
-	// The HTTP round-trip and parse run inside httpx.Complete, which
-	// retries an HTTP-200-but-empty response (a transient upstream
-	// truncation) with bounded backoff.
-	text, err := httpx.Complete(ctx, "bedrock", func(ctx context.Context) httpx.Result {
+	// The HTTP round-trip and parse run inside httpx.CompleteWithUsage,
+	// which retries an HTTP-200-but-empty response (a transient upstream
+	// truncation) with bounded backoff and carries back the decoded
+	// token usage from the winning attempt.
+	text, usage, err := httpx.CompleteWithUsage(ctx, "bedrock", func(ctx context.Context) httpx.Result {
 		return p.attempt(ctx, raw, structured)
 	})
 	if err != nil {
 		return llm.CompletionResponse{}, err
 	}
-	return llm.CompletionResponse{Text: text}, nil
+	return llm.CompletionResponse{Text: text, Usage: toTokenUsage(usage)}, nil
+}
+
+// toTokenUsage maps the provider-neutral httpx.Usage onto llm.TokenUsage.
+func toTokenUsage(u httpx.Usage) llm.TokenUsage {
+	return llm.TokenUsage{
+		InputTokens:      u.InputTokens,
+		OutputTokens:     u.OutputTokens,
+		CacheReadTokens:  u.CacheReadTokens,
+		CacheWriteTokens: u.CacheWriteTokens,
+	}
 }
 
 // attempt issues one Converse request and extracts the reply. The
@@ -252,7 +273,21 @@ func (p *Provider) attempt(ctx context.Context, raw []byte, structured bool) htt
 		// block or an empty body — is a hollow response: retry it.
 		return httpx.Result{Hollow: true}
 	}
-	return httpx.Result{Text: text}
+	return httpx.Result{Text: text, Usage: usageFrom(parsed.Usage)}
+}
+
+// usageFrom maps the Converse usage block onto httpx.Usage. A nil block
+// (provider omitted it) yields zero usage.
+func usageFrom(u *apiUsage) httpx.Usage {
+	if u == nil {
+		return httpx.Usage{}
+	}
+	return httpx.Usage{
+		InputTokens:      u.InputTokens,
+		OutputTokens:     u.OutputTokens,
+		CacheReadTokens:  u.CacheReadInputTokens,
+		CacheWriteTokens: u.CacheWriteInputTokens,
+	}
 }
 
 // splitMessages pulls every RoleSystem message into the top-level

@@ -38,6 +38,7 @@ import (
 	"time"
 
 	"github.com/zzet/gortex/internal/blame"
+	"github.com/zzet/gortex/internal/gitcmd"
 	"github.com/zzet/gortex/internal/graph"
 )
 
@@ -205,9 +206,8 @@ type commitRecord struct {
 // Ordered newest → oldest. Empty slice when the file has no history
 // on that branch (untracked, or the rev predates the file).
 func fileCommits(repoRoot, branch, relPath string) ([]commitRecord, error) {
-	cmd := exec.Command("git", "-C", repoRoot, "log", branch,
+	out, err := gitcmd.Run(context.Background(), repoRoot, "log", branch,
 		"--no-merges", "--follow", "--format=%H|%ct|%ae", "--", relPath)
-	out, err := cmd.Output()
 	if err != nil {
 		return nil, err
 	}
@@ -400,12 +400,11 @@ var fileExists = func(path string) bool {
 // only for the one-shot rev-parse; full enrichment calls go through
 // fileCommits / blame.RunAt directly.
 func runGit(repoRoot string, args ...string) string {
-	cmd := exec.Command("git", append([]string{"-C", repoRoot}, args...)...)
-	out, err := cmd.Output()
+	out, err := gitcmd.Output(context.Background(), repoRoot, args...)
 	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(string(out))
+	return out
 }
 
 // DefaultBranch returns the repository's default branch as a
@@ -419,12 +418,11 @@ func runGit(repoRoot string, args ...string) string {
 // the CLI does without duplicating the probe order across packages.
 func DefaultBranch(repoRoot string) string {
 	probe := func(args ...string) (string, bool) {
-		cmd := exec.Command("git", append([]string{"-C", repoRoot}, args...)...)
-		out, err := cmd.Output()
+		out, err := gitcmd.Output(context.Background(), repoRoot, args...)
 		if err != nil {
 			return "", false
 		}
-		return strings.TrimSpace(string(out)), true
+		return out, true
 	}
 	if ref, ok := probe("symbolic-ref", "--short", "refs/remotes/origin/HEAD"); ok && ref != "" {
 		return ref

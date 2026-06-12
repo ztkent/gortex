@@ -8,6 +8,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/zzet/gortex/internal/llm"
+	"github.com/zzet/gortex/internal/llm/conversationlog"
 )
 
 // registerLLMTools registers the `ask` MCP tool when an LLM service
@@ -48,6 +49,18 @@ func (s *Server) handleAsk(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 	ref, _ := args["ref"].(string)
 	chain, _ := boolArg(args, "chain")
 	includeTranscript, _ := boolArg(args, "include_transcript")
+
+	// Label the turn for the conversation-log sink (no-op unless the sink
+	// is opted in): the session id + scoped repo + the "ask" phase.
+	sessionRepo := repo
+	if sessionRepo == "" {
+		sessionRepo, _ = s.sessionLocality(ctx)
+	}
+	ctx = conversationlog.WithMeta(ctx, conversationlog.Meta{
+		Session: SessionIDFromContext(ctx),
+		Repo:    sessionRepo,
+		Phase:   "ask",
+	})
 
 	answer, err := s.llmService.RunAgent(ctx, llm.RunAgentOptions{
 		Question:          question,

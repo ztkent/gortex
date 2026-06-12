@@ -73,7 +73,14 @@ func runDaemonInstallService(cmd *cobra.Command, _ []string) error {
 	// doesn't fight with it over the socket.
 	if daemon.IsRunning() {
 		_, _ = fmt.Fprintln(w, "[gortex daemon] stopping existing daemon before install")
-		if err := runDaemonStop(cmd, nil); err != nil {
+		// This is an internal lifecycle bounce — the supervisor starts the
+		// daemon right after — not a user "stay down". Suppress the stop-intent
+		// marker (as `daemon restart` does) so a failed install can't leave
+		// autostart permanently disabled with no daemon and no service.
+		daemonRestartActive = true
+		err := runDaemonStop(cmd, nil)
+		daemonRestartActive = false
+		if err != nil {
 			return fmt.Errorf("stop existing daemon: %w", err)
 		}
 	}
@@ -119,8 +126,11 @@ func runDaemonServiceStatus(cmd *cobra.Command, _ []string) error {
 
 // --- launchd (macOS) ------------------------------------------------------
 
-// launchdPlistTemplate renders the LaunchAgent plist. KeepAlive ensures
-// crashes auto-restart; RunAtLoad starts on login.
+// launchdPlistTemplate renders the LaunchAgent plist. KeepAlive uses the
+// SuccessfulExit=false policy so the agent is restarted on a crash but NOT on a
+// clean exit — the launchd analogue of systemd's Restart=on-failure, so an
+// explicit `gortex daemon stop` (which exits 0) stays down instead of being
+// resurrected by KeepAlive. RunAtLoad starts on login.
 //
 // StandardOutPath / StandardErrorPath redirect logs into the same file
 // `gortex daemon logs` tails, so users don't need to remember two paths.
@@ -139,7 +149,10 @@ const launchdPlistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
-    <true/>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
     <key>StandardOutPath</key>
     <string>{{.LogPath}}</string>
     <key>StandardErrorPath</key>

@@ -345,19 +345,36 @@ func subGraphToTOON(sg *query.SubGraph) (*mcp.CallToolResult, error) {
 // narrow. With no explicit narrowing the allow-set is every repo in
 // the session's workspace — not "all repos".
 //
+// gitDiffScopes are the diff-selection values the review-family tools
+// accept in their `scope` argument; they share the argument name with the
+// saved-scope filter and are reserved (never saved-scope names).
+var gitDiffScopes = map[string]bool{"unstaged": true, "staged": true, "all": true, "compare": true}
+
 // For an unbound session (embedded stdio / `gortex server
 // --workspace` / legacy) it falls back to resolveRepoFilterArgs with
 // the active-project default applied. A nil result there still means
 // "no filter — all repos".
 func (s *Server) resolveRepoFilter(ctx context.Context, req mcp.CallToolRequest) (map[string]bool, error) {
 	repo := req.GetString("repo", "")
+	// The selector may be a filesystem path (the CLI defaults to the
+	// caller's working directory) — normalize to the tracked prefix so the
+	// filter matches what the workspace knows the repo as.
+	if p := s.resolveRepoPrefix(repo); p != "" {
+		repo = p
+	}
 	project := req.GetString("project", "")
 	ref := req.GetString("ref", "")
 	workspaceArg := req.GetString("workspace", "")
 
 	// A named saved-scope supplies the repo allow-set when no explicit
-	// repo/project/ref narrows the call (see scopes.go).
+	// repo/project/ref narrows the call (see scopes.go). The review-family
+	// tools overload `scope` for git diff selection — those reserved values
+	// are never saved-scope names, otherwise every repo-less review call
+	// would fail with "unknown scope".
 	scopeArg := req.GetString("scope", "")
+	if gitDiffScopes[scopeArg] {
+		scopeArg = ""
+	}
 	var scopeRepos map[string]bool
 	if scopeArg != "" && repo == "" && project == "" && ref == "" {
 		sc, ok := s.lookupScope(scopeArg)
@@ -1855,19 +1872,38 @@ func (s *Server) handleGetFileSummary(ctx context.Context, req mcp.CallToolReque
 		return mcp.NewToolResultError("no symbols found for file: " + fp), nil
 	}
 
-	if isCompact(req) {
-		return mcp.NewToolResultText(compactSubGraph(sg)), nil
-	}
-
-	// ETag conditional fetch. Use the structural SubGraph hash —
-	// json.Marshal'ing the whole SubGraph + Meta on every call was the
-	// dominant cost on large files (~2 ms / call on a 500-symbol file).
+	// ETag conditional fetch — checked before any savings accounting so
+	// a not_modified turnaround books nothing (a polling client would
+	// otherwise mint fake savings on every poll). Use the structural
+	// SubGraph hash — json.Marshal'ing the whole SubGraph + Meta on
+	// every call was the dominant cost on large files (~2 ms / call on
+	// a 500-symbol file).
 	etag := etagSubGraph(sg)
 	if ifNoneMatch := req.GetString("if_none_match", ""); ifNoneMatch != "" && ifNoneMatch == etag {
 		return notModifiedResult(etag), nil
 	}
 
+	// Server-side accounting only — a file summary stands in for
+	// reading the whole file. The payload sample tracks the format
+	// actually returned (the compact text for compact/gcx, the
+	// marshaled result for json/toon) so `returned` reflects what was
+	// shipped.
+	summaryLang := ""
+	for _, n := range sg.Nodes {
+		if n != nil && n.Language != "" {
+			summaryLang = n.Language
+			break
+		}
+	}
+
+	if isCompact(req) {
+		payload := compactSubGraph(sg)
+		s.recordFileBaselineSavings(ctx, "get_file_summary", fp, summaryLang, payload)
+		return mcp.NewToolResultText(payload), nil
+	}
+
 	if s.isGCX(ctx, req) {
+		s.recordFileBaselineSavings(ctx, "get_file_summary", fp, summaryLang, compactSubGraph(sg))
 		return s.gcxResponseWithBudget(req)(encodeFileSummary(sg, etag))
 	}
 
@@ -1879,6 +1915,9 @@ func (s *Server) handleGetFileSummary(ctx context.Context, req mcp.CallToolReque
 		"total_edges": len(sg.Edges),
 		"truncated":   sg.Truncated,
 		"etag":        etag,
+	}
+	if payload, merr := json.Marshal(result); merr == nil {
+		s.recordFileBaselineSavings(ctx, "get_file_summary", fp, summaryLang, string(payload))
 	}
 	if s.isTOON(ctx, req) {
 		return returnTOON(result)

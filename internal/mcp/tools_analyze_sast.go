@@ -9,6 +9,7 @@ import (
 	mcp "github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/zzet/gortex/internal/astquery"
+	"github.com/zzet/gortex/internal/review"
 )
 
 // ---------------------------------------------------------------------------
@@ -124,6 +125,12 @@ func (s *Server) handleAnalyzeSAST(ctx context.Context, req mcp.CallToolRequest,
 	cweBuckets := make(map[string]*sastCWEBucket, len(bundle))
 	var errsAcc []string
 
+	// detMeta carries per-detector taxonomy (category / CWE / OWASP /
+	// tags) keyed by name so row + rollup metadata survives the
+	// graph-grounding post-pass, which works on the flat Match list.
+	detMeta := make(map[string]*astquery.Detector, len(bundle))
+	var collected []astquery.Match
+
 	for _, d := range bundle {
 		if len(detectorFilter) > 0 {
 			if _, ok := detectorFilter[d.Name]; !ok {
@@ -148,6 +155,8 @@ func (s *Server) handleAnalyzeSAST(ctx context.Context, req mcp.CallToolRequest,
 			}
 		}
 
+		detMeta[d.Name] = d
+
 		opts := astquery.Options{
 			Detector:     d.Name,
 			Targets:      targets,
@@ -168,10 +177,11 @@ func (s *Server) handleAnalyzeSAST(ctx context.Context, req mcp.CallToolRequest,
 		}
 		errsAcc = append(errsAcc, res.Errors...)
 
-		entry := summary[d.Name]
-		if entry == nil {
-			entry = &sastSummary{Detector: d.Name, Severity: d.Severity, CWE: d.CWE}
-			summary[d.Name] = entry
+		// Ensure a summary entry exists even when grounding later
+		// removes every row for this detector (Count stays 0 and the
+		// entry is dropped in the rollup pass).
+		if summary[d.Name] == nil {
+			summary[d.Name] = &sastSummary{Detector: d.Name, Severity: d.Severity, CWE: d.CWE}
 		}
 
 		for _, m := range res.Matches {
@@ -185,28 +195,51 @@ func (s *Server) handleAnalyzeSAST(ctx context.Context, req mcp.CallToolRequest,
 					continue
 				}
 			}
-			rows = append(rows, sastRow{
-				Detector: m.Detector,
-				Severity: m.Severity,
-				Category: d.Category,
-				CWE:      d.CWE,
-				OWASP:    d.OWASP,
-				Tags:     append([]string(nil), d.Tags...),
-				Language: m.Language,
-				File:     m.File,
-				Line:     m.Line,
-				Symbol:   m.SymbolID,
-				Text:     m.Text,
-			})
-			entry.Count++
-			if d.CWE != "" {
-				b := cweBuckets[d.CWE]
-				if b == nil {
-					b = &sastCWEBucket{CWE: d.CWE}
-					cweBuckets[d.CWE] = b
-				}
-				b.Count++
+			collected = append(collected, m)
+		}
+	}
+
+	// Graph-grounding post-pass — the load-bearing FP-reduction step.
+	// The review detectors emit undecidable-from-AST-alone rows (N+1
+	// query-in-loop, check-then-act) optimistically; here, one layer
+	// up from the engine where s.graph is reachable, we drop the rows
+	// the resolved call / loop metadata refutes. Only the review
+	// bundle is grounded; sast / hygiene / domain pass through.
+	if kind == "review" {
+		collected = review.GroundReviewMatches(s.graph, collected)
+	}
+
+	for _, m := range collected {
+		d := detMeta[m.Detector]
+		if d == nil {
+			continue
+		}
+		entry := summary[d.Name]
+		if entry == nil {
+			entry = &sastSummary{Detector: d.Name, Severity: d.Severity, CWE: d.CWE}
+			summary[d.Name] = entry
+		}
+		rows = append(rows, sastRow{
+			Detector: m.Detector,
+			Severity: m.Severity,
+			Category: d.Category,
+			CWE:      d.CWE,
+			OWASP:    d.OWASP,
+			Tags:     append([]string(nil), d.Tags...),
+			Language: m.Language,
+			File:     m.File,
+			Line:     m.Line,
+			Symbol:   m.SymbolID,
+			Text:     m.Text,
+		})
+		entry.Count++
+		if d.CWE != "" {
+			b := cweBuckets[d.CWE]
+			if b == nil {
+				b = &sastCWEBucket{CWE: d.CWE}
+				cweBuckets[d.CWE] = b
 			}
+			b.Count++
 		}
 	}
 

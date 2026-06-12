@@ -241,7 +241,7 @@ On macOS the unit lands at `~/Library/LaunchAgents/com.zzet.gortex.plist`; on Li
 - Every tracked repo gets its own fsnotify watcher so edits on disk flow into the graph live; no manual reload needed. `gortex track` attaches a watcher as part of the track operation; `gortex untrack` detaches it before evicting nodes.
 - Graph state is snapshotted to `~/.gortex/cache/daemon.gob.gz` on shutdown and every 10 minutes. Daemon restarts load it back and re-index only changed files.
 - Opening Claude Code in an untracked directory returns a structured `repo_not_tracked` error on every tool call. The agent surfaces it; you run `gortex track .` to include it.
-- Per-session state is isolated by a handshake-assigned session ID — two Claude Code windows see their own recent-activity and token-savings counters, not a merged view. Cumulative savings in `~/.gortex/cache/savings.json` are still shared.
+- Per-session state is isolated by a handshake-assigned session ID — two Claude Code windows see their own recent-activity and token-savings counters, not a merged view. Cumulative savings in the sidecar ledger (`~/.gortex/sidecar.sqlite`) are still shared.
 
 ### Fallback rules
 

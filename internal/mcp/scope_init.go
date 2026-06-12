@@ -101,6 +101,7 @@ var defaultToolScopes = map[string]ToolScope{
 	"verify_change":         ScopeRepo,
 	"detect_changes":        ScopeRepo,
 	"diff_context":          ScopeRepo,
+	"sibling_diff_context":  ScopeRepo,
 	"get_edit_plan":         ScopeRepo,
 	"get_test_targets":      ScopeRepo,
 	"check_guards":          ScopeRepo,

@@ -7,10 +7,10 @@
 //
 // gain vs savings:
 //   - savings   — rear-looking: what HAPPENED across past MCP calls
-//                 (your actual cumulative store + JSONL event log)
+//     (your actual cumulative store + JSONL event log)
 //   - gain      — forward-looking: what gortex SAVES on a typical
-//                 call (benchmark-derived, works on fresh installs
-//                 with no history)
+//     call (benchmark-derived, works on fresh installs
+//     with no history)
 package main
 
 import (
@@ -25,6 +25,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/zzet/gortex/internal/persistence"
 	"github.com/zzet/gortex/internal/savings"
 )
 
@@ -50,8 +51,8 @@ Default behavior:
   1. Find the most recent gortex bench tokens output (auto-discovery
      under bench/results/, then a transparent re-run when none).
   2. Render a USD-per-model card scaled to --responses-per-day.
-  3. Append a short "Your history" section from ~/.gortex/cache/savings.json
-     when --since's window has any tracked calls.
+  3. Append a short "Your history" section from the savings ledger
+     (~/.gortex/sidecar.sqlite) when --since's window has any tracked calls.
 
 Flags:
   --bench-result PATH     specific bench tokens JSON to use (skip discovery)
@@ -60,7 +61,7 @@ Flags:
   --since DURATION        history window (e.g. 24h, 7d; default 7d)
   --json                  emit machine-readable JSON
   --no-history            skip the cumulative-history section
-  --cache-dir DIR         override savings cache (savings.json lives here)`,
+  --cache-dir DIR         override the ledger directory (its sidecar.sqlite)`,
 	RunE: runGain,
 }
 
@@ -71,7 +72,7 @@ func init() {
 	gainCmd.Flags().DurationVar(&gainSince, "since", 7*24*time.Hour, "history window for the cumulative-savings section (e.g. 24h, 7d)")
 	gainCmd.Flags().BoolVar(&gainJSON, "json", false, "emit machine-readable JSON")
 	gainCmd.Flags().BoolVar(&gainNoHistory, "no-history", false, "skip the cumulative-history section")
-	gainCmd.Flags().StringVar(&gainCacheDir, "cache-dir", "", "override graph cache directory (savings.json lives here)")
+	gainCmd.Flags().StringVar(&gainCacheDir, "cache-dir", "", "override the ledger directory (its sidecar.sqlite holds the savings ledger)")
 	rootCmd.AddCommand(gainCmd)
 }
 
@@ -302,12 +303,12 @@ func renderGainProjection(w interface{ Write([]byte) (int, error) }, rows []toke
 // constrained to the --since window. Zero-population when no calls
 // fell inside the window.
 type gainHistory struct {
-	Path       string
-	Since      time.Duration
-	Calls      int64
-	Saved      int64
-	Returned   int64
-	Costs      map[string]float64
+	Path     string
+	Since    time.Duration
+	Calls    int64
+	Saved    int64
+	Returned int64
+	Costs    map[string]float64
 }
 
 func (h *gainHistory) toJSON() map[string]any {
@@ -321,25 +322,32 @@ func (h *gainHistory) toJSON() map[string]any {
 	}
 }
 
-// loadHistory loads the cumulative savings store, restricted to the
-// since-window via the JSONL event log. Returns an error only on
-// hard I/O failures; missing files / empty stores produce a populated
-// gainHistory with Calls=0 so the caller can decide whether to render.
+// loadHistory loads the cumulative savings ledger, restricted to the
+// since-window via the event history. Returns an error only on hard
+// I/O failures; an empty ledger produces a populated gainHistory with
+// Calls=0 so the caller can decide whether to render.
 func loadHistory(cacheDir string, since time.Duration) (*gainHistory, error) {
-	path := savings.DefaultPath()
+	path := savings.DefaultDBPath()
 	if cacheDir != "" {
-		path = filepath.Join(cacheDir, "savings.json")
+		path = persistence.DefaultSidecarPath(cacheDir)
 	}
 	store, err := savings.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	snap := store.Snapshot()
-	eventsPath := savings.EventsPathFor(path)
+	// Same rule as `gortex savings`: the legacy import only runs against
+	// the default location — a --cache-dir read must not rename files.
+	if cacheDir == "" {
+		_ = store.ImportLegacy(savings.DefaultPath())
+	}
+	snap, serr := store.Snapshot()
+	if serr != nil {
+		fmt.Fprintf(os.Stderr, "[gortex gain] savings totals read failed: %v\n", serr)
+	}
 
 	if since <= 0 {
 		// --since 0 → entire-history view; just use the cumulative
-		// totals. No JSONL scan needed.
+		// totals. No event scan needed.
 		return &gainHistory{
 			Path:     path,
 			Since:    since,
@@ -351,7 +359,7 @@ func loadHistory(cacheDir string, since time.Duration) (*gainHistory, error) {
 	}
 
 	cutoff := time.Now().UTC().Add(-since)
-	events, err := savings.LoadEvents(eventsPath, cutoff)
+	events, err := store.EventsSince(cutoff)
 	if err != nil {
 		return nil, err
 	}

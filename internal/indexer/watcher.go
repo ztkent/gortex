@@ -812,9 +812,6 @@ func (w *Watcher) patchGraph(path string, kind ChangeKind) {
 	start := time.Now()
 	var nodesAdded, nodesRemoved, edgesAdded, edgesRemoved int
 
-	nodesBefore := w.indexer.graph.NodeCount()
-	edgesBefore := w.indexer.graph.EdgeCount()
-
 	// Compute the relative path for snapshotting old symbols. RelKey
 	// folds it to the canonical key (slash form, Unicode NFC) so the
 	// GetFileNodes / snapshotSymbols lookups below hit the same graph
@@ -832,15 +829,15 @@ func (w *Watcher) patchGraph(path string, kind ChangeKind) {
 			w.logger.Warn("index file failed", zap.String("path", path), zap.Error(err))
 			return
 		}
-		nodesAdded = w.indexer.graph.NodeCount() - nodesBefore
-		edgesAdded = w.indexer.graph.EdgeCount() - edgesBefore
+		newSymbols := w.indexer.graph.GetFileNodes(relPath)
+		nodesAdded = len(newSymbols)
+		edgesAdded = w.countFileEdges(newSymbols)
 
 		// Notify callback: no old symbols, only new symbols.
 		w.symbolChangeCbMu.RLock()
 		cb := w.symbolChangeCb
 		w.symbolChangeCbMu.RUnlock()
 		if cb != nil {
-			newSymbols := w.indexer.graph.GetFileNodes(relPath)
 			cb(relPath, nil, newSymbols)
 		}
 
@@ -874,20 +871,24 @@ func (w *Watcher) patchGraph(path string, kind ChangeKind) {
 		// count first (still present pre-swap) so removed/added telemetry
 		// stays gross: a rename removes one node and adds one even though
 		// the net node delta is zero.
-		priorFileNodes := len(w.indexer.graph.GetFileNodes(relPath))
+		priorNodes := w.indexer.graph.GetFileNodes(relPath)
+		fileEdgesBefore := w.countFileEdges(priorNodes)
 		if err := w.indexer.IndexFile(path); err != nil {
 			w.logger.Warn("reindex file failed", zap.String("path", path), zap.Error(err))
 			return
 		}
-		nodesRemoved = priorFileNodes
-		nodesAdded = len(w.indexer.graph.GetFileNodes(relPath))
-		// Edge churn as the net graph-wide delta — per-file edge counting
-		// would need a subgraph walk, which this watch-patch telemetry
-		// doesn't need.
-		if edgesAfter := w.indexer.graph.EdgeCount(); edgesAfter >= edgesBefore {
-			edgesAdded = edgesAfter - edgesBefore
+		nodesRemoved = len(priorNodes)
+		newSymbols := w.indexer.graph.GetFileNodes(relPath)
+		nodesAdded = len(newSymbols)
+		// Edge churn scoped to this file's nodes. A graph-wide
+		// EdgeCount delta would also pick up edges landed by whatever
+		// else mutates the graph during this patch (concurrent
+		// reconciles, deferred passes), which made the edges+ figure
+		// meaningless noise on a busy daemon.
+		if fileEdgesAfter := w.countFileEdges(newSymbols); fileEdgesAfter >= fileEdgesBefore {
+			edgesAdded = fileEdgesAfter - fileEdgesBefore
 		} else {
-			edgesRemoved = edgesBefore - edgesAfter
+			edgesRemoved = fileEdgesBefore - fileEdgesAfter
 		}
 
 		// Notify callback with old and new symbols.
@@ -895,7 +896,6 @@ func (w *Watcher) patchGraph(path string, kind ChangeKind) {
 		cb := w.symbolChangeCb
 		w.symbolChangeCbMu.RUnlock()
 		if cb != nil {
-			newSymbols := w.indexer.graph.GetFileNodes(relPath)
 			cb(relPath, oldSymbols, newSymbols)
 		}
 
@@ -963,6 +963,34 @@ func (w *Watcher) patchGraph(path string, kind ChangeKind) {
 		zap.Int("edges-", edgesRemoved),
 		zap.Int64("ms", ev.DurationMs),
 	)
+}
+
+// countFileEdges counts the edges incident to the given file nodes:
+// every out-edge plus the in-edges that originate outside the file
+// (an intra-file edge is already counted on its From side). Batched
+// so a disk backend pays two bulk lookups instead of 2N point queries.
+func (w *Watcher) countFileEdges(nodes []*graph.Node) int {
+	if len(nodes) == 0 {
+		return 0
+	}
+	ids := make([]string, 0, len(nodes))
+	inFile := make(map[string]struct{}, len(nodes))
+	for _, n := range nodes {
+		ids = append(ids, n.ID)
+		inFile[n.ID] = struct{}{}
+	}
+	total := 0
+	for _, edges := range w.indexer.graph.GetOutEdgesByNodeIDs(ids) {
+		total += len(edges)
+	}
+	for _, edges := range w.indexer.graph.GetInEdgesByNodeIDs(ids) {
+		for _, e := range edges {
+			if _, ok := inFile[e.From]; !ok {
+				total++
+			}
+		}
+	}
+	return total
 }
 
 // recordInertModify finishes a ChangeModified patch that the

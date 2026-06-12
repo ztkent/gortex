@@ -1,0 +1,71 @@
+# Per-PR reviewer graph bundle.
+#
+# This is a TEMPLATE, not a live workflow. The `.yml.example` suffix means
+# GitHub Actions does NOT register or run it — copy it to
+# `.github/workflows/gortex-pr-review.yml` in your own repository to enable it.
+#
+# On every pull request it builds gortex, indexes the checked-out repository
+# into the daemon, runs `gortex prs bundle <N>` to produce the reviewer graph
+# bundle (changed files + graph-joined blast radius + PR-risk receipt + ranked
+# reviewers), and uploads that bundle as a CI artifact. A reviewer (or a
+# downstream agent) can then download one self-contained JSON file instead of
+# re-deriving the impact from scratch.
+#
+# The daemon self-serves PR data from the auto-provided `GITHUB_TOKEN` (mapped
+# to `GH_TOKEN`), so no extra secret configuration is needed.
+
+name: Gortex PR review bundle
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  reviewer-bundle:
+    runs-on: ubuntu-latest
+    env:
+      # The daemon resolves a forge token from GH_TOKEN (then GITHUB_TOKEN).
+      # GITHUB_TOKEN is injected automatically for pull_request events.
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Check out the PR head
+        uses: actions/checkout@v4
+        with:
+          # Full history so the graph and any base-diff have real commits.
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build gortex
+        # tree-sitter needs CGO; the ubuntu runner ships a C toolchain.
+        run: go build -o gortex ./cmd/gortex/
+
+      - name: Start the daemon and index the repo
+        run: |
+          ./gortex daemon start --detach
+          ./gortex track .
+          # `index` runs synchronously and prints stats, so the graph is
+          # populated and queryable before the bundle step runs.
+          ./gortex index .
+
+      - name: Build the reviewer bundle
+        run: |
+          ./gortex prs bundle "${{ github.event.pull_request.number }}" \
+            --out "pr-${{ github.event.pull_request.number }}-bundle.json"
+
+      - name: Upload the reviewer bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: gortex-reviewer-bundle-pr-${{ github.event.pull_request.number }}
+          path: pr-${{ github.event.pull_request.number }}-bundle.json
+          if-no-files-found: error
+
+      - name: Stop the daemon
+        if: always()
+        run: ./gortex daemon stop || true

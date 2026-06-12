@@ -1,13 +1,15 @@
 package indexer
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"hash/fnv"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/zzet/gortex/internal/gitcmd"
 )
 
 // WorktreeInfo describes a directory's relationship to its git
@@ -169,12 +171,10 @@ func WorktreeInstanceName(absPath, basePrefix, declaredWorkspace string, asWorkt
 // state. Used to disambiguate a forced worktree instance that declares
 // no workspace of its own.
 func worktreeBranch(absPath string) string {
-	cmd := exec.Command("git", "-C", absPath, "rev-parse", "--abbrev-ref", "HEAD")
-	out, err := cmd.Output()
+	b, err := gitcmd.Output(context.Background(), absPath, "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil {
 		return ""
 	}
-	b := strings.TrimSpace(string(out))
 	if b == "" || b == "HEAD" { // detached HEAD has no branch name
 		return ""
 	}

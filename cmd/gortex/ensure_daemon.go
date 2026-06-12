@@ -34,8 +34,9 @@ const (
 // Injectable seams so the race/fallback/spawn-failure branches are
 // testable without a real daemon.
 var (
-	isDaemonRunning = daemon.IsRunning
-	spawnDaemon     = spawnDetachedDaemon
+	isDaemonRunning  = daemon.IsRunning
+	spawnDaemon      = spawnDetachedDaemon
+	stopIntentActive = daemon.StopIntentActive
 )
 
 // resolveDaemonDecision probes the socket and, when auto-start is enabled
@@ -53,6 +54,13 @@ func ensureDaemonReady(autostart bool) daemonDecision {
 		return daemonReady
 	}
 	if !autostart {
+		return daemonUnavailable
+	}
+	// Respect an explicit `daemon stop`: do not resurrect a daemon the user
+	// deliberately stopped. The mark is cleared by `daemon start` / `restart`.
+	// A suppressed `gortex mcp` falls back to the embedded server, so this
+	// declines the background daemon without breaking the tool surface.
+	if stopIntentActive() {
 		return daemonUnavailable
 	}
 

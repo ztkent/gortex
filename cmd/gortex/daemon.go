@@ -20,6 +20,7 @@ import (
 	"github.com/zzet/gortex/internal/daemon"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/indexer"
+	"github.com/zzet/gortex/internal/llm/conversationlog"
 	"github.com/zzet/gortex/internal/platform"
 	"github.com/zzet/gortex/internal/progress"
 	"github.com/zzet/gortex/internal/server"
@@ -36,15 +37,16 @@ var (
 	// (the function has no *cobra.Command of its own) to decide whether
 	// the flag overrides the `embedding:` config block. Set once in
 	// runDaemonStart before buildDaemonState runs.
-	daemonEmbeddingsChanged   bool
-	daemonStatusWatch         bool
-	daemonStatusInterval      time.Duration
-	daemonHTTPAddr            string
-	daemonHTTPAuthToken       string
-	daemonHTTPCORSOrigin      string
-	daemonBackend             string
-	daemonBackendPath         string
-	daemonBackendBufferPoolMB uint64
+	daemonEmbeddingsChanged     bool
+	daemonStatusWatch           bool
+	daemonStatusInterval        time.Duration
+	daemonHTTPAddr              string
+	daemonHTTPAuthToken         string
+	daemonHTTPCORSOrigin        string
+	daemonHTTPConversationAllow []string
+	daemonBackend               string
+	daemonBackendPath           string
+	daemonBackendBufferPoolMB   uint64
 )
 
 var daemonCmd = &cobra.Command{
@@ -105,6 +107,8 @@ func init() {
 		"bearer token required on every Streamable HTTP request (default: read $GORTEX_DAEMON_HTTP_TOKEN; empty allows unauthenticated localhost binds)")
 	daemonStartCmd.Flags().StringVar(&daemonHTTPCORSOrigin, "cors-origin", "*",
 		"allowed CORS origin for the HTTP surface (use '*' for any); applies to both /mcp and /v1 when --http-addr is set")
+	daemonStartCmd.Flags().StringSliceVar(&daemonHTTPConversationAllow, "conversation-host", nil,
+		"extra Host values (beyond loopback) the conversation-log inspector accepts without a token; repeatable")
 	daemonStartCmd.Flags().StringVar(&daemonBackend, "backend", "sqlite",
 		"storage backend: sqlite (default — pure-Go embedded SQL, persists to --backend-path so warm restarts skip re-indexing) | memory (in-process, no persistence — fastest per-op but pays the full cold-warmup cost on every restart)")
 	daemonStartCmd.Flags().StringVar(&daemonBackendPath, "backend-path", "",
@@ -132,7 +136,14 @@ func init() {
 // with GORTEX_DAEMON_CHILD=1 set, which the inner exec picks up and runs
 // the actual serve loop.
 func runDaemonStart(cmd *cobra.Command, _ []string) error {
-	if daemon.IsRunning() {
+	// An explicit start (user or supervisor) supersedes a prior `daemon stop` —
+	// clear the stay-down mark so autostart works again. The autostart-spawned
+	// child (GORTEX_DAEMON_CHILD=1) must NOT clear it: that would let an
+	// in-flight autostart erase a stop-intent the user wrote in the meantime.
+	if os.Getenv("GORTEX_DAEMON_CHILD") != "1" {
+		daemon.ClearStopIntent()
+	}
+	if isDaemonRunning() {
 		return fmt.Errorf("daemon already running (socket: %s)", daemon.SocketPath())
 	}
 	// IsRunning only probes the socket. A daemon that is mid-shutdown — or
@@ -344,6 +355,14 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 		// below; until then it has no source and /v1/events keepalives.
 		v1EventHub = hub.New()
 		v1.SetEventHub(v1EventHub)
+		// Conversation-log inspector. The /v1/conversations* routes read
+		// the opt-in sink's JSONL (raw LLM I/O), so they carry a
+		// route-scoped DNS-rebind guard that cooperates with the existing
+		// auth token: loopback / allowlisted hosts OR a valid token pass.
+		// The directory resolves through the same env helper the sink
+		// writer uses, so reader and writer always agree.
+		v1.SetConversationDir(conversationlog.DirFromEnv())
+		v1.SetConversationGuard(daemonHTTPConversationAllow, tokenFn)
 
 		srv.HTTPHandler = composeDaemonHTTPHandler(streamH, v1, tokenFn, daemonHTTPCORSOrigin)
 		srv.HTTPAddr = daemonHTTPAddr
@@ -433,13 +452,6 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 		stopSnapshotter = startPeriodicSnapshots(mg, state.multiIndexer, version, 10*time.Minute, controller.IsReady, logger)
 	}
 	defer stopSnapshotter()
-
-	// Periodic savings flush — 5 minute interval. Bounds on-crash data
-	// loss for the savings counters even when the call rate is too low
-	// to trip the every-N-observations flush. No-op when persistence
-	// isn't wired (e.g. cache dir unavailable).
-	stopSavingsFlush := state.mcpServer.StartPeriodicSavingsFlush(5 * time.Minute)
-	defer stopSavingsFlush()
 
 	// Periodic reconciliation — the "janitor". Walks each tracked repo
 	// and runs IncrementalReindex to evict files deleted offline and
@@ -747,6 +759,22 @@ func emitDaemonStartSummary(w io.Writer, pid int, elapsed time.Duration) {
 
 func runDaemonStop(cmd *cobra.Command, _ []string) error {
 	w := cmd.ErrOrStderr()
+	// Record the user's "stay down" intent so the autostart path (a live
+	// `gortex mcp` proxy relaunched by an editor) doesn't immediately respawn
+	// the daemon we're about to stop. A `daemon restart` re-clears it via the
+	// following start, so only a standalone stop is sticky.
+	if !daemonRestartActive {
+		if err := daemon.MarkStopIntent(); err != nil {
+			_, _ = fmt.Fprintf(w, "[gortex daemon] warning: could not record stop intent (%v); daemon may auto-respawn\n", err)
+		}
+		// If an OS supervisor (systemd --user / launchd) owns the daemon, stop
+		// it THROUGH the supervisor — a socket-level stop just kills the worker
+		// and the supervisor restarts it. `daemon restart` skips this and
+		// bounces via the supervisor instead.
+		if serviceActive() {
+			return serviceStop(w)
+		}
+	}
 	if !daemon.IsRunning() {
 		// The socket is gone, but a process may still be alive and holding
 		// the store lock — a daemon mid-shutdown, or one whose socket wedged.
@@ -890,6 +918,14 @@ func runDaemonRestart(cmd *cobra.Command, args []string) error {
 	defer func() { daemonRestartActive = false }()
 
 	emitDaemonRestartBanner(cmd.ErrOrStderr())
+
+	// When an OS supervisor owns the daemon, bounce it THROUGH the supervisor so
+	// the supervisor keeps ownership; a manual stop+start would orphan the new
+	// daemon from the unit (the unit reads inactive while a hand-started process
+	// holds the socket).
+	if serviceActive() {
+		return serviceRestart(cmd.ErrOrStderr())
+	}
 
 	// Stop is idempotent when not running and now blocks until the old
 	// process has fully exited — releasing the store's on-disk lock — before

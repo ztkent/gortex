@@ -17,6 +17,12 @@ type AgentAnswer struct {
 	// Complexity is the routed task-complexity class ("simple" /
 	// "complex"). Set only when llm.routing is enabled.
 	Complexity string `json:"complexity,omitempty"`
+	// Usage is the token accounting summed across the agent's steps.
+	// Zero when the active provider does not report usage.
+	Usage TokenUsage `json:"usage,omitempty"`
+	// Cost is the estimated USD cost of the run, derived from Usage and
+	// the provider's pricing. Zero when no usage or no price is known.
+	Cost float64 `json:"cost,omitempty"`
 }
 
 // TranscriptStep is one entry in the agent's per-call transcript.

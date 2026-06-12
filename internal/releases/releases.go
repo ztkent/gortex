@@ -25,10 +25,11 @@ package releases
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"fmt"
-	"os/exec"
 	"strings"
 
+	"github.com/zzet/gortex/internal/gitcmd"
 	"github.com/zzet/gortex/internal/graph"
 )
 
@@ -50,14 +51,13 @@ func ListTags(repoRoot string) []string {
 // release order. Pass the repo's default branch ("origin/main",
 // "main", …) when callers want that semantic.
 func ListTagsOnBranch(repoRoot, branch string) []string {
-	args := []string{"-C", repoRoot, "for-each-ref",
+	args := []string{"for-each-ref",
 		"--sort=creatordate", "--format=%(refname:short)"}
 	if strings.TrimSpace(branch) != "" {
 		args = append(args, "--merged="+branch)
 	}
 	args = append(args, "refs/tags/")
-	cmd := exec.Command("git", args...)
-	out, err := cmd.Output()
+	out, err := gitcmd.Run(context.Background(), repoRoot, args...)
 	if err != nil {
 		return nil
 	}
@@ -77,8 +77,7 @@ func ListTagsOnBranch(repoRoot, branch string) []string {
 // OS) and are repo-relative. Errors return nil so the enrichment
 // loop can continue past tags with broken refs.
 func FilesAtTag(repoRoot, tag string) []string {
-	cmd := exec.Command("git", "-C", repoRoot, "ls-tree", "-r", "--name-only", tag)
-	out, err := cmd.Output()
+	out, err := gitcmd.Run(context.Background(), repoRoot, "ls-tree", "-r", "--name-only", tag)
 	if err != nil {
 		return nil
 	}
